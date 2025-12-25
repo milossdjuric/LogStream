@@ -3,49 +3,50 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/milossdjuric/logstream/internal/config"
 	"github.com/milossdjuric/logstream/internal/protocol"
-)
-
-const (
-	BroadcastPort        = 8888
-	BrokerMulticastGroup = "239.0.0.1:9999"
 )
 
 type BrokerNode struct {
 	id                string
-	address           string
-	isLeader          bool
+	config            *config.Config
 	multicastReceiver *protocol.MulticastConnection
 	multicastSender   *protocol.MulticastConnection
 	broadcastListener *protocol.BroadcastConnection
 }
 
-func NewBrokerNode(address string, isLeader bool) *BrokerNode {
+func NewBrokerNode(cfg *config.Config) *BrokerNode {
 	return &BrokerNode{
-		id:       protocol.GenerateNodeID(address),
-		address:  address,
-		isLeader: isLeader,
+		id:     protocol.GenerateNodeID(cfg.NodeAddress),
+		config: cfg,
 	}
 }
 
 func (b *BrokerNode) Start() error {
-	receiver, err := protocol.JoinMulticastGroup(BrokerMulticastGroup, "0.0.0.0")
+	receiver, err := protocol.JoinMulticastGroup(
+		b.config.MulticastGroup,
+		b.config.NetworkInterface,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to join multicast: %w", err)
 	}
 	b.multicastReceiver = receiver
 
-	sender, err := protocol.CreateMulticastSender("0.0.0.0:0")
+	senderAddr := fmt.Sprintf("%s:0", b.config.NetworkInterface)
+	sender, err := protocol.CreateMulticastSender(senderAddr)
 	if err != nil {
 		b.multicastReceiver.Close()
 		return fmt.Errorf("failed to create multicast sender: %w", err)
 	}
 	b.multicastSender = sender
 
-	if b.isLeader {
-		listener, err := protocol.CreateBroadcastListener(BroadcastPort)
+	if b.config.IsLeader {
+		listener, err := protocol.CreateBroadcastListener(b.config.BroadcastPort)
 		if err != nil {
 			b.multicastReceiver.Close()
 			b.multicastSender.Close()
@@ -57,7 +58,8 @@ func (b *BrokerNode) Start() error {
 
 	go b.listenMulticast()
 
-	fmt.Printf("[Broker %s] Started (leader=%v)\n", b.id, b.isLeader)
+	fmt.Printf("[Broker %s] Started at %s (leader=%v)\n",
+		b.id[:8], b.config.NodeAddress, b.config.IsLeader)
 	return nil
 }
 
@@ -65,29 +67,28 @@ func (b *BrokerNode) listenMulticast() {
 	for {
 		msg, sender, err := b.multicastReceiver.ReadMessage()
 		if err != nil {
-			log.Printf("[Broker %s] Multicast read error: %v\n", b.id, err)
+			log.Printf("[Broker %s] Multicast read error: %v\n", b.id[:8], err)
 			continue
 		}
 
 		switch m := msg.(type) {
 		case *protocol.HeartbeatMsg:
-			fmt.Printf("[Broker %s] ← HEARTBEAT from %s\n",
-				b.id, protocol.GetSenderID(msg))
+			fmt.Printf("[%s] ← HEARTBEAT from %s (sender: %s)\n",
+				b.id[:8], protocol.GetSenderID(msg)[:8], sender)
 
 		case *protocol.ReplicateMsg:
-			fmt.Printf("[Broker %s] ← REPLICATE seq=%d type=%s from %s\n",
-				b.id, protocol.GetSequenceNum(msg), m.UpdateType, protocol.GetSenderID(msg))
+			fmt.Printf("[%s] ← REPLICATE seq=%d type=%s from %s (sender: %s)\n",
+				b.id[:8], protocol.GetSequenceNum(msg), m.UpdateType,
+				protocol.GetSenderID(msg)[:8], sender)
 
 		case *protocol.ElectionMsg:
-			fmt.Printf("[Broker %s] ← ELECTION candidate=%s phase=%v from %s\n",
-				b.id, m.CandidateId, m.Phase, protocol.GetSenderID(msg))
+			fmt.Printf("[%s] ← ELECTION candidate=%s phase=%v\n",
+				b.id[:8], m.CandidateId[:8], m.Phase)
 
 		case *protocol.NackMsg:
-			fmt.Printf("[Broker %s] ← NACK seq=%d-%d from %s\n",
-				b.id, m.FromSeq, m.ToSeq, protocol.GetSenderID(msg))
+			fmt.Printf("[%s] ← NACK seq=%d-%d from %s\n",
+				b.id[:8], m.FromSeq, m.ToSeq, protocol.GetSenderID(msg)[:8])
 		}
-
-		_ = sender
 	}
 }
 
@@ -95,33 +96,33 @@ func (b *BrokerNode) listenForBroadcastJoins() {
 	for {
 		msg, sender, err := b.broadcastListener.ReceiveMessage()
 		if err != nil {
-			log.Printf("[Leader %s] Broadcast read error: %v\n", b.id, err)
+			log.Printf("[Leader %s] Broadcast read error: %v\n", b.id[:8], err)
 			continue
 		}
 
 		if joinMsg, ok := msg.(*protocol.JoinMsg); ok {
 			fmt.Printf("[Leader %s] ← JOIN from %s (addr=%s)\n",
-				b.id, protocol.GetSenderID(msg), joinMsg.Address)
+				b.id[:8], protocol.GetSenderID(msg)[:8], joinMsg.Address)
 
 			responseAddr := fmt.Sprintf("%s", sender)
 			err := b.broadcastListener.SendJoinResponse(
 				b.id,
-				b.address,
-				BrokerMulticastGroup,
-				[]string{b.address},
+				b.config.NodeAddress,
+				b.config.MulticastGroup,
+				[]string{b.config.NodeAddress},
 				responseAddr,
 			)
 			if err != nil {
-				log.Printf("[Leader %s] Failed to send JOIN_RESPONSE: %v\n", b.id, err)
+				log.Printf("[Leader %s] Failed to send JOIN_RESPONSE: %v\n", b.id[:8], err)
 			} else {
-				fmt.Printf("[Leader %s] → JOIN_RESPONSE to %s\n", b.id, sender)
+				fmt.Printf("[Leader %s] → JOIN_RESPONSE to %s\n", b.id[:8], sender)
 			}
 		}
 	}
 }
 
 func (b *BrokerNode) SendHeartbeat() error {
-	if !b.isLeader {
+	if !b.config.IsLeader {
 		return fmt.Errorf("only leader can send heartbeat")
 	}
 
@@ -129,17 +130,17 @@ func (b *BrokerNode) SendHeartbeat() error {
 		b.multicastSender,
 		b.id,
 		protocol.NodeType_LEADER,
-		BrokerMulticastGroup,
+		b.config.MulticastGroup,
 	)
 
 	if err == nil {
-		fmt.Printf("[Leader %s] → HEARTBEAT to multicast group\n", b.id)
+		fmt.Printf("[Leader %s] → HEARTBEAT\n", b.id[:8])
 	}
 	return err
 }
 
 func (b *BrokerNode) ReplicateState(updateType string, data []byte, seqNum int64) error {
-	if !b.isLeader {
+	if !b.config.IsLeader {
 		return fmt.Errorf("only leader can replicate state")
 	}
 
@@ -149,62 +150,75 @@ func (b *BrokerNode) ReplicateState(updateType string, data []byte, seqNum int64
 		data,
 		updateType,
 		seqNum,
-		BrokerMulticastGroup,
+		b.config.MulticastGroup,
 	)
 
 	if err == nil {
-		fmt.Printf("[Leader %s] → REPLICATE seq=%d type=%s\n", b.id, seqNum, updateType)
+		fmt.Printf("[Leader %s] → REPLICATE seq=%d type=%s\n", b.id[:8], seqNum, updateType)
 	}
 	return err
 }
 
-func JoinExistingCluster(address string) error {
-	nodeID := protocol.GenerateNodeID(address)
+func (b *BrokerNode) Shutdown() {
+	fmt.Printf("\n[Broker %s] Shutting down...\n", b.id[:8])
 
-	fmt.Printf("[New Node %s] Broadcasting JOIN...\n", nodeID)
-
-	response, err := protocol.DiscoverClusterWithRetry(
-		nodeID,
-		protocol.NodeType_BROKER,
-		address,
-		nil,
-	)
-
-	if err != nil {
-		return fmt.Errorf("failed to discover cluster: %w", err)
+	if b.multicastReceiver != nil {
+		b.multicastReceiver.Close()
 	}
-
-	fmt.Printf("[New Node %s] ← JOIN_RESPONSE from leader\n", nodeID)
-	fmt.Printf("  Leader: %s\n", response.LeaderAddress)
-	fmt.Printf("  Multicast Group: %s\n", response.MulticastGroup)
-	fmt.Printf("  Brokers: %v\n", response.BrokerAddresses)
-
-	return nil
+	if b.multicastSender != nil {
+		b.multicastSender.Close()
+	}
+	if b.broadcastListener != nil {
+		b.broadcastListener.Close()
+	}
 }
 
 func main() {
-	leader := NewBrokerNode("192.168.1.10:8001", true)
-	if err := leader.Start(); err != nil {
-		log.Fatal(err)
+	if os.Getenv("NODE_ADDRESS") == "" {
+		protocol.ShowNetworkInfo()
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Fatalf("Configuration error: %v\n", err)
+	}
 
-	broker := NewBrokerNode("192.168.1.11:8002", false)
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v\n", err)
+	}
+
+	cfg.Print()
+
+	broker := NewBrokerNode(cfg)
 	if err := broker.Start(); err != nil {
 		log.Fatal(err)
 	}
 
-	time.Sleep(500 * time.Millisecond)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	leader.SendHeartbeat()
+	if cfg.IsLeader {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		seqNum := int64(1)
 
-	time.Sleep(500 * time.Millisecond)
+		for {
+			select {
+			case <-ticker.C:
+				broker.SendHeartbeat()
 
-	stateData := []byte(`{"consumers":["c1","c2"]}`)
-	leader.ReplicateState("REGISTRY", stateData, 1)
+				stateData := []byte(fmt.Sprintf(`{"seq":%d,"time":"%s"}`,
+					seqNum, time.Now().Format(time.RFC3339)))
+				broker.ReplicateState("REGISTRY", stateData, seqNum)
+				seqNum++
 
-	time.Sleep(500 * time.Millisecond)
-
-	time.Sleep(5 * time.Second)
+			case <-sigChan:
+				broker.Shutdown()
+				return
+			}
+		}
+	} else {
+		<-sigChan
+		broker.Shutdown()
+	}
 }
