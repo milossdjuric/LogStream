@@ -108,3 +108,18 @@ message NackMessage {
   int64 from_seq = 3;
   int64 to_seq = 4;
 }
+
+
+// BrokerInfo represents a single broker's node state
+message BrokerInfo{
+  string id = 1;
+  string address = 2;
+  bool is_leader = 3;
+  int64 last_heartbeat = 4;
+}
+
+// Snapshot of the current registry state
+message RegistrySnapshot {
+  map<string, BrokerInfo> brokers = 1;
+  int64 seq_num = 2;
+}

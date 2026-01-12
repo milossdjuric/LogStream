@@ -65,7 +65,7 @@ func main() {
 		fmt.Printf("  IPv4:        %s\n", ipv4Addr)
 
 		if isWiFiOrEthernet(iface.Name) {
-			fmt.Printf("  ✓ Recommended for LogStream\n")
+			fmt.Printf("   Recommended for LogStream\n")
 			recommended = append(recommended, ipv4Addr)
 		}
 	}
