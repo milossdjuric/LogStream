@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  leader:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: logstream-mp-leader
+    environment:
+      - IS_LEADER=true
+      - NODE_ADDRESS=172.28.0.10:8001
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-mp-net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "8001:8001"
+
+  producer1:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.producer
+    container_name: logstream-mp-producer1
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      - logstream-mp-net
+    depends_on:
+      - leader
+    stdin_open: true
+    tty: true
+
+  producer2:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.producer
+    container_name: logstream-mp-producer2
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      - logstream-mp-net
+    depends_on:
+      - leader
+    stdin_open: true
+    tty: true
+
+  producer3:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.producer
+    container_name: logstream-mp-producer3
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      - logstream-mp-net
+    depends_on:
+      - leader
+    stdin_open: true
+    tty: true
+
+  consumer:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.consumer
+    container_name: logstream-mp-consumer
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      - logstream-mp-net
+    depends_on:
+      - leader
+
+networks:
+  logstream-mp-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
