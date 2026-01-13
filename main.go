@@ -21,7 +21,7 @@ type BrokerNode struct {
 	multicastReceiver *protocol.MulticastConnection
 	multicastSender   *protocol.MulticastConnection
 	broadcastListener *protocol.BroadcastConnection
-	log               *storage.Log
+	log               *storage.MemoryLog
 }
 
 func NewBrokerNode(address string, isLeader bool) *BrokerNode {
@@ -59,12 +59,8 @@ func (b *BrokerNode) Start() error {
 
 	go b.listenMulticast()
 
-	// initialize persistent log for this broker node
-	logDir := "./logs"
-	l, err := storage.NewLog(logDir, 0)
-	if err != nil {
-		return fmt.Errorf("failed to create storage log: %w", err)
-	}
+	// initialize in-memory log for this broker node
+	l := storage.NewMemoryLog()
 	b.log = l
 
 	fmt.Printf("[Broker %s] Started (leader=%v)\n", b.id, b.isLeader)
@@ -95,6 +91,18 @@ func (b *BrokerNode) listenMulticast() {
 		case *protocol.NackMsg:
 			fmt.Printf("[Broker %s] ← NACK seq=%d-%d from %s\n",
 				b.id, m.FromSeq, m.ToSeq, protocol.GetSenderID(msg))
+
+		case *protocol.DataMsg:
+			fmt.Printf("[Broker %s] ← DATA topic=%s from %s payload=%s\n",
+				b.id, m.Topic, protocol.GetSenderID(msg), string(m.Data))
+			// Persist to local log
+			if b.log != nil {
+				if off, err := b.log.Append(m.Data); err == nil {
+					fmt.Printf("[Broker %s] persisted data at offset=%d\n", b.id, off)
+				} else {
+					fmt.Printf("[Broker %s] failed to persist data: %v\n", b.id, err)
+				}
+			}
 		}
 
 		_ = sender

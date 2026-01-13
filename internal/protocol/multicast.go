@@ -6,7 +6,6 @@ import (
 	"syscall"
 
 	"golang.org/x/net/ipv4"
-	"golang.org/x/sys/unix"
 )
 
 // MulticastConnection wraps a UDP connection for multicast communication
@@ -41,13 +40,8 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				// SO_REUSEADDR: Allows reusing addresses in TIME_WAIT state
-				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-				if opErr != nil {
-					return
-				}
-
-				// SO_REUSEPORT: Allows multiple processes to bind to the same port
-				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				// On Windows, SO_REUSEADDR also allows binding to the same port  (Pedro: I added windows support)
+				opErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 			})
 			if err != nil {
 				return err
