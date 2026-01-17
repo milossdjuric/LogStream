@@ -1,0 +1,24 @@
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Build producer from cmd/producer/main.go
+RUN go build -o /producer cmd/producer/main.go
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+COPY --from=builder /producer .
+
+ENV LEADER_ADDRESS="localhost:8001"
+ENV TOPIC="test-logs"
+
+CMD ["./producer"]

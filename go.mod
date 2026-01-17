@@ -1,5 +1,6 @@
 module github.com/milossdjuric/logstream
 
+
 go 1.25.4
 
 require (

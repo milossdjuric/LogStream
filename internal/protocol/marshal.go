@@ -35,6 +35,7 @@ func WriteMessage(conn net.Conn, msg Message) error {
 
 // Send a UDP message to specified address
 func WriteUDPMessage(conn *net.UDPConn, msg Message, addr *net.UDPAddr) error {
+
 	msgBytes, err := msg.Marshal()
 	if err != nil {
 		return fmt.Errorf("failed to marshal UDP message: %w", err)
