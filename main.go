@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/milossdjuric/logstream/internal/protocol"
+	"github.com/milossdjuric/logstream/internal/storage"
 )
 
 const (
@@ -20,6 +21,7 @@ type BrokerNode struct {
 	multicastReceiver *protocol.MulticastConnection
 	multicastSender   *protocol.MulticastConnection
 	broadcastListener *protocol.BroadcastConnection
+	log               *storage.Log
 }
 
 func NewBrokerNode(address string, isLeader bool) *BrokerNode {
@@ -56,6 +58,14 @@ func (b *BrokerNode) Start() error {
 	}
 
 	go b.listenMulticast()
+
+	// initialize persistent log for this broker node
+	logDir := "./logs"
+	l, err := storage.NewLog(logDir, 0)
+	if err != nil {
+		return fmt.Errorf("failed to create storage log: %w", err)
+	}
+	b.log = l
 
 	fmt.Printf("[Broker %s] Started (leader=%v)\n", b.id, b.isLeader)
 	return nil
@@ -155,6 +165,14 @@ func (b *BrokerNode) ReplicateState(updateType string, data []byte, seqNum int64
 	if err == nil {
 		fmt.Printf("[Leader %s] → REPLICATE seq=%d type=%s\n", b.id, seqNum, updateType)
 	}
+	// persist the replicated data to local log as well
+	if b.log != nil {
+		if off, err2 := b.log.Append(data); err2 == nil {
+			fmt.Printf("[Leader %s] persisted replicate at offset=%d\n", b.id, off)
+		} else {
+			fmt.Printf("[Leader %s] failed to persist replicate: %v\n", b.id, err2)
+		}
+	}
 	return err
 }
 
@@ -207,4 +225,11 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	time.Sleep(5 * time.Second)
+	// clean up storage logs
+	if leader.log != nil {
+		leader.log.Close()
+	}
+	if broker.log != nil {
+		broker.log.Close()
+	}
 }
