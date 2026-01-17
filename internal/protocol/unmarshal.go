@@ -40,33 +40,8 @@ func ReadUDPMessage(conn *net.UDPConn) (Message, *net.UDPAddr, error) {
 		return nil, nil, fmt.Errorf("failed to read UDP message: %w", err)
 	}
 
-	// Validate protobuf message
-	if n < 2 || buffer[0] != 0x0a {
-		// Silently ignore, this is network noise (mDNS, SSDP, etc.)
-		return nil, addr, fmt.Errorf("not a protobuf message")
-	}
-
-	fmt.Printf("\n[UDP-Read] ← Received %d bytes from %s\n", n, addr)
-
-	// Print first 64 bytes in hex
-	debugLen := 64
-	if n < debugLen {
-		debugLen = n
-	}
-	fmt.Printf("[UDP-Read]   First %d bytes: %x\n", debugLen, buffer[:debugLen])
-
 	// Unmarshal the datagram
 	msg, err := unmarshalMessage(buffer[:n])
-	if err != nil {
-		fmt.Printf("[UDP-Read]  UNMARSHAL FAILED: %v\n", err)
-		return nil, addr, err
-	}
-
-	msgType := msg.GetHeader().Type
-	senderID := msg.GetHeader().SenderId
-	seqNum := msg.GetHeader().SequenceNum
-	fmt.Printf("[UDP-Read]  Unmarshaled %s from %s seq=%d\n\n", msgType, senderID[:8], seqNum)
-
 	return msg, addr, err
 }
 
@@ -89,41 +64,28 @@ var messageRegistry = map[MessageType]MessageFactory{
 
 // It first peeks at the header to determine the message type, then unmarshals accordingly to message type
 func unmarshalMessage(data []byte) (Message, error) {
-	fmt.Printf("[Unmarshal] Processing %d bytes\n", len(data))
-
-	// Use HeartbeatMessage for header peeking
-	peek := &HeartbeatMessage{}
-	if err := proto.Unmarshal(data, peek); err != nil {
-		fmt.Printf("[Unmarshal] HEADER PARSE FAILED: %v\n", err)
+	// Unmarshal header
+	temp := &ProduceMessage{}
+	if err := proto.Unmarshal(data, temp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal header: %w", err)
 	}
 
 	// If no header, error
-	if peek.Header == nil {
-		fmt.Printf("[Unmarshal] NO HEADER found in message\n")
+	if temp.Header == nil {
 		return nil, fmt.Errorf("message has no header")
 	}
 
-	fmt.Printf("[Unmarshal] Header parsed: type=%s sender=%s seq=%d\n",
-		peek.Header.Type, peek.Header.SenderId[:8], peek.Header.SequenceNum)
-
 	// Lookup message type in registry based on its type in header
-	factory, ok := messageRegistry[peek.Header.Type]
+	factory, ok := messageRegistry[temp.Header.Type]
 	if !ok {
-		fmt.Printf("[Unmarshal] UNKNOWN message type: %v\n", peek.Header.Type)
-		return nil, fmt.Errorf("unknown message type: %v", peek.Header.Type)
+		return nil, fmt.Errorf("unknown message type: %v", temp.Header.Type)
 	}
 
 	// Create new protobuf message instance
 	protoMsg := factory()
-	fmt.Printf("[Unmarshal] Attempting full unmarshal as %T\n", protoMsg)
-
 	if err := proto.Unmarshal(data, protoMsg); err != nil {
-		fmt.Printf("[Unmarshal] FULL MESSAGE PARSE FAILED: %v\n", err)
 		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
 	}
-
-	fmt.Printf("[Unmarshal] Full message unmarshaled successfully\n")
 
 	// Wrap the protobuf message in its Go wrapper type
 	return wrapProtoMessage(protoMsg)
@@ -154,7 +116,6 @@ func wrapProtoMessage(pm proto.Message) (Message, error) {
 		return &NackMsg{NackMessage: m}, nil
 	// Unknown type, return error
 	default:
-		fmt.Printf("[Unmarshal] UNKNOWN wrapper type: %T\n", pm)
 		return nil, fmt.Errorf("unknown proto message type: %T", pm)
 	}
 }
