@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/milossdjuric/logstream/internal/analytics"
 	"github.com/milossdjuric/logstream/internal/protocol"
 	"github.com/milossdjuric/logstream/internal/storage"
 )
@@ -59,9 +60,20 @@ func (b *BrokerNode) Start() error {
 
 	go b.listenMulticast()
 
-	// initialize in-memory log for this broker node
 	l := storage.NewMemoryLog()
 	b.log = l
+
+	// Start analytics reporter
+	agg := analytics.NewLogAggregator(l)
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		for range ticker.C {
+			total := agg.TotalCount()
+			// Rate for the last 5 seconds (to smooth it out slightly)
+			rate := agg.GetRate(5 * time.Second)
+			fmt.Printf("\n[Analytics %s] Total Logs: %d | Rate (last 5s): %.2f msg/s\n", b.id, total, rate)
+		}
+	}()
 
 	fmt.Printf("[Broker %s] Started (leader=%v)\n", b.id, b.isLeader)
 	return nil
@@ -97,8 +109,14 @@ func (b *BrokerNode) listenMulticast() {
 				b.id, m.Topic, protocol.GetSenderID(msg), string(m.Data))
 			// Persist to local log
 			if b.log != nil {
-				if off, err := b.log.Append(m.Data); err == nil {
-					fmt.Printf("[Broker %s] persisted data at offset=%d\n", b.id, off)
+				// Use the timestamp from the message header
+				ts := protocol.GetTimestamp(msg)
+				encoded := storage.EncodeRecord(ts, m.Data)
+				if off, err := b.log.Append(encoded); err == nil {
+					// Verify by decoding immediately for display
+					t := time.Unix(0, ts)
+					fmt.Printf("[Broker %s] persisted data at offset=%d | Timestamp: %s\n",
+						b.id, off, t.Format(time.RFC3339))
 				} else {
 					fmt.Printf("[Broker %s] failed to persist data: %v\n", b.id, err)
 				}
@@ -175,8 +193,12 @@ func (b *BrokerNode) ReplicateState(updateType string, data []byte, seqNum int64
 	}
 	// persist the replicated data to local log as well
 	if b.log != nil {
-		if off, err2 := b.log.Append(data); err2 == nil {
-			fmt.Printf("[Leader %s] persisted replicate at offset=%d\n", b.id, off)
+		ts := time.Now().UnixNano()
+		encoded := storage.EncodeRecord(ts, data)
+		if off, err2 := b.log.Append(encoded); err2 == nil {
+			t := time.Unix(0, ts)
+			fmt.Printf("[Leader %s] persisted replicate at offset=%d | Timestamp: %s\n",
+				b.id, off, t.Format(time.RFC3339))
 		} else {
 			fmt.Printf("[Leader %s] failed to persist replicate: %v\n", b.id, err2)
 		}

@@ -62,3 +62,8 @@ func (m *MemoryLog) HighestOffset() (uint64, error) {
 	}
 	return uint64(len(m.records) - 1), nil
 }
+
+// LowestOffset returns the lowest offset (always 0 for memory log).
+func (m *MemoryLog) LowestOffset() uint64 {
+	return 0
+}
