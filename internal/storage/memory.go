@@ -3,13 +3,15 @@ package storage
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 // MemoryLog implements a simple in-memory log.
 // It stores records in a slice of byte slices.
 type MemoryLog struct {
-	records [][]byte
-	mu      sync.RWMutex
+	records    [][]byte
+	baseOffset uint64
+	mu         sync.RWMutex
 }
 
 // NewMemoryLog creates a new in-memory log.
@@ -24,7 +26,7 @@ func (m *MemoryLog) Append(record []byte) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	offset := uint64(len(m.records))
+	offset := m.baseOffset + uint64(len(m.records))
 	// Copy the record to ensure safety
 	recCopy := make([]byte, len(record))
 	copy(recCopy, record)
@@ -38,11 +40,11 @@ func (m *MemoryLog) Read(offset uint64) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if offset >= uint64(len(m.records)) {
+	if offset < m.baseOffset || offset >= m.baseOffset+uint64(len(m.records)) {
 		return nil, errors.New("offset out of range")
 	}
 
-	record := m.records[offset]
+	record := m.records[offset-m.baseOffset]
 	// Return a copy to prevent modification of internal state
 	ret := make([]byte, len(record))
 	copy(ret, record)
@@ -60,10 +62,44 @@ func (m *MemoryLog) HighestOffset() (uint64, error) {
 	if len(m.records) == 0 {
 		return 0, errors.New("empty log")
 	}
-	return uint64(len(m.records) - 1), nil
+	return m.baseOffset + uint64(len(m.records)-1), nil
 }
 
 // LowestOffset returns the lowest offset (always 0 for memory log).
 func (m *MemoryLog) LowestOffset() uint64 {
-	return 0
+	return m.baseOffset
+}
+
+// CleanupOldLogs removes records older than the retention duration.
+func (m *MemoryLog) CleanupOldLogs(retention time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.records) == 0 {
+		return nil
+	}
+
+	cutoffTime := time.Now().Add(-retention)
+	var removeCount int
+
+	for _, record := range m.records {
+		ts, _, err := DecodeRecord(record)
+		if err != nil {
+			// If we can't decode, we probably shouldn't blindly delete, but
+			// in a strict system we might. Let's assume errors mean we stop checking or skip.
+			// Ideally corruption is handled elsewhere.
+			break
+		}
+		t := time.Unix(0, ts)
+		if t.After(cutoffTime) {
+			break
+		}
+		removeCount++
+	}
+
+	if removeCount > 0 {
+		m.records = m.records[removeCount:]
+		m.baseOffset += uint64(removeCount)
+	}
+	return nil
 }

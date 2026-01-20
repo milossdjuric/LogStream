@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/milossdjuric/logstream/internal/analytics"
+	"github.com/milossdjuric/logstream/internal/failure"
 	"github.com/milossdjuric/logstream/internal/protocol"
 	"github.com/milossdjuric/logstream/internal/storage"
 )
@@ -23,6 +24,7 @@ type BrokerNode struct {
 	multicastSender   *protocol.MulticastConnection
 	broadcastListener *protocol.BroadcastConnection
 	log               *storage.MemoryLog
+	failureDetector   *failure.AccrualFailureDetector
 }
 
 func NewBrokerNode(address string, isLeader bool) *BrokerNode {
@@ -62,6 +64,10 @@ func (b *BrokerNode) Start() error {
 
 	l := storage.NewMemoryLog()
 	b.log = l
+
+	// Initialize Failure Detector
+	b.failureDetector = failure.NewAccrualFailureDetector(1000)
+	go b.monitorFailures()
 
 	// Start analytics reporter
 	agg := analytics.NewLogAggregator(l)
@@ -204,6 +210,25 @@ func (b *BrokerNode) ReplicateState(updateType string, data []byte, seqNum int64
 		}
 	}
 	return err
+}
+
+func (b *BrokerNode) monitorFailures() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	// Track reported dead nodes to avoid spamming logs (simple set)
+	reportedDead := make(map[string]bool)
+
+	for range ticker.C {
+		// Threshold Phi=8 (10^-8 probability), very high confidence
+		suspects := b.failureDetector.GetSuspects(8.0)
+
+		for _, nodeID := range suspects {
+			if !reportedDead[nodeID] {
+				phi := b.failureDetector.Status(nodeID)
+				fmt.Printf("[Detector] Node %s seems DOWN (Phi=%.2f)\n", nodeID, phi)
+				reportedDead[nodeID] = true
+			}
+		}
+	}
 }
 
 func JoinExistingCluster(address string) error {
