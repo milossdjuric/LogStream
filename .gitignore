@@ -1,3 +1,9 @@
 logstream
 producer
 consumer
+
+# Test logs
+test-logs/
+
+# Vagrant local state (contains private keys and machine-specific data)
+.vagrant/

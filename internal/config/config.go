@@ -10,7 +10,6 @@ import (
 
 type Config struct {
 	NodeAddress      string
-	IsLeader         bool // TODO: Replace with leader election algorithm
 	MulticastGroup   string
 	BroadcastPort    int
 	NetworkInterface string
@@ -19,7 +18,6 @@ type Config struct {
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
 		NodeAddress:    getEnv("NODE_ADDRESS", ""),
-		IsLeader:       getEnv("IS_LEADER", "false") == "true",
 		MulticastGroup: getEnv("MULTICAST_GROUP", "239.0.0.1:9999"),
 		BroadcastPort:  getEnvInt("BROADCAST_PORT", 8888),
 	}
@@ -30,11 +28,8 @@ func LoadConfig() (*Config, error) {
 			return nil, fmt.Errorf("NODE_ADDRESS not set and auto-detection failed: %w", err)
 		}
 
+		// Default port for all nodes (leader determined by election/discovery)
 		defaultPort := "8001"
-		if !cfg.IsLeader {
-			defaultPort = "8002"
-		}
-
 		cfg.NodeAddress = fmt.Sprintf("%s:%s", autoIP, defaultPort)
 		fmt.Printf("[Config] Auto-detected address: %s\n", cfg.NodeAddress)
 	}
@@ -139,7 +134,6 @@ func (c *Config) Validate() error {
 func (c *Config) Print() {
 	fmt.Println("=== LogStream Configuration ===")
 	fmt.Printf("Node Address:      %s\n", c.NodeAddress)
-	fmt.Printf("Is Leader:         %v\n", c.IsLeader)
 	fmt.Printf("Multicast Group:   %s\n", c.MulticastGroup)
 	fmt.Printf("Broadcast Port:    %d\n", c.BroadcastPort)
 	fmt.Printf("Network Interface: %s\n", c.NetworkInterface)

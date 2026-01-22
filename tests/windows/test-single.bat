@@ -1,6 +1,6 @@
 @echo off
 REM Single Leader Test - Enhanced
-REM Usage: test-single-enhanced.bat [local|docker]
+REM Usage: test-single-enhanced.bat [local|docker|vagrant]
 
 setlocal enabledelayedexpansion
 
@@ -97,8 +97,39 @@ if "%MODE%"=="local" (
     call :log "Following logs (Ctrl+C to stop)..."
     docker compose -f single.yaml logs -f
     
+) else if "%MODE%"=="vagrant" (
+    cd /d "%PROJECT_ROOT%\deploy\vagrant"
+    
+    call :log "Checking Vagrant VMs..."
+    vagrant status leader 2>nul | findstr /C:"running" >nul
+    if errorlevel 1 (
+        call :error_msg "Leader VM not running! Run: vagrant up leader"
+        exit /b 1
+    )
+    
+    call :log "Starting leader on VM..."
+    vagrant ssh leader -c "cd /vagrant/logstream && NODE_ADDRESS=192.168.56.10:8001 IS_LEADER=true MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 nohup ./logstream > /tmp/logstream.log 2>&1 &"
+    timeout /t 5 /nobreak >nul
+    
+    echo.
+    call :log "Initial state - Leader only (seq=1)"
+    echo %TEST_PREFIX% -----------------------------------
+    vagrant ssh leader -c "tail -20 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"seq=" /C:"Registered" /C:"REPLICATE"
+    
+    echo.
+    call :log "Heartbeat phase (seq=0 is correct for heartbeats)"
+    echo %TEST_PREFIX% --------------------------------------------------
+    timeout /t 5 /nobreak >nul
+    vagrant ssh leader -c "tail -10 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"HEARTBEAT" /C:"seq="
+    
+    echo.
+    call :success "Single leader test complete (Vagrant)"
+    
+    REM Cleanup
+    vagrant ssh leader -c "pkill -f logstream" 2>nul
+    
 ) else (
-    call :error_msg "Invalid mode: %MODE% (use 'local' or 'docker')"
+    call :error_msg "Invalid mode: %MODE% (use 'local', 'docker', or 'vagrant')"
     exit /b 1
 )
 

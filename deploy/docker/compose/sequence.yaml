@@ -1,52 +1,52 @@
 services:
   leader:
-    build: ../..
-    container_name: logstream-seq-leader
+    build: ../../..
     environment:
       - NODE_ADDRESS=172.26.0.10:8001
-      - IS_LEADER=true
       - MULTICAST_GROUP=239.0.0.1:9999
       - BROADCAST_PORT=8888
     networks:
-      logstream-seq-net:
+      logstream-net:
         ipv4_address: 172.26.0.10
     cap_add:
       - NET_ADMIN
+    labels:
+      - "logstream.test=sequence"
 
   broker1:
-    build: ../..
-    container_name: logstream-seq-broker1
+    build: ../../..
     environment:
       - NODE_ADDRESS=172.26.0.20:8002
-      - IS_LEADER=false
       - MULTICAST_GROUP=239.0.0.1:9999
       - BROADCAST_PORT=8888
     networks:
-      logstream-seq-net:
+      logstream-net:
         ipv4_address: 172.26.0.20
     cap_add:
       - NET_ADMIN
     depends_on:
       - leader
+    labels:
+      - "logstream.test=sequence"
 
   broker2:
-    build: ../..
-    container_name: logstream-seq-broker2
+    build: ../../..
     environment:
       - NODE_ADDRESS=172.26.0.30:8003
-      - IS_LEADER=false
       - MULTICAST_GROUP=239.0.0.1:9999
       - BROADCAST_PORT=8888
     networks:
-      logstream-seq-net:
+      logstream-net:
         ipv4_address: 172.26.0.30
     cap_add:
       - NET_ADMIN
     depends_on:
       - leader
+    labels:
+      - "logstream.test=sequence"
 
 networks:
-  logstream-seq-net:
+  logstream-net:
     driver: bridge
     ipam:
       config:

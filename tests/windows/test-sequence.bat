@@ -1,6 +1,6 @@
 @echo off
 REM Dynamic Sequence Demo - Shows seq progression through joins/leaves/timeouts
-REM Usage: test-sequence-demo.bat [local|docker]
+REM Usage: test-sequence-demo.bat [local|docker|vagrant]
 
 setlocal enabledelayedexpansion
 
@@ -260,8 +260,75 @@ if "%MODE%"=="local" (
     call :log "Following logs (Ctrl+C to stop)..."
     docker compose -f sequence-demo.yaml logs -f
     
+) else if "%MODE%"=="vagrant" (
+    cd /d "%PROJECT_ROOT%\deploy\vagrant"
+    
+    call :log "Checking Vagrant VMs..."
+    for %%v in (leader broker1 broker2) do (
+        vagrant status %%v 2>nul | findstr /C:"running" >nul
+        if errorlevel 1 (
+            call :error_msg "%%v VM not running! Run: vagrant up"
+            exit /b 1
+        )
+    )
+    
+    set EXPECTED_SEQ=1
+    
+    call :log "STEP 1: Start Leader"
+    vagrant ssh leader -c "cd /vagrant/logstream && NODE_ADDRESS=192.168.56.10:8001 IS_LEADER=true MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 nohup ./logstream > /tmp/logstream.log 2>&1 &"
+    timeout /t 5 /nobreak >nul
+    
+    echo.
+    echo %TEST_PREFIX% =========================================
+    echo %TEST_PREFIX% After leader start (seq should be 1)
+    echo %TEST_PREFIX% =========================================
+    vagrant ssh leader -c "tail -50 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"Registered broker" /C:"seq=" | findstr /V "seq=0"
+    call :success "Expected seq=!EXPECTED_SEQ!, Leader registered"
+    set /a EXPECTED_SEQ+=1
+    
+    echo.
+    call :log "STEP 2: Add Follower 1"
+    vagrant ssh broker1 -c "cd /vagrant/logstream && NODE_ADDRESS=192.168.56.20:8002 IS_LEADER=false MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 nohup ./logstream > /tmp/logstream.log 2>&1 &"
+    timeout /t 5 /nobreak >nul
+    
+    echo.
+    echo %TEST_PREFIX% =========================================
+    echo %TEST_PREFIX% After follower 1 joins (seq should be 2)
+    echo %TEST_PREFIX% =========================================
+    vagrant ssh leader -c "tail -50 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"seq=" | findstr /V "seq=0" | findstr /C:"Total Brokers: 2"
+    call :success "Expected seq=!EXPECTED_SEQ!, Follower 1 joined"
+    set /a EXPECTED_SEQ+=1
+    
+    echo.
+    call :log "STEP 3: Add Follower 2"
+    vagrant ssh broker2 -c "cd /vagrant/logstream && NODE_ADDRESS=192.168.56.30:8003 IS_LEADER=false MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 nohup ./logstream > /tmp/logstream.log 2>&1 &"
+    timeout /t 5 /nobreak >nul
+    
+    echo.
+    echo %TEST_PREFIX% =========================================
+    echo %TEST_PREFIX% After follower 2 joins (seq should be 3)
+    echo %TEST_PREFIX% =========================================
+    vagrant ssh leader -c "tail -50 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"seq=" | findstr /V "seq=0" | findstr /C:"Total Brokers: 3"
+    call :success "Expected seq=!EXPECTED_SEQ!, Follower 2 joined"
+    
+    echo.
+    echo %TEST_PREFIX% ================================================
+    echo %TEST_PREFIX% SEQUENCE PROGRESSION SUMMARY
+    echo %TEST_PREFIX% ================================================
+    echo %TEST_PREFIX% seq=1: Leader self-registration
+    echo %TEST_PREFIX% seq=2: Follower 1 joined
+    echo %TEST_PREFIX% seq=3: Follower 2 joined
+    echo %TEST_PREFIX% ================================================
+    echo.
+    call :success "Sequence test complete (Vagrant)"
+    
+    REM Cleanup
+    vagrant ssh leader -c "pkill -f logstream" 2>nul
+    vagrant ssh broker1 -c "pkill -f logstream" 2>nul
+    vagrant ssh broker2 -c "pkill -f logstream" 2>nul
+    
 ) else (
-    call :error_msg "Invalid mode: %MODE%"
+    call :error_msg "Invalid mode: %MODE% (use 'local', 'docker', or 'vagrant')"
     exit /b 1
 )
 

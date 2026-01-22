@@ -32,11 +32,46 @@ func NewProducer(topic, leaderAddr string) *Producer {
 
 // Connect registers with the leader via TCP
 func (p *Producer) Connect() error {
-	// Connect to leader
-	conn, err := net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to connect to leader: %w", err)
+	const (
+		maxAttempts      = 10
+		initialDelay     = 500 * time.Millisecond
+		retryDelay       = 1 * time.Second
+		halfOpenDelay    = 2 * time.Second
+		failureThreshold = 5
+	)
+
+	failureCount := 0
+	var conn net.Conn
+	var err error
+
+	time.Sleep(initialDelay)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		conn, err = net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
+
+		if err != nil {
+			failureCount++
+			if failureCount >= failureThreshold {
+				time.Sleep(halfOpenDelay)
+				conn, err = net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
+				if err == nil {
+					break
+				}
+				failureCount++
+			}
+		} else {
+			break
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
 	}
+
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
+	}
+
 	defer conn.Close()
 
 	// Get local address for registration
@@ -120,7 +155,7 @@ func (p *Producer) sendHeartbeats() {
 			// Send heartbeat via TCP to leader
 			conn, err := net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
 			if err != nil {
-				log.Printf("[Producer %s] Failed to send heartbeat: %v\n", p.id[:8], err)
+				log.Printf("[Producer %s] Failed to send heartbeat: %v", p.id[:8], err)
 				continue
 			}
 
@@ -129,7 +164,7 @@ func (p *Producer) sendHeartbeats() {
 
 			// Send heartbeat message
 			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-				log.Printf("[Producer %s] Failed to write heartbeat: %v\n", p.id[:8], err)
+				log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
 			}
 
 			conn.Close()

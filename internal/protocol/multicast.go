@@ -1,9 +1,11 @@
 package protocol
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"syscall"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/sys/unix"
@@ -29,7 +31,7 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 		return nil, fmt.Errorf("address %s is not a multicast address", multicastAddr)
 	}
 
-	// Listen on the multicast port with SO_REUSEADDR and SO_REUSEPORT
+	// Listen on the multicast port with SO_REUSEADDR
 	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: addr.Port,
@@ -37,17 +39,14 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 
 	// Use ListenConfig to set socket options BEFORE binding
 	lc := &net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error { // syscall.RawConn here!
+		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				// SO_REUSEADDR: Allows reusing addresses in TIME_WAIT state
+				// NOTE: We do NOT use SO_REUSEPORT for multicast receivers
+				// because it causes the kernel to deliver each multicast packet
+				// to only ONE socket instead of ALL sockets (load balancing behavior)
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-				if opErr != nil {
-					return
-				}
-
-				// SO_REUSEPORT: Allows multiple processes to bind to the same port
-				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 			})
 			if err != nil {
 				return err
@@ -72,8 +71,10 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 	// Wrap in PacketConn for multicast operations
 	p4 := ipv4.NewPacketConn(conn)
 
-	// Get the network interface to use
+	// FIXED: Determine which interface to use for multicast
+	// Always try to find the specific interface for Vagrant VMs
 	var iface *net.Interface
+
 	if interfaceAddr != "" && interfaceAddr != "0.0.0.0" {
 		ifaces, err := net.Interfaces()
 		if err != nil {
@@ -82,10 +83,16 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 		}
 
 		for i := range ifaces {
+			// Skip loopback and down interfaces
+			if ifaces[i].Flags&net.FlagLoopback != 0 || ifaces[i].Flags&net.FlagUp == 0 {
+				continue
+			}
+
 			addrs, err := ifaces[i].Addrs()
 			if err != nil {
 				continue
 			}
+
 			for _, a := range addrs {
 				if ipnet, ok := a.(*net.IPNet); ok {
 					if ipnet.IP.String() == interfaceAddr {
@@ -97,6 +104,11 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 			if iface != nil {
 				break
 			}
+		}
+
+		// If we couldn't find the specific interface, warn but continue
+		if iface == nil {
+			fmt.Printf("[Multicast] WARNING: Could not find interface for %s, using default\n", interfaceAddr)
 		}
 	}
 
@@ -118,7 +130,13 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 		return nil, fmt.Errorf("failed to set read buffer: %w", err)
 	}
 
-	fmt.Printf("[Multicast] Joined group %s on interface %v (port reuse enabled)\n", addr.IP, iface)
+	// Log the interface being used
+	if iface == nil {
+		fmt.Printf("[Multicast] Joined group %s on default interface (no specific interface found)\n", addr.IP)
+	} else {
+		fmt.Printf("[Multicast] Joined group %s on interface %s (%s)\n",
+			addr.IP, iface.Name, interfaceAddr)
+	}
 
 	return &MulticastConnection{
 		conn:       conn,
@@ -155,10 +173,57 @@ func CreateMulticastSender(localAddr string) (*MulticastConnection, error) {
 		return nil, fmt.Errorf("failed to set multicast loopback: %w", err)
 	}
 
+	// Find the interface that has this local address and use it for multicast
+	var iface *net.Interface
+	if addr.IP != nil && !addr.IP.IsUnspecified() {
+		// Get the interface that has this IP address
+		ifaces, err := net.Interfaces()
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to get interfaces: %w", err)
+		}
+
+		for i := range ifaces {
+			// Skip loopback and down interfaces
+			if ifaces[i].Flags&net.FlagLoopback != 0 || ifaces[i].Flags&net.FlagUp == 0 {
+				continue
+			}
+
+			addrs, err := ifaces[i].Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok {
+					if ipnet.IP.Equal(addr.IP) {
+						iface = &ifaces[i]
+						fmt.Printf("[Multicast] Found interface %s for IP %s\n", ifaces[i].Name, addr.IP)
+						break
+					}
+				}
+			}
+			if iface != nil {
+				break
+			}
+		}
+	}
+
+	// Set the outgoing multicast interface
+	if err := packetConn.SetMulticastInterface(iface); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set multicast interface: %w", err)
+	}
+
 	// Set write buffer size
 	if err := conn.SetWriteBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set write buffer: %w", err)
+	}
+
+	if iface != nil {
+		fmt.Printf("[Multicast] Sender configured on interface %s for cross-container multicast\n", iface.Name)
+	} else {
+		fmt.Printf("[Multicast] Sender configured with default interface\n")
 	}
 
 	return &MulticastConnection{
@@ -169,21 +234,72 @@ func CreateMulticastSender(localAddr string) (*MulticastConnection, error) {
 
 // SendMessage sends a message to a multicast group
 func (mc *MulticastConnection) SendMessage(msg Message, targetAddr string) error {
+	msgType := msg.GetHeader().Type
+	senderID := msg.GetHeader().SenderId
+	seqNum := msg.GetHeader().SequenceNum
+
+	fmt.Printf("[Multicast-Send] Preparing to send %s message\n", msgType)
+	fmt.Printf("[Multicast-Send] Sender: %s, Sequence: %d\n", senderID[:8], seqNum)
+	fmt.Printf("[Multicast-Send] Target: %s\n", targetAddr)
+
 	addr, err := net.ResolveUDPAddr("udp4", targetAddr)
 	if err != nil {
+		fmt.Printf("[Multicast-Send] ERROR: Failed to resolve target address: %v\n", err)
 		return fmt.Errorf("failed to resolve target address: %w", err)
 	}
 
 	if !addr.IP.IsMulticast() {
+		fmt.Printf("[Multicast-Send] ERROR: Target address %s is not a multicast address\n", targetAddr)
 		return fmt.Errorf("target address %s is not a multicast address", targetAddr)
 	}
 
-	return WriteUDPMessage(mc.conn, msg, addr)
+	fmt.Printf("[Multicast-Send] Sending message to multicast group %s...\n", targetAddr)
+	err = WriteUDPMessage(mc.conn, msg, addr)
+	if err != nil {
+		fmt.Printf("[Multicast-Send] ERROR: Failed to send message: %v\n", err)
+	} else {
+		fmt.Printf("[Multicast-Send] Successfully sent %s message to %s\n\n", msgType, targetAddr)
+	}
+	return err
 }
 
 // ReadMessage receives a message from the multicast group
 func (mc *MulticastConnection) ReadMessage() (Message, *net.UDPAddr, error) {
 	return ReadUDPMessage(mc.conn)
+}
+
+// ReadMessageWithTimeout receives a message with a timeout
+func (mc *MulticastConnection) ReadMessageWithTimeout(timeout time.Duration) (Message, *net.UDPAddr, error) {
+	mc.conn.SetReadDeadline(time.Now().Add(timeout))
+	defer mc.conn.SetReadDeadline(time.Time{}) // Clear deadline
+	return ReadUDPMessage(mc.conn)
+}
+
+// ReadMessageWithContext receives a message with context cancellation support
+func (mc *MulticastConnection) ReadMessageWithContext(ctx context.Context) (Message, *net.UDPAddr, error) {
+	// Create a channel for the result
+	type result struct {
+		msg    Message
+		addr   *net.UDPAddr
+		err    error
+	}
+	resultChan := make(chan result, 1)
+
+	// Read in a goroutine
+	go func() {
+		msg, addr, err := ReadUDPMessage(mc.conn)
+		resultChan <- result{msg, addr, err}
+	}()
+
+	// Wait for either result or context cancellation
+	select {
+	case <-ctx.Done():
+		// Context cancelled - close connection to unblock the read
+		// (This is a bit aggressive but necessary to unblock the read)
+		return nil, nil, ctx.Err()
+	case res := <-resultChan:
+		return res.msg, res.addr, res.err
+	}
 }
 
 // Close closes the multicast connection and leaves the group
@@ -208,10 +324,6 @@ func (mc *MulticastConnection) GetLocalAddr() net.Addr {
 	}
 	return nil
 }
-
-// ============================================================================
-// CONVENIENCE FUNCTIONS FOR COMMON MULTICAST OPERATIONS
-// ============================================================================
 
 // SendHeartbeatMulticast sends a heartbeat to the multicast group
 func SendHeartbeatMulticast(sender *MulticastConnection, senderID string, senderType NodeType, multicastAddr string) error {

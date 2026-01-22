@@ -1,7 +1,9 @@
 package client
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -33,10 +35,44 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 
 // Connect registers with the leader and subscribes to topic
 func (c *Consumer) Connect() error {
-	// Connect to leader via TCP
-	conn, err := net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+	const (
+		maxAttempts      = 10
+		initialDelay     = 500 * time.Millisecond
+		retryDelay       = 1 * time.Second
+		halfOpenDelay    = 2 * time.Second
+		failureThreshold = 5
+	)
+
+	failureCount := 0
+	var conn net.Conn
+	var err error
+
+	time.Sleep(initialDelay)
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		conn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+
+		if err != nil {
+			failureCount++
+			if failureCount >= failureThreshold {
+				time.Sleep(halfOpenDelay)
+				conn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+				if err == nil {
+					break
+				}
+				failureCount++
+			}
+		} else {
+			break
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to connect to leader: %w", err)
+		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
 	}
 
 	c.tcpConn = conn
@@ -75,29 +111,73 @@ func (c *Consumer) Connect() error {
 	return nil
 }
 
-// receiveResults continuously receives RESULT messages from broker
 func (c *Consumer) receiveResults() {
+	defer func() {
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+		}
+	}()
+
 	for {
 		select {
 		case <-c.stopSignal:
 			return
 
 		default:
-			// Read RESULT message from TCP connection
+			if c.tcpConn == nil {
+				c.errors <- fmt.Errorf("connection closed")
+				return
+			}
+
 			msg, err := protocol.ReadTCPMessage(c.tcpConn)
 			if err != nil {
-				// Check if connection was closed gracefully
-				if c.tcpConn == nil {
+				errStr := err.Error()
+
+				isEOF := false
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					isEOF = true
+				}
+
+				if !isEOF && errStr != "" {
+					if errStr == "EOF" ||
+						errStr == "failed to read size: EOF" ||
+						errStr == "failed to read message: EOF" ||
+						errStr == "failed to read result: failed to read size: EOF" ||
+						(len(errStr) >= 3 && errStr[len(errStr)-3:] == "EOF") ||
+						(len(errStr) >= 5 && errStr[len(errStr)-5:] == ": EOF") {
+						isEOF = true
+					}
+				}
+
+				if isEOF {
+					select {
+					case c.errors <- fmt.Errorf("connection closed by server"):
+					default:
+					}
 					return
 				}
-				c.errors <- fmt.Errorf("failed to read result: %w", err)
+
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					continue
+				}
+
+				select {
+				case c.errors <- fmt.Errorf("failed to read result: %w", err):
+				default:
+				}
+
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
 			// Type assert to RESULT message
 			resultMsg, ok := msg.(*protocol.ResultMsg)
 			if !ok {
-				c.errors <- fmt.Errorf("unexpected message type: %T", msg)
+				select {
+				case c.errors <- fmt.Errorf("unexpected message type: %T", msg):
+				default:
+				}
 				continue
 			}
 

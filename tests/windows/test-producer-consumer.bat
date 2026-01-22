@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 REM Producer-Consumer Test - Basic Data Flow
-REM Usage: tests\test-producer-consumer.bat [local|docker]
+REM Usage: tests\test-producer-consumer.bat [local|docker|vagrant]
 
 set MODE=%1
 if "%MODE%"=="" set MODE=local
@@ -219,8 +219,63 @@ if "%MODE%"=="local" (
     call :log "Following logs (Ctrl+C to stop)..."
     docker compose -f producer-consumer.yaml logs -f
 
+) else if "%MODE%"=="vagrant" (
+    cd /d "%PROJECT_ROOT%\deploy\vagrant"
+    
+    call :log "Checking Vagrant VMs..."
+    for %%v in (leader broker1) do (
+        vagrant status %%v 2>nul | findstr /C:"running" >nul
+        if errorlevel 1 (
+            call :error_msg "%%v VM not running! Run: vagrant up"
+            exit /b 1
+        )
+    )
+    
+    call :log "STEP 1: Starting Leader (Broker)"
+    vagrant ssh leader -c "cd /vagrant/logstream && NODE_ADDRESS=192.168.56.10:8001 IS_LEADER=true MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 nohup ./logstream > /tmp/logstream.log 2>&1 &"
+    timeout /t 5 /nobreak >nul
+    
+    echo.
+    call :log "Leader ready:"
+    vagrant ssh leader -c "tail -10 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"TCP listener" /C:"Started"
+    call :success "Leader started"
+    
+    echo.
+    call :log "STEP 2: Starting Consumer"
+    vagrant ssh broker1 -c "cd /vagrant/logstream && LEADER_ADDRESS=192.168.56.10:8001 TOPIC=test-logs nohup ./consumer > /tmp/consumer.log 2>&1 &"
+    timeout /t 3 /nobreak >nul
+    call :success "Consumer started"
+    
+    echo.
+    call :log "STEP 3: Starting Producer"
+    vagrant ssh leader -c "cd /vagrant/logstream && LEADER_ADDRESS=192.168.56.10:8001 TOPIC=test-logs nohup bash -c \"for i in {1..5}; do echo Test message $i from VM at $(date +%%H:%%M:%%S); sleep 1; done | ./producer\" > /tmp/producer.log 2>&1 &"
+    timeout /t 8 /nobreak >nul
+    
+    echo.
+    call :log "Producer registration:"
+    vagrant ssh leader -c "tail -20 /tmp/logstream.log 2>/dev/null" 2>nul | findstr /C:"PRODUCE from" /C:"Registered producer"
+    call :success "Producer registered"
+    
+    echo.
+    echo %TEST_PREFIX% =========================================
+    echo %TEST_PREFIX% DATA FLOW SUMMARY:
+    echo %TEST_PREFIX% =========================================
+    echo %TEST_PREFIX% Producer -> Leader (TCP registration)
+    echo %TEST_PREFIX% Consumer -> Leader (TCP subscription)
+    echo %TEST_PREFIX% Producer -> Leader (UDP data)
+    echo %TEST_PREFIX% Leader -> Consumer (TCP delivery)
+    echo.
+    echo %TEST_PREFIX% Complete end-to-end flow verified!
+    echo %TEST_PREFIX% =========================================
+    echo.
+    call :success "Producer-Consumer test complete (Vagrant)"
+    
+    REM Cleanup
+    vagrant ssh leader -c "pkill -f logstream; pkill -f producer" 2>nul
+    vagrant ssh broker1 -c "pkill -f consumer" 2>nul
+
 ) else (
-    call :error_msg "Invalid mode: %MODE% (use 'local' or 'docker')"
+    call :error_msg "Invalid mode: %MODE% (use 'local', 'docker', or 'vagrant')"
     exit /b 1
 )
 

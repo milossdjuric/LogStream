@@ -47,19 +47,21 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 
 	seqNum := msg.SequenceNum
 
-	// ✅ NEW: If this is the first message ever, initialize to this sequence
+	// If this is the first message ever, initialize to this sequence
 	if !hq.initialized {
 		fmt.Printf("[Holdback] First message seq=%d, initializing queue\n", seqNum)
 		hq.nextExpected = seqNum
 		hq.initialized = true
 	}
 
-	// Case 1: This is the next expected message - deliver immediately
+	// This is the next expected message - deliver immediately
 	if seqNum == hq.nextExpected {
+		fmt.Printf("[Holdback] Delivering registry update seq=%d (in order)\n", seqNum)
 		// Deliver this message
 		if err := hq.deliverFunc(msg); err != nil {
 			return fmt.Errorf("failed to deliver message seq=%d: %w", seqNum, err)
 		}
+		fmt.Printf("[Holdback] Successfully delivered registry update seq=%d\n", seqNum)
 
 		hq.nextExpected++
 
@@ -67,10 +69,12 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 		for {
 			if buffered, ok := hq.buffer[hq.nextExpected]; ok {
 				// We have the next expected message in buffer - deliver it
+				fmt.Printf("[Holdback] Delivering buffered registry update seq=%d\n", hq.nextExpected)
 				if err := hq.deliverFunc(buffered); err != nil {
 					return fmt.Errorf("failed to deliver buffered message seq=%d: %w",
 						hq.nextExpected, err)
 				}
+				fmt.Printf("[Holdback] Successfully delivered buffered registry update seq=%d\n", hq.nextExpected)
 
 				// Remove from buffer and advance
 				delete(hq.buffer, hq.nextExpected)
@@ -84,7 +88,7 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 		return nil
 	}
 
-	// Case 2: Future message (out of order) - buffer it
+	// Future message (out of order) - buffer it
 	if seqNum > hq.nextExpected {
 		hq.buffer[seqNum] = msg
 		fmt.Printf("[Holdback] Buffered registry update seq=%d (expected %d, buffered=%d)\n",
@@ -92,7 +96,7 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 		return nil
 	}
 
-	// Case 3: Old/duplicate message (already delivered) - ignore
+	// Old/duplicate message (already delivered) - ignore
 	fmt.Printf("[Holdback] Ignoring duplicate/old registry update seq=%d (expected %d)\n",
 		seqNum, hq.nextExpected)
 

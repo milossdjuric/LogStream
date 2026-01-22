@@ -46,7 +46,7 @@ func (r *Registry) RegisterBroker(id, address string, isLeader bool) error {
 	return nil
 }
 
-// ✅ NEW: RemoveBroker removes a broker from the registry
+// RemoveBroker removes a broker from the registry
 func (r *Registry) RemoveBroker(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -62,7 +62,7 @@ func (r *Registry) RemoveBroker(id string) error {
 	return nil
 }
 
-// ✅ NEW: CheckTimeouts removes brokers that haven't sent heartbeat in timeout period
+// CheckTimeouts removes brokers that haven't sent heartbeat in timeout period
 // Returns list of removed broker IDs
 func (r *Registry) CheckTimeouts(timeout time.Duration) []string {
 	r.mu.Lock()
@@ -194,7 +194,7 @@ func (r *Registry) Deserialize(data []byte) error {
 			id[:8], broker.Address, broker.IsLeader)
 	}
 
-	// ✅ FIX: Initialize map if nil, then copy instead of direct assignment
+	// Initialize map if nil, then copy instead of direct assignment
 	if snapshot.Brokers == nil {
 		r.brokers = make(map[string]*protocol.BrokerInfo)
 	} else {

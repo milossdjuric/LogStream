@@ -11,14 +11,14 @@ echo -e "========================================${NC}"
 echo ""
 
 # Kill processes
-echo -e "${YELLOW}→ Killing all logstream processes...${NC}"
+echo -e "${YELLOW}-> Killing all logstream processes...${NC}"
 pkill -9 -f logstream 2>/dev/null
 sleep 1
 echo -e "${GREEN} Processes killed${NC}"
 
 # Free ports
 echo ""
-echo -e "${YELLOW}→ Freeing ports 8001-8003...${NC}"
+echo -e "${YELLOW}-> Freeing ports 8001-8003...${NC}"
 for port in 8001 8002 8003; do
     pid=$(lsof -ti:$port 2>/dev/null)
     if [ -n "$pid" ]; then
@@ -30,25 +30,25 @@ done
 
 # Remove binary
 echo ""
-echo -e "${YELLOW}→ Removing old binary...${NC}"
+echo -e "${YELLOW}-> Removing old binary...${NC}"
 rm -f ./logstream
 echo -e "${GREEN} Binary removed${NC}"
 
 # Clean logs
 echo ""
-echo -e "${YELLOW}→ Cleaning logs...${NC}"
+echo -e "${YELLOW}-> Cleaning logs...${NC}"
 rm -f /tmp/logstream-*.log 2>/dev/null
 echo -e "${GREEN} Logs cleaned${NC}"
 
 # Rebuild
 echo ""
-echo -e "${YELLOW}→ Rebuilding...${NC}"
+echo -e "${YELLOW}-> Rebuilding...${NC}"
 go build -o logstream main.go
 if [ $? -eq 0 ]; then
     echo -e "${GREEN} Build successful!${NC}"
     ls -lh logstream
 else
-    echo -e "${RED}✗ Build failed!${NC}"
+    echo -e "${RED}[X] Build failed!${NC}"
     exit 1
 fi
 
