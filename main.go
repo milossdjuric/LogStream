@@ -85,14 +85,14 @@ func main() {
 				log.Printf("[System] [Command-Input] PANIC: %v\nStack:\n%s\n", r, buf[:stackLen])
 			}
 		}()
-		
+
 		// Check if stdin is a terminal - if not, skip command input handler
 		stat, err := os.Stdin.Stat()
 		if err != nil || (stat.Mode()&os.ModeCharDevice) == 0 {
 			fmt.Printf("[System] Stdin is not a terminal, skipping command input handler\n")
 			return
 		}
-		
+
 		fmt.Printf("[System] Starting command input handler...\n")
 		scanner := bufio.NewScanner(os.Stdin)
 		fmt.Println("\n[System] Commands:")
@@ -121,7 +121,7 @@ func main() {
 				fmt.Printf("[System] Unknown command: %s\n", cmd)
 			}
 		}
-		
+
 		if err := scanner.Err(); err != nil {
 			// Don't log EOF errors - they're normal when stdin is closed
 			if err.Error() != "EOF" {

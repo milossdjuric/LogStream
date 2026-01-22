@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"net"
 	"time"
 )
 
@@ -39,70 +38,4 @@ func GenerateElectionID() int64 {
 	randomBytes := make([]byte, 8)
 	rand.Read(randomBytes)
 	return int64(binary.BigEndian.Uint64(randomBytes))
-}
-
-// ShowNetworkInfo displays available network interfaces
-func ShowNetworkInfo() {
-	fmt.Println("=== Network Interfaces ===")
-
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		fmt.Printf("Error getting interfaces: %v\n", err)
-		return
-	}
-
-	var found bool
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
-
-			if ip.To4() != nil {
-				if isPrivateIP(ip) {
-					fmt.Printf("  %s: %s\n", iface.Name, ip.String())
-					found = true
-				}
-			}
-		}
-	}
-
-	if !found {
-		fmt.Println("  No network interfaces found")
-	}
-	fmt.Println()
-}
-
-// isPrivateIP checks if IP is in private range
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-	}
-
-	for _, cidr := range privateRanges {
-		_, subnet, _ := net.ParseCIDR(cidr)
-		if subnet.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
