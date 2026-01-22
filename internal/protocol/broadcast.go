@@ -3,7 +3,10 @@ package protocol
 import (
 	"fmt"
 	"net"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // BroadcastConfig holds broadcast configuration
@@ -23,22 +26,46 @@ func DefaultBroadcastConfig() *BroadcastConfig {
 	}
 }
 
-// Wrapper for UDP connection used for broadcasting
 type BroadcastConnection struct {
 	conn *net.UDPConn
 }
 
 func CreateBroadcastSender() (*BroadcastConnection, error) {
-	// Create unconnected UDP socket
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{
+	// Use ListenConfig to set socket options BEFORE binding to force IPv4
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				// Force IPv4-only by disabling IPv6 (IPV6_V6ONLY = 0 means IPv4 can use IPv6 socket, but we want IPv4-only)
+				// Actually, for IPv4 sockets, we don't need IPV6_V6ONLY, but we can set SO_BROADCAST
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Create unconnected UDP socket - force IPv4 to avoid IPv6 issues in network namespaces
+	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: 0,
-	})
+	}
+
+	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create broadcast socket: %w", err)
 	}
 
-	// Enable broadcast permission, setup write buffer
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("failed to convert to UDPConn")
+	}
+
+	// Broadcast is already enabled via SO_BROADCAST socket option above
+	// Setup write buffer
 	if err := conn.SetWriteBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set write buffer: %w", err)
@@ -50,16 +77,37 @@ func CreateBroadcastSender() (*BroadcastConnection, error) {
 }
 
 func CreateBroadcastListener(port int) (*BroadcastConnection, error) {
-	// Listen on all interfaces for broadcast messages
-	addr := &net.UDPAddr{
+	// Use ListenConfig to set socket options BEFORE binding to force IPv4
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				// Enable SO_REUSEADDR for immediate port reuse
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Listen on all interfaces for broadcast messages - force IPv4 to avoid IPv6 issues in network namespaces
+	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: port,
 	}
 
-	// Create UDP socket
-	conn, err := net.ListenUDP("udp", addr)
+	// Create UDP socket - force IPv4 with socket options
+	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on broadcast port %d: %w", port, err)
+	}
+
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("failed to convert to UDPConn")
 	}
 
 	// Set read buffer
@@ -74,37 +122,24 @@ func CreateBroadcastListener(port int) (*BroadcastConnection, error) {
 	}, nil
 }
 
-// BroadcastMessage sends a message via broadcast
 func (bc *BroadcastConnection) BroadcastMessage(msg Message, broadcastAddr string) error {
-	// Resolve broadcast address
-	addr, err := net.ResolveUDPAddr("udp", broadcastAddr)
+	addr, err := net.ResolveUDPAddr("udp4", broadcastAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve broadcast address: %w", err)
 	}
-
-	// Send the message
 	return WriteUDPMessage(bc.conn, msg, addr)
 }
 
-// ReceiveMessage receives a broadcast message
 func (bc *BroadcastConnection) ReceiveMessage() (Message, *net.UDPAddr, error) {
-	// Read the message
 	return ReadUDPMessage(bc.conn)
 }
 
-// ReceiveMessageWithTimeout receives a broadcast message with timeout
 func (bc *BroadcastConnection) ReceiveMessageWithTimeout(timeout time.Duration) (Message, *net.UDPAddr, error) {
-	// Set read deadline
 	bc.conn.SetReadDeadline(time.Now().Add(timeout))
-
-	// Ensure deadline is cleared after read
 	defer bc.conn.SetReadDeadline(time.Time{})
-
-	// Read the message
 	return ReadUDPMessage(bc.conn)
 }
 
-// Close broadcast connection
 func (bc *BroadcastConnection) Close() error {
 	if bc.conn != nil {
 		return bc.conn.Close()
@@ -112,7 +147,6 @@ func (bc *BroadcastConnection) Close() error {
 	return nil
 }
 
-// GetLocalAddr returns the local address of the connection
 func (bc *BroadcastConnection) GetLocalAddr() net.Addr {
 	if bc.conn != nil {
 		return bc.conn.LocalAddr()
@@ -120,29 +154,112 @@ func (bc *BroadcastConnection) GetLocalAddr() net.Addr {
 	return nil
 }
 
-// BroadcastJoin sends a JOIN broadcast message
 func (bc *BroadcastConnection) BroadcastJoin(senderID string, senderType NodeType, address string, broadcastAddr string) error {
-	// Create JOIN message
 	msg := NewJoinMsg(senderID, senderType, address)
-
-	// Broadcast the message
 	return bc.BroadcastMessage(msg, broadcastAddr)
 }
 
-// SendJoinResponse sends a JOIN_RESPONSE to a specific node
-
 func (bc *BroadcastConnection) SendJoinResponse(leaderID, leaderAddr, multicastGroup string, brokers []string, targetAddr string) error {
-	// Create JOIN_RESPONSE message
 	msg := NewJoinResponseMsg(leaderID, leaderAddr, multicastGroup, brokers)
-
-	// Resolve target address to send response to
-	addr, err := net.ResolveUDPAddr("udp", targetAddr)
+	addr, err := net.ResolveUDPAddr("udp4", targetAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve target address: %w", err)
 	}
-
-	// Send the message
 	return WriteUDPMessage(bc.conn, msg, addr)
+}
+
+// calculateBroadcastAddress calculates the subnet-specific broadcast address
+// from the node's IP address. This is required for network namespaces where
+// 255.255.255.255 doesn't work.
+func calculateBroadcastAddress(nodeAddress string, port int) (string, error) {
+	// Extract IP from address (format: "IP:PORT")
+	host, _, err := net.SplitHostPort(nodeAddress)
+	if err != nil {
+		// If no port, assume it's just an IP
+		host = nodeAddress
+	}
+
+	nodeIP := net.ParseIP(host)
+	if nodeIP == nil {
+		return fmt.Sprintf("255.255.255.255:%d", port), nil // Fallback to global broadcast
+	}
+
+	// Convert to IPv4 if it's IPv6-mapped IPv4 (::ffff:192.168.1.1 format)
+	// or ensure we have IPv4
+	nodeIPv4 := nodeIP.To4()
+	if nodeIPv4 == nil {
+		// Not an IPv4 address - fallback to global broadcast
+		return fmt.Sprintf("255.255.255.255:%d", port), nil
+	}
+	nodeIP = nodeIPv4 // Use IPv4 version
+
+	// Find the interface that has this IP
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Sprintf("255.255.255.255:%d", port), nil // Fallback
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				// Convert to IPv4 for comparison
+				ipnetIPv4 := ipnet.IP.To4()
+				if ipnetIPv4 == nil {
+					continue
+				}
+				if ipnetIPv4.Equal(nodeIP) {
+					// Found the interface - calculate broadcast address
+					// broadcast = (IP | ~mask)
+					mask := ipnet.Mask
+					// Ensure mask length matches IP length (IPv4 = 4 bytes)
+					if len(mask) != 4 {
+						// Mask length mismatch, skip this interface
+						continue
+					}
+					broadcast := make(net.IP, 4) // IPv4 is always 4 bytes
+					for i := 0; i < 4; i++ {
+						broadcast[i] = nodeIP[i] | ^mask[i]
+					}
+					return fmt.Sprintf("%s:%d", broadcast.String(), port), nil
+				}
+			}
+		}
+	}
+
+	// If we can't find the interface, try to infer from common subnets
+	// Network Namespaces: 172.20.0.x/24
+	if nodeIP[0] == 172 && nodeIP[1] == 20 {
+		return fmt.Sprintf("172.20.0.255:%d", port), nil
+	}
+	// Docker subnets: 172.25.x.x, 172.26.x.x, 172.28.x.x, 172.29.x.x (all /24)
+	if nodeIP[0] == 172 && (nodeIP[1] == 25 || nodeIP[1] == 26 || nodeIP[1] == 28 || nodeIP[1] == 29) {
+		return fmt.Sprintf("172.%d.0.255:%d", nodeIP[1], port), nil
+	}
+	// Vagrant VMs: 192.168.100.x/24
+	if nodeIP[0] == 192 && nodeIP[1] == 168 && nodeIP[2] == 100 {
+		return fmt.Sprintf("192.168.100.255:%d", port), nil
+	}
+	// Vagrant VMs (backup): 192.168.56.x/24
+	if nodeIP[0] == 192 && nodeIP[1] == 168 && nodeIP[2] == 56 {
+		return fmt.Sprintf("192.168.56.255:%d", port), nil
+	}
+
+	// Fallback: calculate from /24 assumption (most common for private networks)
+	// This works for most Docker, VM, and netns scenarios
+	// nodeIP is guaranteed to be IPv4 (4 bytes) at this point
+	broadcast := make(net.IP, 4)
+	copy(broadcast, nodeIP)
+	broadcast[3] = 255
+	return fmt.Sprintf("%s:%d", broadcast.String(), port), nil
 }
 
 // DiscoverClusterWithRetry broadcasts JOIN and waits for JOIN_RESPONSE
@@ -161,7 +278,12 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 	// Once done, close the sender
 	defer sender.Close()
 
-	broadcastAddr := fmt.Sprintf("255.255.255.255:%d", config.Port)
+	// Calculate subnet-specific broadcast address (required for network namespaces)
+	broadcastAddr, err := calculateBroadcastAddress(address, config.Port)
+	if err != nil {
+		// Fallback to global broadcast if calculation fails
+		broadcastAddr = fmt.Sprintf("255.255.255.255:%d", config.Port)
+	}
 
 	// Try multiple times to discover the cluster
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {

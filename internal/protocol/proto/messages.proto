@@ -118,8 +118,32 @@ message BrokerInfo{
   int64 last_heartbeat = 4;
 }
 
-// Snapshot of the current registry state
+// ProducerInfo represents a producer client (for replication)
+message ProducerInfo {
+  string id = 1;
+  string address = 2;
+  string topic = 3;
+  int64 last_heartbeat = 4;
+}
+
+// ConsumerInfo represents a consumer client (for replication)
+message ConsumerInfo {
+  string id = 1;
+  string address = 2;
+  repeated string topics = 3;  // Subscribed topics
+  int64 last_heartbeat = 4;
+}
+
+// Snapshot of the current registry state (brokers only - legacy)
 message RegistrySnapshot {
   map<string, BrokerInfo> brokers = 1;
   int64 seq_num = 2;
+}
+
+// ClusterStateSnapshot includes all state: brokers + producers + consumers
+message ClusterStateSnapshot {
+  map<string, BrokerInfo> brokers = 1;
+  map<string, ProducerInfo> producers = 2;
+  map<string, ConsumerInfo> consumers = 3;
+  int64 seq_num = 4;  // Monotonic sequence for FIFO ordering
 }
