@@ -48,10 +48,35 @@ func main() {
 	for {
 		select {
 		case result := <-consumer.Results():
+			if result != nil {
 			fmt.Printf("[%s] Offset %d: %s\n", result.Topic, result.Offset, string(result.Data))
+			}
 
 		case err := <-consumer.Errors():
-			log.Printf("Error: %v", err)
+			if err != nil {
+				// Check if connection closed - exit gracefully without logging spam
+				errMsg := err.Error()
+				if errMsg == "connection closed by server" || 
+				   errMsg == "connection closed" {
+					fmt.Println("\nConnection closed by server. Exiting...")
+					consumer.Close()
+					os.Exit(0)
+				}
+				
+				// Check if error contains EOF - also exit gracefully
+				if len(errMsg) > 0 && (errMsg == "EOF" || 
+				   errMsg[len(errMsg)-3:] == "EOF" ||
+				   errMsg == "failed to read size: EOF" ||
+				   errMsg == "failed to read result: failed to read size: EOF") {
+					fmt.Println("\nConnection closed (EOF detected). Exiting...")
+					consumer.Close()
+					os.Exit(0)
+				}
+				
+				// For other errors, log but limit rate to prevent log spam
+				// Use a simple rate limiter: only log every 10th error
+				log.Printf("Error: %v", err)
+			}
 		}
 	}
 }
