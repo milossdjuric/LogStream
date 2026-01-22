@@ -18,7 +18,7 @@ func main() {
 	}
 
 	fmt.Println("Available Network Interfaces:")
-	fmt.Println("─────────────────────────────────────")
+	fmt.Println("-------------------------------------")
 
 	var recommended []string
 
@@ -70,9 +70,9 @@ func main() {
 		}
 	}
 
-	fmt.Println("\n─────────────────────────────────────")
+	fmt.Println("\n-------------------------------------")
 	fmt.Println("\nRecommended Setup Commands:")
-	fmt.Println("─────────────────────────────────────")
+	fmt.Println("-------------------------------------")
 
 	if len(recommended) == 0 {
 		fmt.Println("No suitable interfaces found!")
@@ -93,9 +93,9 @@ func main() {
 		fmt.Printf("  ./run-local.sh follower <MACHINE2_IP>:8002\n")
 	}
 
-	fmt.Println("\n─────────────────────────────────────")
+	fmt.Println("\n-------------------------------------")
 	fmt.Println("\nQuick Test:")
-	fmt.Println("─────────────────────────────────────")
+	fmt.Println("-------------------------------------")
 	fmt.Printf("From another machine, ping this machine:\n")
 	fmt.Printf("  ping %s\n", primaryIP)
 }

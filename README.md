@@ -28,106 +28,92 @@ This displays available network interfaces and their IP addresses.
 
 ### 1. Docker Testing (Recommended for Development)
 
-Creates 3 isolated containers on a virtual network (172.25.0.0/24):
-- Leader: 172.25.0.10:8001
-- Broker1: 172.25.0.20:8002
-- Broker2: 172.25.0.30:8003
+Uses Docker Compose with isolated networks. See `deploy/docker/` for details.
 
-Linux/macOS:
 ```bash
-# Start containers
-sudo bash scripts/run-docker.sh
+# Run test scripts with docker mode
+cd tests/linux
+./test-single.sh docker
+./test-trio.sh docker
+./test-election-automatic.sh docker
 
-# Watch live logs
-sudo docker compose logs -f
-
-# Stop containers
-sudo bash scripts/stop-docker.sh
+# Or use compose directly
+cd deploy/docker/compose
+docker compose -f trio.yaml up -d
+docker compose -f trio.yaml logs -f
+docker compose -f trio.yaml down
 ```
 
-Windows:
-```cmd
-# Start containers
-scripts\run-docker.bat
+Available compose files in `deploy/docker/compose/`:
+- `single.yaml` - Single leader node
+- `trio.yaml` - Leader + 2 followers
+- `sequence.yaml` - Sequence number demo
+- `producer-consumer.yaml` - Producer/consumer test
+- `election.yaml` - Leader election test
 
-# Watch live logs
-docker compose logs -f
+### 2. Local Testing with Network Namespaces (Linux)
 
-# Stop containers
-scripts\stop-docker.bat
-```
+Uses isolated network namespaces for multicast testing. See `deploy/netns/` for details.
 
-### 2. Local Testing (Same Machine, Two Terminals)
-
-Tests multicast loopback on a single machine using different ports.
-
-Linux/macOS:
-
-Terminal 1 (Leader):
 ```bash
-bash scripts/run-local.sh leader
+# Setup namespaces (one-time)
+cd deploy/netns
+sudo ./setup-netns.sh
+
+# Run tests with local mode
+cd tests/linux
+sudo ./test-single.sh local
+sudo ./test-trio.sh local
+
+# Cleanup
+cd deploy/netns
+sudo ./cleanup.sh
 ```
 
-Terminal 2 (Follower):
+### 3. Vagrant Testing (Full VM Isolation)
+
+Uses Vagrant with libvirt/KVM for complete VM isolation. See `deploy/vagrant/` for details.
+
 ```bash
-bash scripts/run-local.sh follower
+# Install vagrant-libvirt plugin (one-time)
+./scripts/install-vagrant-libvirt.sh
+
+# Start VMs
+cd deploy/vagrant
+vagrant up
+
+# Run tests with vagrant mode
+cd tests/linux
+./test-single.sh vagrant
+./test-trio.sh vagrant
+
+# Stop VMs
+cd deploy/vagrant
+vagrant halt
 ```
 
-Windows:
+### 4. Manual Testing
 
-Command Prompt 1 (Leader):
-```cmd
-scripts\run-local.bat leader
-```
+For manual testing or physical machines:
 
-Command Prompt 2 (Follower):
-```cmd
-scripts\run-local.bat follower
-```
-
-Stop: Press Ctrl+C in each terminal
-
-### 3. Physical Machines 
-
-Tests across actual network infrastructure with multiple computers.
-
-Machine 1 (Leader):
 ```bash
-# Linux/macOS
-bash scripts/run-local.sh leader 192.168.1.25:8001
+# Build
+go build -o logstream main.go
 
-# Windows
-scripts\run-local.bat leader 192.168.1.25:8001
+# Terminal 1 (Leader)
+NODE_ADDRESS=192.168.1.10:8001 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
+
+# Terminal 2 (Follower)
+NODE_ADDRESS=192.168.1.20:8002 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
 ```
 
-Machine 2 (Follower):
-```bash
-# Linux/macOS
-bash scripts/run-local.sh follower 192.168.1.30:8002
-
-# Windows
-scripts\run-local.bat follower 192.168.1.30:8002
-```
-
-**Important**: Configure firewall rules on both machines (see Firewall Configuration below).
-
-### 4. Virtual Machines 
-
-Use VirtualBox or VMware with bridged networking:
-
-1. Create 2 VMs with Ubuntu Server
-2. Set network mode to "Bridged Adapter" (not NAT)
-3. Install Go 1.21+ on each VM
-4. Clone/copy LogStream to both VMs
-5. Configure firewall on each VM
-6. Run leader on VM1, follower on VM2
+**Important**: Configure firewall rules on all machines (see Firewall Configuration below).
 
 
 ## Configuration
 
 ### Environment Variables
 
-- `IS_LEADER`: Set to "true" for leader node, "false" for followers
 - `NODE_ADDRESS`: Node's IP:PORT (auto-detected if not provided)
 - `MULTICAST_GROUP`: Multicast address (default: 239.0.0.1:9999)
 - `BROADCAST_PORT`: UDP broadcast port (default: 8888)
@@ -137,7 +123,11 @@ Use VirtualBox or VMware with bridged networking:
 If NODE_ADDRESS is not specified, the system automatically:
 1. Scans available network interfaces
 2. Selects the primary non-loopback interface
-3. Assigns default port (8001 for leader, 8002 for follower)
+3. Assigns default port 8001
+
+### Leader Election
+
+Leaders are determined automatically through election protocol - no manual configuration needed. The first node to start typically becomes the leader, and leadership transfers automatically if the leader fails.
 
 ## Expected Output
 
@@ -145,18 +135,16 @@ If NODE_ADDRESS is not specified, the system automatically:
 ```
 === LogStream Configuration ===
 Node Address:      192.168.1.74:8001
-Is Leader:         true
 Multicast Group:   239.0.0.1:9999
 Broadcast Port:    8888
 Network Interface: 192.168.1.74
 ================================
 
 [Multicast] Joined group 239.0.0.1 on interface wlp4s0 (port reuse enabled)
-[Broker a1b2c3d4] Started at 192.168.1.74:8001 (leader=true)
-[Leader a1b2c3d4] → HEARTBEAT
-[Leader a1b2c3d4] → REPLICATE seq=1 type=REGISTRY
-[a1b2c3d4] ← HEARTBEAT from a1b2c3d4 (sender: 192.168.1.74:xxxxx)
-[a1b2c3d4] ← REPLICATE seq=1 type=REGISTRY from a1b2c3d4
+[Node a1b2c3d4] Started at 192.168.1.74:8001
+[Node a1b2c3d4] Elected as LEADER
+[Leader a1b2c3d4] -> HEARTBEAT
+[Leader a1b2c3d4] -> REPLICATE seq=1 type=REGISTRY
 ```
 
 The leader sends messages and also receives its own via multicast loopback (this is expected behavior).
@@ -165,18 +153,16 @@ The leader sends messages and also receives its own via multicast loopback (this
 ```
 === LogStream Configuration ===
 Node Address:      192.168.1.74:8002
-Is Leader:         false
 Multicast Group:   239.0.0.1:9999
 Broadcast Port:    8888
 Network Interface: 192.168.1.74
 ================================
 
 [Multicast] Joined group 239.0.0.1 on interface wlp4s0 (port reuse enabled)
-[Broker x9y8z7w6] Started at 192.168.1.74:8002 (leader=false)
-[x9y8z7w6] ← HEARTBEAT from a1b2c3d4 (sender: 192.168.1.74:xxxxx)
-[x9y8z7w6] ← REPLICATE seq=5 type=REGISTRY from a1b2c3d4
-[x9y8z7w6] ← HEARTBEAT from a1b2c3d4
-[x9y8z7w6] ← REPLICATE seq=6 type=REGISTRY from a1b2c3d4
+[Node x9y8z7w6] Started at 192.168.1.74:8002
+[Node x9y8z7w6] Discovered leader: a1b2c3d4
+[x9y8z7w6] <- HEARTBEAT from a1b2c3d4
+[x9y8z7w6] <- REPLICATE seq=5 type=REGISTRY from a1b2c3d4
 ```
 
 Follower joined at seq=5 (late joining). It receives messages from the current sequence onwards.
@@ -264,19 +250,22 @@ docker compose ps
 - Kill process: `lsof -ti:8001 | xargs kill -9` (Linux/macOS)
 
 **Docker permission denied:**
-- Use `sudo` on Linux: `sudo bash scripts/run-docker.sh`
-- Or add user to docker group: `sudo usermod -aG docker $USER`
+- Add user to docker group: `sudo usermod -aG docker $USER`
+- Then log out and back in for changes to take effect
 
 ## Development
 
 ### Build Locally
 ```bash
 go build -o logstream main.go
+
+# Or use the rebuild script (cleans up processes/ports first)
+./scripts/rebuild.sh      # Linux/macOS
+scripts\rebuild.bat       # Windows
 ```
 
 ### Run with Custom Config
 ```bash
-export IS_LEADER="true"
 export NODE_ADDRESS="192.168.1.25:8001"
 export MULTICAST_GROUP="239.0.0.1:9999"
 export BROADCAST_PORT="8888"
@@ -292,12 +281,12 @@ protoc --go_out=. --go_opt=paths=source_relative \
 
 ## Testing Summary
 
-| Test Type | Machines | Setup Time | Realism | Best For |
-|-----------|----------|------------|---------|----------|
-| Docker | 1 (host) | 1 min | Medium | Development, CI/CD |
-| Local | 1 (host) | 30 sec | Low | Quick testing |
-| VMs | 1 (host + VMs) | 30 min | High | Pre-production validation |
-| Physical | 2+ | 5 min | Highest | Production deployment |
+| Test Type | Platform | Isolation | Best For |
+|-----------|----------|-----------|----------|
+| Docker | Any | Container networks | Development, CI/CD |
+| Network Namespaces | Linux | Virtual interfaces | Quick local testing |
+| Vagrant | Linux | Full VMs (KVM) | Pre-production validation |
+| Manual | Any | Physical/VM | Production deployment |
 
 
 
