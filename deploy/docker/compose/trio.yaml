@@ -1,0 +1,55 @@
+services:
+  leader:
+    build: ../../..
+    environment:
+      - NODE_ADDRESS=172.25.1.10:8001
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-net:
+        ipv4_address: 172.25.1.10
+    cap_add:
+      - NET_ADMIN
+    labels:
+      - "logstream.test=trio"
+
+  broker1:
+    build: ../../..
+    environment:
+      - NODE_ADDRESS=172.25.1.20:8002
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-net:
+        ipv4_address: 172.25.1.20
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - leader
+    labels:
+      - "logstream.test=trio"
+    command: sh -c "sleep 3 && /root/logstream"
+
+  broker2:
+    build: ../../..
+    environment:
+      - NODE_ADDRESS=172.25.1.30:8003
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-net:
+        ipv4_address: 172.25.1.30
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - leader
+    labels:
+      - "logstream.test=trio"
+    command: sh -c "sleep 5 && /root/logstream"
+
+networks:
+  logstream-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.1.0/24

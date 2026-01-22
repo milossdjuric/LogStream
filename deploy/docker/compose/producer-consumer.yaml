@@ -1,0 +1,55 @@
+services:
+  leader:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ADDRESS=172.28.0.10:8001
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.10
+    cap_add:
+      - NET_ADMIN
+    labels:
+      - "logstream.test=producer-consumer"
+
+  producer:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile.producer
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.20
+    depends_on:
+      - leader
+    stdin_open: true
+    tty: true
+    labels:
+      - "logstream.test=producer-consumer"
+
+  consumer:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile.consumer
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.30
+    depends_on:
+      - leader
+    labels:
+      - "logstream.test=producer-consumer"
+
+networks:
+  logstream-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

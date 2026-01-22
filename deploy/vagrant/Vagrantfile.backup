@@ -1,0 +1,41 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/jammy64"
+  
+  # Shared folder for project files
+  config.vm.synced_folder "../..", "/vagrant/logstream"
+  
+  # VM resources - using libvirt (KVM) only
+  # Using qemu:///session for user-level access (no libvirt group needed)
+  config.vm.provider "libvirt" do |lv|
+    lv.memory = "1024"
+    lv.cpus = 1
+    lv.uri = "qemu:///session"
+  end
+  
+  # Leader VM
+  config.vm.define "leader" do |leader|
+    leader.vm.hostname = "logstream-leader"
+    leader.vm.network "private_network", ip: "192.168.56.10"
+    
+    leader.vm.provision "shell", path: "provision.sh"
+  end
+  
+  # Follower 1 VM
+  config.vm.define "broker1" do |broker|
+    broker.vm.hostname = "logstream-broker1"
+    broker.vm.network "private_network", ip: "192.168.56.20"
+    
+    broker.vm.provision "shell", path: "provision.sh"
+  end
+  
+  # Follower 2 VM
+  config.vm.define "broker2" do |broker|
+    broker.vm.hostname = "logstream-broker2"
+    broker.vm.network "private_network", ip: "192.168.56.30"
+    
+    broker.vm.provision "shell", path: "provision.sh"
+  end
+end
