@@ -15,7 +15,6 @@ import (
 	"github.com/milossdjuric/logstream/internal/config"
 	"github.com/milossdjuric/logstream/internal/protocol"
 	"github.com/milossdjuric/logstream/internal/state"
-	"github.com/milossdjuric/logstream/internal/storage"
 	"golang.org/x/sys/unix"
 )
 
@@ -63,9 +62,6 @@ type Node struct {
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
-
-	// Persistent log storage
-	storageLog *storage.Log
 }
 
 // NewNode creates a new node
@@ -106,22 +102,10 @@ func (n *Node) Start() error {
 	fmt.Printf("[Node %s] Node ID: %s\n", n.id[:8], n.id)
 	fmt.Printf("[Node %s] ========================================\n\n", n.id[:8])
 
-	// Initialize persistent storage log
-	fmt.Printf("[Node %s] Initializing persistent storage log...\n", n.id[:8])
-	logDir := fmt.Sprintf("./logs/%s", n.id[:8])
-	storageLog, err := storage.NewLog(logDir, 0) // 0 = use default max segment size
-	if err != nil {
-		fmt.Printf("[Node %s] WARNING: Failed to initialize storage log: %v\n", n.id[:8], err)
-		fmt.Printf("[Node %s] Continuing without persistent storage\n", n.id[:8])
-	} else {
-		n.storageLog = storageLog
-		fmt.Printf("[Node %s] Storage log initialized at %s\n", n.id[:8], logDir)
-	}
-
 	// Step 1: Try to discover existing cluster
 	fmt.Printf("[Node %s] STEP 1: Discovering cluster...\n", n.id[:8])
 	fmt.Printf("[Node %s] [Step-1] Calling discoverCluster()...\n", n.id[:8])
-	err = n.discoverCluster()
+	err := n.discoverCluster()
 	if err != nil {
 		// No cluster found - we're the first node, automatically become leader
 		fmt.Printf("[Node %s] [Step-1] discoverCluster() returned error: %v\n", n.id[:8], err)
@@ -210,7 +194,6 @@ func (n *Node) Start() error {
 	return nil
 }
 
-
 // IsLeader returns current role (thread-safe)
 func (n *Node) IsLeader() bool {
 	n.mu.RLock()
@@ -221,7 +204,7 @@ func (n *Node) IsLeader() bool {
 // becomeLeader transitions this node to leader role
 func (n *Node) becomeLeader() {
 	fmt.Printf("[Node %s] [becomeLeader] Entering function...\n", n.id[:8])
-	
+
 	n.mu.Lock()
 	wasLeader := n.isLeader
 	n.isLeader = true
@@ -305,7 +288,7 @@ func (n *Node) becomeLeader() {
 // becomeFollower transitions this node to follower role
 func (n *Node) becomeFollower() {
 	fmt.Printf("[Node %s] [becomeFollower] Entering function...\n", n.id[:8])
-	
+
 	n.mu.Lock()
 	wasLeader := n.isLeader
 	n.isLeader = false
@@ -356,7 +339,7 @@ func (n *Node) becomeFollower() {
 func (n *Node) initializeFailureDetector() {
 	fmt.Printf("[FailureDetector] ========================================\n")
 	fmt.Printf("[FailureDetector] Attempting to initialize failure detector...\n")
-	
+
 	// Get current leader from registry
 	brokers := n.clusterState.ListBrokers()
 	fmt.Printf("[FailureDetector] Registry has %d brokers: %v\n", len(brokers), brokers)
@@ -392,13 +375,12 @@ func (n *Node) initializeFailureDetector() {
 	fmt.Printf("[FailureDetector] ========================================\n")
 }
 
-
 func (n *Node) discoverCluster() error {
 	fmt.Printf("[Node %s] Discovering cluster...\n", n.id[:8])
 
 	config := protocol.DefaultBroadcastConfig()
-	config.MaxRetries = 3  // Increased from 1 to 3 for better reliability
-	config.Timeout = 3 * time.Second  // Increased from 2s to 3s per attempt
+	config.MaxRetries = 3            // Increased from 1 to 3 for better reliability
+	config.Timeout = 3 * time.Second // Increased from 2s to 3s per attempt
 
 	response, err := protocol.DiscoverClusterWithRetry(
 		n.id,
@@ -413,7 +395,7 @@ func (n *Node) discoverCluster() error {
 
 	fmt.Printf("[Node %s] Found cluster! Leader: %s\n", n.id[:8], response.LeaderAddress)
 	n.config.MulticastGroup = response.MulticastGroup
-	
+
 	// Store leader address immediately so we can send heartbeats before registry sync
 	n.leaderAddress = response.LeaderAddress
 	fmt.Printf("[Node %s] Stored leader address for immediate heartbeats: %s\n", n.id[:8], n.leaderAddress)
@@ -424,7 +406,7 @@ func (n *Node) discoverCluster() error {
 func (n *Node) setupMulticast() error {
 	fmt.Printf("[Node %s] [Multicast-Setup] Joining multicast group: %s\n", n.id[:8], n.config.MulticastGroup)
 	fmt.Printf("[Node %s] [Multicast-Setup] Network interface: %s\n", n.id[:8], n.config.NetworkInterface)
-	
+
 	// protocol.JoinMulticastGroup provided by protocol package
 	receiver, err := protocol.JoinMulticastGroup(
 		n.config.MulticastGroup,
@@ -508,7 +490,7 @@ func (n *Node) startTCPListener() error {
 
 func (n *Node) acceptTCPConnections() {
 	fmt.Printf("[Node %s] [TCP-Listener] Starting accept loop on %s\n", n.id[:8], n.tcpListener.Addr())
-	
+
 	for {
 		// Check for shutdown before accepting
 		select {
@@ -518,25 +500,25 @@ func (n *Node) acceptTCPConnections() {
 		default:
 			// Continue with accept
 		}
-		
+
 		// Set a deadline to allow periodic shutdown checks
 		if tcpListener, ok := n.tcpListener.(*net.TCPListener); ok {
 			tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
 		}
-		
+
 		conn, err := n.tcpListener.Accept()
 		if err != nil {
 			// Check if it's a timeout (normal when checking for shutdown)
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // Check shutdown and try again
 			}
-			
+
 			// Check if listener was closed (shutdown scenario)
 			if err.Error() == "use of closed network connection" {
 				fmt.Printf("[Node %s] [TCP-Listener] Listener closed, exiting accept loop cleanly\n", n.id[:8])
 				return // Clean exit, not a crash
 			}
-			
+
 			// Check if we've been shut down
 			select {
 			case <-n.shutdownCtx.Done():
@@ -558,7 +540,7 @@ func (n *Node) acceptTCPConnections() {
 
 		remoteAddr := conn.RemoteAddr()
 		fmt.Printf("[Node %s] [TCP-Listener] New connection accepted from %s\n", n.id[:8], remoteAddr)
-		
+
 		// Handle connection in goroutine
 		go n.handleTCPConnection(conn)
 	}
@@ -567,7 +549,7 @@ func (n *Node) acceptTCPConnections() {
 func (n *Node) handleTCPConnection(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr()
 	fmt.Printf("[Node %s] [TCP-Connection] Handling connection from %s\n", n.id[:8], remoteAddr)
-	
+
 	// Track whether connection should be kept open (for CONSUME requests)
 	keepConnectionOpen := false
 	defer func() {
@@ -590,7 +572,7 @@ func (n *Node) handleTCPConnection(conn net.Conn) {
 
 	msgType := msg.GetHeader().Type
 	senderID := msg.GetHeader().SenderId
-	fmt.Printf("[Node %s] [TCP-Connection] Received %s message from %s (sender: %s)\n", 
+	fmt.Printf("[Node %s] [TCP-Connection] Received %s message from %s (sender: %s)\n",
 		n.id[:8], msgType, remoteAddr, senderID[:8])
 
 	// Route based on message type
@@ -620,7 +602,6 @@ func (n *Node) handleTCPConnection(conn net.Conn) {
 		log.Printf("[Node %s] Unknown TCP message type: %T\n", n.id[:8], m)
 	}
 }
-
 
 // Handle PRODUCE request from producer
 func (n *Node) handleProduceRequest(msg *protocol.ProduceMsg, conn net.Conn) {
@@ -767,7 +748,6 @@ func (n *Node) streamResultsToConsumer(consumerID, topic string, conn net.Conn) 
 	}
 }
 
-
 func (n *Node) listenMulticast() {
 	fmt.Printf("[Node %s] [Multicast-Listener] ========================================\n", n.id[:8])
 	fmt.Printf("[Node %s] [Multicast-Listener] Starting multicast message listener...\n", n.id[:8])
@@ -796,23 +776,23 @@ func (n *Node) listenMulticast() {
 			// Check if it's just a timeout (normal when checking for shutdown)
 			// Timeouts are expected when no other nodes are sending messages
 			errStr := err.Error()
-			
+
 			// Check for timeout errors - use multiple methods to catch all cases
 			isTimeout := false
-			
+
 			// Method 1: Check if error implements net.Error and is a timeout
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				isTimeout = true
 			}
-			
+
 			// Method 2: Check error string for timeout patterns (some errors don't implement net.Error correctly)
 			// Use Contains to catch wrapped errors (e.g., "failed to read UDP message: read udp4 0.0.0.0:9999: i/o timeout")
-			if strings.Contains(errStr, "i/o timeout") || 
-			   strings.Contains(errStr, "deadline exceeded") ||
-			   strings.Contains(errStr, "read udp") && strings.Contains(errStr, "timeout") {
+			if strings.Contains(errStr, "i/o timeout") ||
+				strings.Contains(errStr, "deadline exceeded") ||
+				strings.Contains(errStr, "read udp") && strings.Contains(errStr, "timeout") {
 				isTimeout = true
 			}
-			
+
 			if isTimeout {
 				continue // Normal timeout, don't log - just check shutdown and try again
 			}
@@ -880,7 +860,6 @@ func (n *Node) listenMulticast() {
 	}
 }
 
-
 func (n *Node) handleHeartbeat(msg protocol.Message, sender *net.UDPAddr) {
 	senderID := protocol.GetSenderID(msg)
 	senderType := protocol.GetSenderType(msg)
@@ -906,7 +885,7 @@ func (n *Node) handleHeartbeat(msg protocol.Message, sender *net.UDPAddr) {
 	if !n.IsLeader() {
 		isLeaderHeartbeat := senderType == protocol.NodeType_LEADER
 		currentLeaderID := n.failureDetector.GetLeaderID()
-		
+
 		// Safe string formatting for empty leader ID
 		currentLeaderIDStr := "(empty)"
 		if len(currentLeaderID) >= 8 {
@@ -939,14 +918,14 @@ func (n *Node) handleHeartbeat(msg protocol.Message, sender *net.UDPAddr) {
 			n.failureDetector.Reset(senderID)
 			fmt.Printf("[%s] Failure detector initialized with leader from heartbeat\n", n.id[:8])
 		}
-		
+
 		fmt.Printf("[%s] Updating failure detector with leader %s heartbeat\n",
 			n.id[:8], senderID[:8])
 		n.failureDetector.UpdateHeartbeat(senderID)
 
 		updatedLeaderID := n.failureDetector.GetLeaderID()
 		lastHB := n.failureDetector.GetLastHeartbeat()
-		
+
 		// Safe string formatting for empty leader ID
 		updatedLeaderIDStr := "(empty)"
 		if len(updatedLeaderID) >= 8 {
@@ -954,7 +933,7 @@ func (n *Node) handleHeartbeat(msg protocol.Message, sender *net.UDPAddr) {
 		} else if updatedLeaderID != "" {
 			updatedLeaderIDStr = updatedLeaderID
 		}
-		
+
 		fmt.Printf("[%s] Failure detector now tracking leader: '%s', last HB: %v ago\n",
 			n.id[:8], updatedLeaderIDStr, time.Since(lastHB).Round(time.Second))
 	}
@@ -1137,14 +1116,14 @@ func (n *Node) applyRegistryUpdate(msg *state.HoldbackMessage) error {
 
 	// Print cluster state status after applying update
 	n.clusterState.PrintStatus()
-	
+
 	// Update stored leader address from registry if we're a follower
 	if !n.IsLeader() {
 		brokers := n.clusterState.ListBrokers()
 		for _, brokerID := range brokers {
 			if broker, ok := n.clusterState.GetBroker(brokerID); ok && broker.IsLeader {
 				if n.leaderAddress != broker.Address {
-					fmt.Printf("[Node %s] Updated stored leader address: %s -> %s\n", 
+					fmt.Printf("[Node %s] Updated stored leader address: %s -> %s\n",
 						n.id[:8], n.leaderAddress, broker.Address)
 					n.leaderAddress = broker.Address
 				}
@@ -1195,7 +1174,6 @@ func (n *Node) applyRegistryUpdate(msg *state.HoldbackMessage) error {
 
 	return nil
 }
-
 
 // computeRing determines this node's position in the logical ring and identifies the next node
 func (n *Node) computeRing() {
@@ -1249,16 +1227,16 @@ func (n *Node) computeRing() {
 func (n *Node) tryNextAvailableNode(electionID int64) bool {
 	fmt.Printf("[Node %s] [Election] Attempting to find next available node in FROZEN ring topology...\n", n.id[:8])
 	fmt.Printf("[Node %s] [Election] Note: Ring topology is frozen during election - using registry at election start\n", n.id[:8])
-	
+
 	brokers := n.clusterState.ListBrokers()
 	if len(brokers) < 2 {
 		fmt.Printf("[Node %s] [Election] Only %d broker(s) in frozen registry - cannot find next node\n", n.id[:8], len(brokers))
 		return false
 	}
-	
+
 	// Sort broker IDs to form consistent ring (frozen topology)
 	sort.Strings(brokers)
-	
+
 	// Find our position in the frozen ring
 	myPos := -1
 	for i, id := range brokers {
@@ -1267,42 +1245,42 @@ func (n *Node) tryNextAvailableNode(electionID int64) bool {
 			break
 		}
 	}
-	
+
 	if myPos == -1 {
 		fmt.Printf("[Node %s] [Election] ERROR: Node not in frozen registry!\n", n.id[:8])
 		return false
 	}
-	
+
 	fmt.Printf("[Node %s] [Election] Frozen ring has %d nodes, my position: %d/%d\n", n.id[:8], len(brokers), myPos+1, len(brokers))
-	
+
 	// Try each node in the frozen ring starting from the immediate next one
 	// This respects the ring topology - we're not skipping around arbitrarily
 	for offset := 1; offset < len(brokers); offset++ {
 		nextPos := (myPos + offset) % len(brokers)
 		nextID := brokers[nextPos]
-		
+
 		// Get next node's address from frozen registry
 		broker, ok := n.clusterState.GetBroker(nextID)
 		if !ok {
 			fmt.Printf("[Node %s] [Election] Node %s not found in frozen registry, skipping...\n", n.id[:8], nextID[:8])
 			continue
 		}
-		
+
 		// Try to connect to this node (it may be unreachable even though it's in the frozen ring)
-		fmt.Printf("[Node %s] [Election] Trying to connect to next node in ring: %s at %s (position %d/%d)...\n", 
+		fmt.Printf("[Node %s] [Election] Trying to connect to next node in ring: %s at %s (position %d/%d)...\n",
 			n.id[:8], nextID[:8], broker.Address, nextPos+1, len(brokers))
 		conn, err := net.DialTimeout("tcp", broker.Address, 2*time.Second)
 		if err != nil {
-			fmt.Printf("[Node %s] [Election] Node %s at %s is unreachable: %v, trying next in ring...\n", 
+			fmt.Printf("[Node %s] [Election] Node %s at %s is unreachable: %v, trying next in ring...\n",
 				n.id[:8], nextID[:8], broker.Address, err)
 			continue
 		}
 		conn.Close()
-		
+
 		// Found an available node in the frozen ring - update nextNode and retry forwarding
 		fmt.Printf("[Node %s] [Election] Found available node %s at %s in frozen ring\n", n.id[:8], nextID[:8], broker.Address)
 		n.nextNode = broker.Address
-		
+
 		// Retry sending the election message to this available node
 		// Use the current candidate ID (which may have been updated)
 		candidateID := n.election.GetCandidate()
@@ -1313,11 +1291,11 @@ func (n *Node) tryNextAvailableNode(electionID int64) bool {
 			fmt.Printf("[Node %s] [Election] Still failed to send to %s: %v, trying next in ring...\n", n.id[:8], broker.Address, err)
 			continue
 		}
-		
+
 		fmt.Printf("[Node %s] [Election] Successfully forwarded election message to available node %s\n", n.id[:8], nextID[:8])
 		return true
 	}
-	
+
 	// Tried all nodes in the frozen ring - none are reachable
 	fmt.Printf("[Node %s] [Election] No available nodes found in frozen ring (tried all %d nodes)\n", n.id[:8], len(brokers))
 	return false
@@ -1335,7 +1313,7 @@ func (n *Node) StartElection() error {
 
 	if brokerCount < 2 {
 		// Registry not synchronized yet - can't run election
-		fmt.Printf("[Node %s] Cannot start election - registry not synchronized (brokers: %d, need at least 2)\n", 
+		fmt.Printf("[Node %s] Cannot start election - registry not synchronized (brokers: %d, need at least 2)\n",
 			n.id[:8], brokerCount)
 		fmt.Printf("[Node %s] Resetting any existing election state\n", n.id[:8])
 		n.election.Reset()
@@ -1354,7 +1332,7 @@ func (n *Node) StartElection() error {
 		n.election.Reset()
 		return fmt.Errorf("ring computation failed: nextNode is empty")
 	}
-	
+
 	fmt.Printf("[Node %s] Frozen ring topology computed - next node: %s\n", n.id[:8], n.nextNode)
 
 	// Step 2: Start election with our ID as candidate
@@ -1378,7 +1356,7 @@ func (n *Node) sendElectionMessage(candidateID string, electionID int64, phase p
 	fmt.Printf("[Node %s] [Election-Send] Candidate: %s\n", n.id[:8], candidateID[:8])
 	fmt.Printf("[Node %s] [Election-Send] Election ID: %d\n", n.id[:8], electionID)
 	fmt.Printf("[Node %s] [Election-Send] Target: %s\n", n.id[:8], n.nextNode)
-	
+
 	if n.nextNode == "" {
 		fmt.Printf("[Node %s] [Election-Send] ERROR: next node not set\n", n.id[:8])
 		return fmt.Errorf("next node not set - call computeRing() first")
@@ -1423,7 +1401,7 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64) {
 	fmt.Printf("[Node %s] [Election-Announce] Candidate: %s\n", n.id[:8], candidateID[:8])
 	fmt.Printf("[Node %s] [Election-Announce] My ID: %s\n", n.id[:8], n.id[:8])
 	fmt.Printf("[Node %s] [Election-Announce] Election ID: %d\n", n.id[:8], electionID)
-	
+
 	// Check if we have a synchronized registry
 	brokerCount := n.clusterState.GetBrokerCount()
 	fmt.Printf("[Node %s] [Election-Announce] Registry broker count: %d\n", n.id[:8], brokerCount)
@@ -1462,7 +1440,7 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64) {
 		if err := n.sendElectionMessage(candidateID, electionID, protocol.ElectionMessage_ANNOUNCE); err != nil {
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Failed to forward: %v\n", n.id[:8], err)
 			log.Printf("[Election] Failed to forward: %v\n", err)
-			
+
 			// Try to find next available node in ring
 			if n.tryNextAvailableNode(electionID) {
 				fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded to next available node\n", n.id[:8])
@@ -1482,16 +1460,16 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64) {
 		// LCR: Replace candidate with my ID and forward (don't drop!)
 		fmt.Printf("[Node %s] [Election-Announce] Candidate %s is LOWER than %s - REPLACING with my ID and FORWARDING\n",
 			n.id[:8], candidateID[:8], n.id[:8])
-		
+
 		// Update election state with my ID as the new candidate
 		n.election.UpdateCandidate(n.id)
-		
+
 		// Forward the election message with my ID as the candidate
 		// If next node is unreachable, try to find next available node
 		if err := n.sendElectionMessage(n.id, electionID, protocol.ElectionMessage_ANNOUNCE); err != nil {
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Failed to forward with my ID: %v\n", n.id[:8], err)
 			log.Printf("[Election] Failed to forward with my ID: %v\n", err)
-			
+
 			// Try to find next available node in ring
 			if n.tryNextAvailableNode(electionID) {
 				fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded to next available node\n", n.id[:8])
@@ -1505,7 +1483,7 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64) {
 				fmt.Printf("[Node %s] [Election-Announce] Tried all nodes in frozen ring topology - all unreachable\n", n.id[:8])
 				fmt.Printf("[Node %s] [Election-Announce] Declaring victory as the only available node in frozen ring\n", n.id[:8])
 				fmt.Printf("[Node %s] [Election-Announce] ======================================\n\n", n.id[:8])
-				
+
 				n.election.DeclareVictory(n.id)
 				fmt.Printf("[Node %s] [Election-Announce] Becoming leader...\n", n.id[:8])
 				n.becomeLeader()
@@ -1553,7 +1531,7 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64) {
 	fmt.Printf("[Node %s] [Election-Victory] New leader: %s\n", n.id[:8], leaderID[:8])
 	fmt.Printf("[Node %s] [Election-Victory] Election ID: %d\n", n.id[:8], electionID)
 	fmt.Printf("[Node %s] [Election-Victory] My ID: %s\n", n.id[:8], n.id[:8])
-	
+
 	// Same check for synchronized registry
 	brokerCount := n.clusterState.GetBrokerCount()
 	fmt.Printf("[Node %s] [Election-Victory] Registry broker count: %d\n", n.id[:8], brokerCount)
@@ -1586,7 +1564,7 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64) {
 
 	// Reset failure detector for new leader
 	n.failureDetector.Reset(leaderID)
-	
+
 	// Update stored leader address from registry
 	if broker, ok := n.clusterState.GetBroker(leaderID); ok {
 		n.leaderAddress = broker.Address
@@ -1604,7 +1582,6 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64) {
 
 	n.becomeFollower()
 }
-
 
 func (n *Node) runLeaderDuties() {
 	fmt.Printf("[Leader %s] [Leader-Duties] ========================================\n", n.id[:8])
@@ -1690,9 +1667,10 @@ func (n *Node) sendHeartbeat() error {
 
 // replicateAllState performs IMMEDIATE ACTIVE replication of cluster state to all followers
 // This is ACTIVE replication because:
-//   1. Leader proactively sends updates IMMEDIATELY when state changes
-//   2. Followers passively receive and apply updates via holdback queue
-//   3. Leader doesn't wait for follower requests - it pushes updates
+//  1. Leader proactively sends updates IMMEDIATELY when state changes
+//  2. Followers passively receive and apply updates via holdback queue
+//  3. Leader doesn't wait for follower requests - it pushes updates
+//
 // Replicates immediately on every state change (brokers, producers, consumers)
 func (n *Node) replicateAllState() error {
 	if !n.IsLeader() {
@@ -1732,15 +1710,6 @@ func (n *Node) replicateAllState() error {
 		// Update last replicated sequence
 		n.lastReplicatedSeq = currentSeq
 		fmt.Printf("[Leader %s] -> REPLICATE seq=%d type=CLUSTER_STATE (IMMEDIATE ACTIVE replication)\n", n.id[:8], currentSeq)
-
-		// Persist replicated data to local storage log
-		if n.storageLog != nil {
-			if offset, logErr := n.storageLog.Append(snapshot); logErr == nil {
-				fmt.Printf("[Leader %s] Persisted replicate to storage log at offset=%d\n", n.id[:8], offset)
-			} else {
-				fmt.Printf("[Leader %s] WARNING: Failed to persist replicate to storage: %v\n", n.id[:8], logErr)
-			}
-		}
 	} else {
 		fmt.Printf("[Leader %s] Failed to send REPLICATE: %v\n", n.id[:8], err)
 	}
@@ -1768,21 +1737,21 @@ func (n *Node) syncFollowerWithCircuitBreaker(followerID string) {
 
 	// Circuit Breaker Configuration
 	const (
-		maxAttempts     = 5           // Maximum multicast attempts
-		initialDelay    = 1 * time.Second // Wait for follower's multicast listener to start
-		retryDelay      = 500 * time.Millisecond // Delay between retries
-		halfOpenDelay   = 2 * time.Second // Delay before trying half-open state
+		maxAttempts   = 5                      // Maximum multicast attempts
+		initialDelay  = 1 * time.Second        // Wait for follower's multicast listener to start
+		retryDelay    = 500 * time.Millisecond // Delay between retries
+		halfOpenDelay = 2 * time.Second        // Delay before trying half-open state
 	)
 
 	// Circuit Breaker State: CLOSED - Normal operation, try multicast
 	fmt.Printf("[Leader %s] [CircuitBreaker] State: CLOSED - Attempting multicast sync...\n", n.id[:8])
-	
+
 	// Wait for follower's multicast listener to start
 	time.Sleep(initialDelay)
-	
+
 	failureCount := 0
 	successCount := 0
-	
+
 	// Try multicast with circuit breaker logic
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		err := protocol.SendReplicationMulticast(
@@ -1793,18 +1762,18 @@ func (n *Node) syncFollowerWithCircuitBreaker(followerID string) {
 			currentSeq,
 			n.config.MulticastGroup,
 		)
-		
+
 		if err != nil {
 			failureCount++
 			fmt.Printf("[Leader %s] [CircuitBreaker] Attempt %d/%d failed: %v (failures: %d)\n",
 				n.id[:8], attempt, maxAttempts, err, failureCount)
-			
+
 			// Circuit Breaker State: OPEN - Too many failures
 			if failureCount >= 3 {
 				fmt.Printf("[Leader %s] [CircuitBreaker] State: OPEN - Too many failures (%d), backing off...\n",
 					n.id[:8], failureCount)
 				time.Sleep(halfOpenDelay)
-				
+
 				// Circuit Breaker State: HALF-OPEN - Try one more time
 				fmt.Printf("[Leader %s] [CircuitBreaker] State: HALF-OPEN - Attempting recovery...\n", n.id[:8])
 				err = protocol.SendReplicationMulticast(
@@ -1828,7 +1797,7 @@ func (n *Node) syncFollowerWithCircuitBreaker(followerID string) {
 			successCount++
 			fmt.Printf("[Leader %s] [CircuitBreaker] Attempt %d/%d succeeded (successes: %d)\n",
 				n.id[:8], attempt, maxAttempts, successCount)
-			
+
 			// If we have at least one success, consider it good enough
 			// (multicast is best-effort, multiple sends increase delivery probability)
 			if successCount >= 2 {
@@ -1837,7 +1806,7 @@ func (n *Node) syncFollowerWithCircuitBreaker(followerID string) {
 				break
 			}
 		}
-		
+
 		// Delay before next attempt (except on last attempt)
 		if attempt < maxAttempts {
 			time.Sleep(retryDelay)
@@ -1999,11 +1968,11 @@ func (n *Node) listenForBroadcastJoins() {
 			// the UDP sender IP (which might be NAT'd through Vagrant)
 			leaderIP := strings.Split(n.address, ":")[0]
 			leaderNetwork := strings.Join(strings.Split(leaderIP, ".")[:3], ".")
-			
+
 			// Check the address in the JOIN message itself (this is what matters)
 			joinIP := strings.Split(joinMsg.Address, ":")[0]
 			joinNetwork := strings.Join(strings.Split(joinIP, ".")[:3], ".")
-			
+
 			if joinNetwork != leaderNetwork {
 				fmt.Printf("[Leader %s] REJECTING JOIN from %s: wrong network (join=%s, expected=%s)\n",
 					n.id[:8], senderID[:8], joinNetwork, leaderNetwork)
@@ -2063,7 +2032,6 @@ func (n *Node) listenForBroadcastJoins() {
 	}
 }
 
-
 func (n *Node) runFollowerDuties() {
 	fmt.Printf("[Follower %s] [Follower-Duties] ========================================\n", n.id[:8])
 	fmt.Printf("[Follower %s] [Follower-Duties] Starting follower duties\n", n.id[:8])
@@ -2075,7 +2043,7 @@ func (n *Node) runFollowerDuties() {
 	// Increased frequency to 2 seconds to prevent timeout issues
 	heartbeatTicker := time.NewTicker(2 * time.Second)
 	defer heartbeatTicker.Stop()
-	
+
 	// Send immediate heartbeat right after joining (before waiting for first tick)
 	fmt.Printf("[Follower %s] Sending immediate heartbeat to leader after joining...\n", n.id[:8])
 	if err := n.sendFollowerHeartbeat(); err != nil {
@@ -2111,9 +2079,9 @@ func (n *Node) runFollowerDuties() {
 					continue
 				}
 			}
-			
+
 			suspected, failed, timeSinceHB := n.failureDetector.CheckStatus()
-			
+
 			// Log periodic status (every 5th check to avoid spam, ~15 seconds)
 			if checkCount%5 == 0 {
 				// Safe string formatting for leader ID
@@ -2123,7 +2091,7 @@ func (n *Node) runFollowerDuties() {
 				} else if leaderID != "" {
 					leaderIDStr = leaderID
 				}
-				
+
 				fmt.Printf("[Follower %s] ========================================\n", n.id[:8])
 				fmt.Printf("[Follower %s] Failure detector status check #%d:\n", n.id[:8], checkCount)
 				fmt.Printf("[Follower %s]   Leader ID: %s\n", n.id[:8], leaderIDStr)
@@ -2156,7 +2124,7 @@ func (n *Node) runFollowerDuties() {
 					if n.election.IsStuck() {
 						// Election has been running for more than 60 seconds - it's stuck, reset it
 						elapsed := time.Since(n.election.GetStartTime())
-						fmt.Printf("[Follower %s] Election stuck - has been running for %v (timeout: 60s), resetting and starting new election\n", 
+						fmt.Printf("[Follower %s] Election stuck - has been running for %v (timeout: 60s), resetting and starting new election\n",
 							n.id[:8], elapsed.Round(time.Second))
 						n.election.Reset()
 						// Start a new election
@@ -2195,7 +2163,7 @@ func (n *Node) sendFollowerHeartbeat() error {
 	// Try to get leader address from stored address first (from JOIN_RESPONSE)
 	// This allows heartbeats even before registry is synchronized
 	leaderAddr := n.leaderAddress
-	
+
 	// If not available, try to get from registry (for cases where leader changed)
 	if leaderAddr == "" {
 		brokers := n.clusterState.ListBrokers()
@@ -2232,7 +2200,6 @@ func (n *Node) sendFollowerHeartbeat() error {
 	return nil
 }
 
-
 // PrintStatus displays current node status
 func (n *Node) PrintStatus() {
 	fmt.Printf("\n=== Node Status ===\n")
@@ -2260,10 +2227,7 @@ func (n *Node) PrintStatus() {
 		fmt.Println()
 		n.failureDetector.PrintStatus()
 	}
-
-	fmt.Println("===================\n")
 }
-
 
 func (n *Node) Shutdown() {
 	fmt.Printf("\n[Node %s] Shutting down...\n", n.id[:8])
@@ -2300,15 +2264,6 @@ func (n *Node) Shutdown() {
 
 	if n.tcpListener != nil {
 		n.tcpListener.Close()
-	}
-
-	// Close storage log
-	if n.storageLog != nil {
-		if err := n.storageLog.Close(); err != nil {
-			fmt.Printf("[Node %s] WARNING: Failed to close storage log: %v\n", n.id[:8], err)
-		} else {
-			fmt.Printf("[Node %s] Storage log closed\n", n.id[:8])
-		}
 	}
 
 	fmt.Printf("[Node %s] Shutdown complete\n", n.id[:8])
