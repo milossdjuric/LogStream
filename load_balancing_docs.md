@@ -4,10 +4,6 @@ This document explains the decentralized load balancing logic implemented in Log
 
 ## Core Concept: The Ring
 
-In a traditional system, a central "Load Balancer" server directs traffic. In our decentralized system, every Broker makes its own decision using a mathematical model called a **Consistent Hash Ring**.
-
-Imagine a circle (Ring) where every point is a number from `0` to `4,294,967,295` (32-bit integer range).
-
 ```mermaid
 graph TD
     Ring((Hash Ring))
