@@ -7,6 +7,7 @@ import (
 
 	"github.com/milossdjuric/logstream/internal/analytics"
 	"github.com/milossdjuric/logstream/internal/failure"
+	"github.com/milossdjuric/logstream/internal/loadbalance"
 	"github.com/milossdjuric/logstream/internal/protocol"
 	"github.com/milossdjuric/logstream/internal/storage"
 )
@@ -25,6 +26,7 @@ type BrokerNode struct {
 	broadcastListener *protocol.BroadcastConnection
 	log               *storage.MemoryLog
 	failureDetector   *failure.AccrualFailureDetector
+	ring              *loadbalance.ConsistentHashRing
 }
 
 func NewBrokerNode(address string, isLeader bool) *BrokerNode {
@@ -32,6 +34,7 @@ func NewBrokerNode(address string, isLeader bool) *BrokerNode {
 		id:       protocol.GenerateNodeID(address),
 		address:  address,
 		isLeader: isLeader,
+		ring:     loadbalance.NewConsistentHashRing(),
 	}
 }
 
@@ -81,6 +84,7 @@ func (b *BrokerNode) Start() error {
 		}
 	}()
 
+	b.ring.AddNode(b.id) // Add self to ring
 	fmt.Printf("[Broker %s] Started (leader=%v)\n", b.id, b.isLeader)
 	return nil
 }
@@ -95,8 +99,9 @@ func (b *BrokerNode) listenMulticast() {
 
 		switch m := msg.(type) {
 		case *protocol.HeartbeatMsg:
-			fmt.Printf("[Broker %s] ← HEARTBEAT from %s\n",
-				b.id, protocol.GetSenderID(msg))
+			senderID := protocol.GetSenderID(msg)
+			fmt.Printf("[Broker %s] ← HEARTBEAT from %s\n", b.id, senderID)
+			b.ring.AddNode(senderID) // add node to ring
 
 		case *protocol.ReplicateMsg:
 			fmt.Printf("[Broker %s] ← REPLICATE seq=%d type=%s from %s\n",
@@ -111,21 +116,29 @@ func (b *BrokerNode) listenMulticast() {
 				b.id, m.FromSeq, m.ToSeq, protocol.GetSenderID(msg))
 
 		case *protocol.DataMsg:
-			fmt.Printf("[Broker %s] ← DATA topic=%s from %s payload=%s\n",
-				b.id, m.Topic, protocol.GetSenderID(msg), string(m.Data))
-			// Persist to local log
-			if b.log != nil {
-				// Use the timestamp from the message header
-				ts := protocol.GetTimestamp(msg)
-				encoded := storage.EncodeRecord(ts, m.Data)
-				if off, err := b.log.Append(encoded); err == nil {
-					// Verify by decoding immediately for display
-					t := time.Unix(0, ts)
-					fmt.Printf("[Broker %s] persisted data at offset=%d | Timestamp: %s\n",
-						b.id, off, t.Format(time.RFC3339))
-				} else {
-					fmt.Printf("[Broker %s] failed to persist data: %v\n", b.id, err)
+			senderID := protocol.GetSenderID(msg)
+			// Check if we are the owner of this topic
+			owner := b.ring.GetNode(m.Topic)
+			if owner == b.id {
+				fmt.Printf("[Broker %s] ← DATA topic=%s from %s payload=%s (ACCEPTED)\n",
+					b.id, m.Topic, senderID, string(m.Data))
+				// Persist to local log
+				if b.log != nil {
+					// Use the timestamp from the message header
+					ts := protocol.GetTimestamp(msg)
+					encoded := storage.EncodeRecord(ts, m.Data)
+					if off, err := b.log.Append(encoded); err == nil {
+						// Verify by decoding immediately for display
+						t := time.Unix(0, ts)
+						fmt.Printf("[Broker %s] persisted data at offset=%d | Timestamp: %s\n",
+							b.id, off, t.Format(time.RFC3339))
+					} else {
+						fmt.Printf("[Broker %s] failed to persist data: %v\n", b.id, err)
+					}
 				}
+			} else {
+				fmt.Printf("[Broker %s] ← DATA topic=%s from %s (IGNORED, owner=%s)\n",
+					b.id, m.Topic, senderID, owner)
 			}
 		}
 
@@ -142,8 +155,11 @@ func (b *BrokerNode) listenForBroadcastJoins() {
 		}
 
 		if joinMsg, ok := msg.(*protocol.JoinMsg); ok {
+			senderID := protocol.GetSenderID(msg)
 			fmt.Printf("[Leader %s] ← JOIN from %s (addr=%s)\n",
-				b.id, protocol.GetSenderID(msg), joinMsg.Address)
+				b.id, senderID, joinMsg.Address)
+
+			b.ring.AddNode(senderID)
 
 			responseAddr := fmt.Sprintf("%s", sender)
 			err := b.broadcastListener.SendJoinResponse(
@@ -163,19 +179,21 @@ func (b *BrokerNode) listenForBroadcastJoins() {
 }
 
 func (b *BrokerNode) SendHeartbeat() error {
-	if !b.isLeader {
-		return fmt.Errorf("only leader can send heartbeat")
+	// Any node can send heartbeat to announce presence
+	nodeType := protocol.NodeType_BROKER
+	if b.isLeader {
+		nodeType = protocol.NodeType_LEADER
 	}
 
 	err := protocol.SendHeartbeatMulticast(
 		b.multicastSender,
 		b.id,
-		protocol.NodeType_LEADER,
+		nodeType,
 		BrokerMulticastGroup,
 	)
 
 	if err == nil {
-		fmt.Printf("[Leader %s] → HEARTBEAT to multicast group\n", b.id)
+		fmt.Printf("[%s %s] → HEARTBEAT to multicast group\n", nodeType, b.id)
 	}
 	return err
 }
@@ -271,6 +289,7 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	leader.SendHeartbeat()
+	broker.SendHeartbeat() //brokers now also send heartbeats
 
 	time.Sleep(500 * time.Millisecond)
 
