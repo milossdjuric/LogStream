@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"golang.org/x/net/ipv4"
-	"golang.org/x/sys/unix"
 )
 
 // MulticastConnection wraps a UDP connection for multicast communication
@@ -43,10 +42,7 @@ func JoinMulticastGroup(multicastAddr, interfaceAddr string) (*MulticastConnecti
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				// SO_REUSEADDR: Allows reusing addresses in TIME_WAIT state
-				// NOTE: We do NOT use SO_REUSEPORT for multicast receivers
-				// because it causes the kernel to deliver each multicast packet
-				// to only ONE socket instead of ALL sockets (load balancing behavior)
-				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 			})
 			if err != nil {
 				return err

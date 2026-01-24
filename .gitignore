@@ -5,5 +5,13 @@ consumer
 # Test logs
 test-logs/
 
+# Data/log directories (runtime generated)
+data/
+data_producer_test/
+logs/
+
+# Binaries
+*.exe
+
 # Vagrant local state (contains private keys and machine-specific data)
 .vagrant/

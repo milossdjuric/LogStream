@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 const DefaultMaxSegmentBytes = 1 << 20 // 1 MiB
@@ -168,4 +169,48 @@ func (l *Log) TruncateBefore(offset uint64) error {
 	}
 	l.segments = keep
 	return nil
+}
+
+// CleanupOldLogs removes segments that are entirely older than the retention duration.
+func (l *Log) CleanupOldLogs(retention time.Duration) error {
+	l.mu.RLock()
+	if len(l.segments) == 0 {
+		l.mu.RUnlock()
+		return nil
+	}
+	cutoffTime := time.Now().Add(-retention)
+
+	// Default: keep from the last segment (conservative)
+	safeOffset := l.segments[len(l.segments)-1].baseOffset
+
+	for _, s := range l.segments {
+		// If empty or new, we stop checking and keep from here
+		if s.size == 0 {
+			safeOffset = s.baseOffset
+			break
+		}
+
+		// Read first record to check timestamp
+		rec, err := s.Read(s.baseOffset)
+		if err != nil {
+			// If we can't read, default to keeping from here
+			safeOffset = s.baseOffset
+			break
+		}
+
+		ts, _, err := DecodeRecord(rec)
+		if err != nil {
+			safeOffset = s.baseOffset
+			break
+		}
+
+		t := time.Unix(0, ts)
+		if t.After(cutoffTime) || t.Equal(cutoffTime) {
+			safeOffset = s.baseOffset
+			break
+		}
+	}
+	l.mu.RUnlock()
+
+	return l.TruncateBefore(safeOffset)
 }
