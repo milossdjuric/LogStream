@@ -19,6 +19,10 @@ type ElectionState struct {
 	// Election results
 	winnerID string
 	isLeader bool
+
+	// Ring participants for consistent ring computation
+	// All nodes in the same election use this list to ensure ring consistency
+	ringParticipants []string
 }
 
 // NewElectionState creates a new election state tracker
@@ -131,6 +135,7 @@ func (es *ElectionState) Reset() {
 	es.electionID = 0
 	es.candidateID = ""
 	es.winnerID = ""
+	es.ringParticipants = nil
 
 	fmt.Printf("[Election] State reset\n")
 }
@@ -158,4 +163,32 @@ func (es *ElectionState) GetStartTime() time.Time {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.startTime
+}
+
+// SetRingParticipants stores the list of ring participants for this election
+// This ensures all nodes in the same election use the same ring topology
+func (es *ElectionState) SetRingParticipants(participants []string) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+
+	// Make a copy to avoid external modifications
+	es.ringParticipants = make([]string, len(participants))
+	copy(es.ringParticipants, participants)
+
+	fmt.Printf("[Election] Set ring participants: %d nodes\n", len(participants))
+}
+
+// GetRingParticipants returns the list of ring participants for this election
+func (es *ElectionState) GetRingParticipants() []string {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+
+	if es.ringParticipants == nil {
+		return nil
+	}
+
+	// Return a copy to prevent external modifications
+	result := make([]string, len(es.ringParticipants))
+	copy(result, es.ringParticipants)
+	return result
 }

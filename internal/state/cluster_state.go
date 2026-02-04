@@ -9,14 +9,23 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// shortID safely truncates an ID for display (max 8 chars)
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
 // ClusterState manages all cluster state: brokers + producers + consumers
 // This is what gets replicated to all nodes for view-synchronous recovery
 type ClusterState struct {
 	mu        sync.RWMutex
-	brokers   map[string]*protocol.BrokerInfo   // key: broker ID
-	producers map[string]*protocol.ProducerInfo  // key: producer ID
-	consumers map[string]*protocol.ConsumerInfo  // key: consumer ID
-	seqNum    int64                              // Monotonic sequence for FIFO ordering (tracks ALL changes)
+	brokers   map[string]*protocol.BrokerInfo       // key: broker ID
+	producers map[string]*protocol.ProducerInfo     // key: producer ID
+	consumers map[string]*protocol.ConsumerInfo     // key: consumer ID
+	streams   map[string]*protocol.StreamAssignment // key: topic (one-to-one mapping)
+	seqNum    int64                                 // Monotonic sequence for FIFO ordering (tracks ALL changes)
 }
 
 // NewClusterState creates a new combined cluster state
@@ -25,6 +34,7 @@ func NewClusterState() *ClusterState {
 		brokers:   make(map[string]*protocol.BrokerInfo),
 		producers: make(map[string]*protocol.ProducerInfo),
 		consumers: make(map[string]*protocol.ConsumerInfo),
+		streams:   make(map[string]*protocol.StreamAssignment),
 		seqNum:    0,
 	}
 }
@@ -45,7 +55,7 @@ func (cs *ClusterState) RegisterBroker(id, address string, isLeader bool) error 
 	cs.seqNum++
 
 	fmt.Printf("[ClusterState] Registered broker %s at %s (leader=%v, seq=%d)\n",
-		id[:8], address, isLeader, cs.seqNum)
+		shortID(id), address, isLeader, cs.seqNum)
 
 	return nil
 }
@@ -62,7 +72,7 @@ func (cs *ClusterState) RemoveBroker(id string) error {
 	delete(cs.brokers, id)
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Removed broker %s (seq=%d)\n", id[:8], cs.seqNum)
+	fmt.Printf("[ClusterState] Removed broker %s (seq=%d)\n", shortID(id), cs.seqNum)
 	return nil
 }
 
@@ -83,7 +93,7 @@ func (cs *ClusterState) CheckBrokerTimeouts(timeout time.Duration) []string {
 			removed = append(removed, id)
 
 			fmt.Printf("[ClusterState] Timeout: Removed broker %s (last seen: %s, seq=%d)\n",
-				id[:8], lastSeen.Round(time.Second), cs.seqNum)
+				shortID(id), lastSeen.Round(time.Second), cs.seqNum)
 		}
 	}
 
@@ -147,7 +157,7 @@ func (cs *ClusterState) RegisterProducer(id, address, topic string) error {
 	// Increment sequence number for replication ordering
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Registered producer %s (topic: %s, seq=%d)\n", id[:8], topic, cs.seqNum)
+	fmt.Printf("[ClusterState] Registered producer %s (topic: %s, seq=%d)\n", shortID(id), topic, cs.seqNum)
 	return nil
 }
 
@@ -163,7 +173,7 @@ func (cs *ClusterState) RemoveProducer(id string) error {
 	delete(cs.producers, id)
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Removed producer %s (seq=%d)\n", id[:8], cs.seqNum)
+	fmt.Printf("[ClusterState] Removed producer %s (seq=%d)\n", shortID(id), cs.seqNum)
 	return nil
 }
 
@@ -194,7 +204,7 @@ func (cs *ClusterState) CheckProducerTimeouts(timeout time.Duration) []string {
 			removed = append(removed, id)
 
 			fmt.Printf("[ClusterState] Timeout: Removed producer %s (last seen: %s, seq=%d)\n",
-				id[:8], lastSeen.Round(time.Second), cs.seqNum)
+				shortID(id), lastSeen.Round(time.Second), cs.seqNum)
 		}
 	}
 
@@ -246,7 +256,7 @@ func (cs *ClusterState) RegisterConsumer(id, address string) error {
 			LastHeartbeat: time.Now().UnixNano(),
 		}
 		cs.seqNum++
-		fmt.Printf("[ClusterState] Registered consumer %s (seq=%d)\n", id[:8], cs.seqNum)
+		fmt.Printf("[ClusterState] Registered consumer %s (seq=%d)\n", shortID(id), cs.seqNum)
 	} else {
 		cs.consumers[id].LastHeartbeat = time.Now().UnixNano()
 	}
@@ -275,7 +285,7 @@ func (cs *ClusterState) SubscribeConsumer(consumerID, topic string) error {
 	consumer.Topics = append(consumer.Topics, topic)
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Consumer %s subscribed to topic: %s (seq=%d)\n", consumerID[:8], topic, cs.seqNum)
+	fmt.Printf("[ClusterState] Consumer %s subscribed to topic: %s (seq=%d)\n", shortID(consumerID), topic, cs.seqNum)
 	return nil
 }
 
@@ -299,7 +309,7 @@ func (cs *ClusterState) UnsubscribeConsumer(consumerID, topic string) error {
 	consumer.Topics = newTopics
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Consumer %s unsubscribed from topic: %s (seq=%d)\n", consumerID[:8], topic, cs.seqNum)
+	fmt.Printf("[ClusterState] Consumer %s unsubscribed from topic: %s (seq=%d)\n", shortID(consumerID), topic, cs.seqNum)
 	return nil
 }
 
@@ -315,7 +325,7 @@ func (cs *ClusterState) RemoveConsumer(id string) error {
 	delete(cs.consumers, id)
 	cs.seqNum++
 
-	fmt.Printf("[ClusterState] Removed consumer %s (seq=%d)\n", id[:8], cs.seqNum)
+	fmt.Printf("[ClusterState] Removed consumer %s (seq=%d)\n", shortID(id), cs.seqNum)
 	return nil
 }
 
@@ -346,7 +356,7 @@ func (cs *ClusterState) CheckConsumerTimeouts(timeout time.Duration) []string {
 			removed = append(removed, id)
 
 			fmt.Printf("[ClusterState] Timeout: Removed consumer %s (last seen: %s, seq=%d)\n",
-				id[:8], lastSeen.Round(time.Second), cs.seqNum)
+				shortID(id), lastSeen.Round(time.Second), cs.seqNum)
 		}
 	}
 
@@ -503,20 +513,196 @@ func (cs *ClusterState) PrintStatus() {
 		}
 		lastSeen := time.Unix(0, broker.LastHeartbeat)
 		fmt.Printf("  %s: %s [%s] (last seen: %s)\n",
-			id[:8], broker.Address, role, time.Since(lastSeen).Round(time.Second))
+			shortID(id), broker.Address, role, time.Since(lastSeen).Round(time.Second))
 	}
 	fmt.Printf("Producers: %d\n", len(cs.producers))
 	for id, producer := range cs.producers {
 		lastSeen := time.Unix(0, producer.LastHeartbeat)
 		fmt.Printf("  %s: %s (topic: %s, last seen: %s)\n",
-			id[:8], producer.Address, producer.Topic, time.Since(lastSeen).Round(time.Second))
+			shortID(id), producer.Address, producer.Topic, time.Since(lastSeen).Round(time.Second))
 	}
 	fmt.Printf("Consumers: %d\n", len(cs.consumers))
 	for id, consumer := range cs.consumers {
 		lastSeen := time.Unix(0, consumer.LastHeartbeat)
 		fmt.Printf("  %s: %s (topics: %v, last seen: %s)\n",
-			id[:8], consumer.Address, consumer.Topics, time.Since(lastSeen).Round(time.Second))
+			shortID(id), consumer.Address, consumer.Topics, time.Since(lastSeen).Round(time.Second))
 	}
 	fmt.Println("============================")
 }
 
+// ============================================================================
+// Stream Assignment Methods (One-to-One Producer-Consumer Mapping)
+// ============================================================================
+
+// GetStreamAssignment returns the stream assignment for a topic
+func (cs *ClusterState) GetStreamAssignment(topic string) (*protocol.StreamAssignment, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	stream, exists := cs.streams[topic]
+	return stream, exists
+}
+
+// HasProducerForTopic checks if a topic already has a producer assigned
+func (cs *ClusterState) HasProducerForTopic(topic string) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	stream, exists := cs.streams[topic]
+	return exists && stream.ProducerId != ""
+}
+
+// HasConsumerForTopic checks if a topic already has a consumer assigned
+func (cs *ClusterState) HasConsumerForTopic(topic string) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	stream, exists := cs.streams[topic]
+	return exists && stream.ConsumerId != ""
+}
+
+// AssignStream creates a new stream assignment (producer to broker mapping)
+func (cs *ClusterState) AssignStream(topic, producerID, brokerID, brokerAddress string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	// Check if stream already exists
+	if existing, exists := cs.streams[topic]; exists {
+		return fmt.Errorf("stream already exists for topic %s (producer: %s, broker: %s)",
+			topic, shortID(existing.ProducerId), shortID(existing.AssignedBrokerId))
+	}
+
+	// Create new stream assignment
+	cs.streams[topic] = &protocol.StreamAssignment{
+		Topic:            topic,
+		ProducerId:       producerID,
+		ConsumerId:       "", // Will be set when consumer subscribes
+		AssignedBrokerId: brokerID,
+		BrokerAddress:    brokerAddress,
+	}
+
+	// Increment sequence number for FIFO ordering
+	cs.seqNum++
+
+	fmt.Printf("[ClusterState] Stream assigned: topic=%s producer=%s broker=%s seq=%d\n",
+		topic, shortID(producerID), shortID(brokerID), cs.seqNum)
+
+	return nil
+}
+
+// AssignConsumerToStream assigns a consumer to an existing stream
+func (cs *ClusterState) AssignConsumerToStream(consumerID, topic string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	// Check if stream exists
+	stream, exists := cs.streams[topic]
+	if !exists {
+		return fmt.Errorf("no stream exists for topic %s", topic)
+	}
+
+	// Check if consumer already assigned
+	if stream.ConsumerId != "" {
+		return fmt.Errorf("consumer already assigned to topic %s: %s",
+			topic, shortID(stream.ConsumerId))
+	}
+
+	// Assign consumer to stream
+	stream.ConsumerId = consumerID
+
+	// Increment sequence number for FIFO ordering
+	cs.seqNum++
+
+	fmt.Printf("[ClusterState] Consumer assigned to stream: topic=%s consumer=%s broker=%s seq=%d\n",
+		topic, shortID(consumerID), shortID(stream.AssignedBrokerId), cs.seqNum)
+
+	return nil
+}
+
+// GetStreamsByBroker returns all stream assignments for a specific broker
+func (cs *ClusterState) GetStreamsByBroker(brokerID string) []*protocol.StreamAssignment {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	var streams []*protocol.StreamAssignment
+	for _, stream := range cs.streams {
+		if stream.AssignedBrokerId == brokerID {
+			streams = append(streams, stream)
+		}
+	}
+
+	return streams
+}
+
+// ReassignStreamBroker reassigns a stream to a different broker (for failover)
+func (cs *ClusterState) ReassignStreamBroker(topic, newBrokerID, newBrokerAddress string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	// Check if stream exists
+	stream, exists := cs.streams[topic]
+	if !exists {
+		return fmt.Errorf("no stream exists for topic %s", topic)
+	}
+
+	oldBrokerID := stream.AssignedBrokerId
+
+	// Update broker assignment
+	stream.AssignedBrokerId = newBrokerID
+	stream.BrokerAddress = newBrokerAddress
+
+	// Increment sequence number for FIFO ordering
+	cs.seqNum++
+
+	fmt.Printf("[ClusterState] Stream reassigned: topic=%s from %s to %s seq=%d\n",
+		topic, shortID(oldBrokerID), shortID(newBrokerID), cs.seqNum)
+
+	return nil
+}
+
+// RemoveStream removes a stream assignment (called when producer disconnects)
+func (cs *ClusterState) RemoveStream(topic string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	stream, exists := cs.streams[topic]
+	if !exists {
+		return fmt.Errorf("no stream exists for topic %s", topic)
+	}
+
+	fmt.Printf("[ClusterState] Removing stream: topic=%s producer=%s\n",
+		topic, shortID(stream.ProducerId))
+	delete(cs.streams, topic)
+	cs.seqNum++
+
+	return nil
+}
+
+// RemoveConsumerFromStream removes a consumer from a stream (stream stays active)
+func (cs *ClusterState) RemoveConsumerFromStream(topic, consumerID string) error {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	stream, exists := cs.streams[topic]
+	if !exists {
+		return fmt.Errorf("no stream exists for topic %s", topic)
+	}
+
+	if stream.ConsumerId == "" {
+		return fmt.Errorf("no consumer assigned to topic %s", topic)
+	}
+
+	// Verify the consumer ID matches
+	if stream.ConsumerId != consumerID {
+		return fmt.Errorf("consumer %s not assigned to topic %s (assigned: %s)",
+			shortID(consumerID), topic, shortID(stream.ConsumerId))
+	}
+
+	fmt.Printf("[ClusterState] Removing consumer %s from stream: topic=%s\n",
+		shortID(stream.ConsumerId), topic)
+
+	stream.ConsumerId = ""
+	cs.seqNum++
+
+	return nil
+}
