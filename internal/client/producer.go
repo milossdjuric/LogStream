@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/milossdjuric/logstream/internal/protocol"
@@ -18,15 +19,18 @@ type Producer struct {
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
 	stopHeartbeat chan struct{}
+	seqNum        int64 // Monotonically increasing sequence number for FIFO ordering
+	wg            sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
 // NewProducer creates a new producer
 func NewProducer(topic, leaderAddr string) *Producer {
 	return &Producer{
-		id:            protocol.GenerateNodeID(fmt.Sprintf("producer-%d", time.Now().UnixNano())),
+		id:            protocol.GenerateClientID("producer", leaderAddr),
 		topic:         topic,
 		leaderAddr:    leaderAddr,
 		stopHeartbeat: make(chan struct{}),
+		seqNum:        1, // Start at 1 (0 means unset)
 	}
 }
 
@@ -119,33 +123,45 @@ func (p *Producer) Connect() error {
 	}
 
 	// Start heartbeat routine to send periodic heartbeats
+	p.wg.Add(1) // Register goroutine before starting
 	go p.sendHeartbeats()
 
 	return nil
 }
 
 // SendData sends data to the assigned broker via UDP
+// Uses monotonically increasing sequence numbers for FIFO ordering
 func (p *Producer) SendData(data []byte) error {
 	if p.udpConn == nil {
 		return fmt.Errorf("not connected")
 	}
 
-	// Create DATA message
-	dataMsg := protocol.NewDataMsg(p.id, p.topic, data, 0)
+	// Get current sequence number and increment for next message
+	currentSeq := p.seqNum
+	p.seqNum++
+
+	// Create DATA message with sequence number for FIFO ordering
+	dataMsg := protocol.NewDataMsg(p.id, p.topic, data, currentSeq)
 
 	// Send DATA message
 	if err := protocol.WriteUDPMessage(p.udpConn, dataMsg, p.udpRemoteAddr); err != nil {
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 
-	fmt.Printf("[Producer %s] -> DATA (topic: %s, size: %d bytes)\n",
-		p.id[:8], p.topic, len(data))
+	fmt.Printf("[Producer %s] -> DATA seq=%d (topic: %s, size: %d bytes)\n",
+		p.id[:8], currentSeq, p.topic, len(data))
 
 	return nil
 }
 
+// GetSequenceNum returns the current sequence number (for debugging/testing)
+func (p *Producer) GetSequenceNum() int64 {
+	return p.seqNum
+}
+
 // sendHeartbeats sends periodic heartbeats to leader
 func (p *Producer) sendHeartbeats() {
+	defer p.wg.Done() // Signal completion when goroutine exits
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -159,13 +175,13 @@ func (p *Producer) sendHeartbeats() {
 				continue
 			}
 
-			// Create heartbeat message
-			heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0)
+		// Create heartbeat message (producers don't have view numbers, use 0)
+		heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0)
 
-			// Send heartbeat message
-			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-				log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
-			}
+		// Send heartbeat message
+		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
+			log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
+		}
 
 			conn.Close()
 
@@ -178,6 +194,10 @@ func (p *Producer) sendHeartbeats() {
 // Close shuts down the producer
 func (p *Producer) Close() {
 	close(p.stopHeartbeat)
+	
+	// Wait for goroutine to actually exit (proper synchronization)
+	p.wg.Wait()
+	
 	if p.udpConn != nil {
 		p.udpConn.Close()
 	}

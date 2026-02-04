@@ -13,13 +13,17 @@ type Config struct {
 	MulticastGroup   string
 	BroadcastPort    int
 	NetworkInterface string
+
+	// Analytics configuration
+	AnalyticsWindowSeconds int // Window size in seconds for CountInWindow analytics (default: 60)
 }
 
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
-		NodeAddress:    getEnv("NODE_ADDRESS", ""),
-		MulticastGroup: getEnv("MULTICAST_GROUP", "239.0.0.1:9999"),
-		BroadcastPort:  getEnvInt("BROADCAST_PORT", 8888),
+		NodeAddress:            getEnv("NODE_ADDRESS", ""),
+		MulticastGroup:         getEnv("MULTICAST_GROUP", "239.0.0.1:9999"),
+		BroadcastPort:          getEnvInt("BROADCAST_PORT", 8888),
+		AnalyticsWindowSeconds: getEnvInt("ANALYTICS_WINDOW_SECONDS", 60),
 	}
 
 	if cfg.NodeAddress == "" {
@@ -128,14 +132,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("multicast group must be in 239.x.x.x range")
 	}
 
+	if c.AnalyticsWindowSeconds <= 0 {
+		return fmt.Errorf("ANALYTICS_WINDOW_SECONDS must be positive (got %d)", c.AnalyticsWindowSeconds)
+	}
+
 	return nil
 }
 
 func (c *Config) Print() {
 	fmt.Println("=== LogStream Configuration ===")
-	fmt.Printf("Node Address:      %s\n", c.NodeAddress)
-	fmt.Printf("Multicast Group:   %s\n", c.MulticastGroup)
-	fmt.Printf("Broadcast Port:    %d\n", c.BroadcastPort)
-	fmt.Printf("Network Interface: %s\n", c.NetworkInterface)
+	fmt.Printf("Node Address:        %s\n", c.NodeAddress)
+	fmt.Printf("Multicast Group:     %s\n", c.MulticastGroup)
+	fmt.Printf("Broadcast Port:      %d\n", c.BroadcastPort)
+	fmt.Printf("Network Interface:   %s\n", c.NetworkInterface)
+	fmt.Printf("Analytics Window:    %ds\n", c.AnalyticsWindowSeconds)
 	fmt.Println("================================")
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/milossdjuric/logstream/internal/protocol"
@@ -12,28 +13,39 @@ import (
 
 // Consumer handles consuming data from LogStream
 type Consumer struct {
-	id         string
-	topic      string
-	leaderAddr string
-	tcpConn    net.Conn
-	results    chan *protocol.ResultMessage
-	errors     chan error
-	stopSignal chan struct{}
+	id               string
+	topic            string
+	leaderAddr       string
+	brokerAddr       string   // Assigned broker address (from CONSUME_ACK)
+	tcpConn          net.Conn // Connection to the assigned broker
+	results          chan *protocol.ResultMessage
+	errors           chan error
+	stopSignal       chan struct{}
+	enableProcessing bool // Whether to request data processing from broker
+	wg               sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
 // NewConsumer creates a new consumer
 func NewConsumer(topic, leaderAddr string) *Consumer {
 	return &Consumer{
-		id:         protocol.GenerateNodeID(fmt.Sprintf("consumer-%d", time.Now().UnixNano())),
-		topic:      topic,
-		leaderAddr: leaderAddr,
-		results:    make(chan *protocol.ResultMessage, 100),
-		errors:     make(chan error, 10),
-		stopSignal: make(chan struct{}),
+		id:               protocol.GenerateClientID("consumer", leaderAddr),
+		topic:            topic,
+		leaderAddr:       leaderAddr,
+		results:          make(chan *protocol.ResultMessage, 100),
+		errors:           make(chan error, 10),
+		stopSignal:       make(chan struct{}),
+		enableProcessing: true, // Enable data processing by default
 	}
 }
 
-// Connect registers with the leader and subscribes to topic
+// NewConsumerWithOptions creates a new consumer with options
+func NewConsumerWithOptions(topic, leaderAddr string, enableProcessing bool) *Consumer {
+	c := NewConsumer(topic, leaderAddr)
+	c.enableProcessing = enableProcessing
+	return c
+}
+
+// Connect registers with the leader and then subscribes to the assigned broker
 func (c *Consumer) Connect() error {
 	const (
 		maxAttempts      = 10
@@ -43,20 +55,23 @@ func (c *Consumer) Connect() error {
 		failureThreshold = 5
 	)
 
-	failureCount := 0
-	var conn net.Conn
-	var err error
-
 	time.Sleep(initialDelay)
 
+	// Connect to leader for registration
+	fmt.Printf("[Consumer %s] Connecting to leader at %s for registration...\n", c.id[:8], c.leaderAddr)
+
+	failureCount := 0
+	var leaderConn net.Conn
+	var err error
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		conn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+		leaderConn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
 
 		if err != nil {
 			failureCount++
 			if failureCount >= failureThreshold {
 				time.Sleep(halfOpenDelay)
-				conn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+				leaderConn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
 				if err == nil {
 					break
 				}
@@ -75,43 +90,118 @@ func (c *Consumer) Connect() error {
 		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
 	}
 
-	c.tcpConn = conn
-
 	// Get local address for registration
-	localAddr := conn.LocalAddr().String()
+	localAddr := leaderConn.LocalAddr().String()
 
 	consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
 
-	// Send CONSUME request
+	// Send CONSUME request to leader
 	fmt.Printf("[Consumer %s] -> CONSUME (topic: %s)\n", c.id[:8], c.topic)
-	if err := protocol.WriteTCPMessage(conn, consumeMsg); err != nil {
+	if err := protocol.WriteTCPMessage(leaderConn, consumeMsg); err != nil {
+		leaderConn.Close()
 		return fmt.Errorf("failed to send CONSUME: %w", err)
 	}
 
 	// Read CONSUME_ACK response
-	msg, err := protocol.ReadTCPMessage(conn)
+	msg, err := protocol.ReadTCPMessage(leaderConn)
 	if err != nil {
+		leaderConn.Close()
 		return fmt.Errorf("failed to read CONSUME_ACK: %w", err)
 	}
 
 	ack, ok := msg.(*protocol.ConsumeMsg)
 	if !ok {
+		leaderConn.Close()
 		return fmt.Errorf("unexpected response type: %T", msg)
 	}
 
 	if ack.Topic == "" {
-		return fmt.Errorf("subscription failed")
+		leaderConn.Close()
+		return fmt.Errorf("subscription failed - topic may not have a producer yet")
 	}
 
-	fmt.Printf("[Consumer %s] <- CONSUME_ACK (subscribed to: %s)\n", c.id[:8], ack.Topic)
+	// Get the assigned broker address from the response
+	c.brokerAddr = ack.ConsumerAddress // This now contains the assigned broker address
+	fmt.Printf("[Consumer %s] <- CONSUME_ACK (topic: %s, assigned broker: %s)\n", c.id[:8], ack.Topic, c.brokerAddr)
 
-	// Start receiving results in background goroutine
+	// Close leader connection - we're done with registration
+	leaderConn.Close()
+
+	// Connect to assigned broker for subscription
+	fmt.Printf("[Consumer %s] Connecting to assigned broker at %s...\n", c.id[:8], c.brokerAddr)
+
+	failureCount = 0
+	var brokerConn net.Conn
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		brokerConn, err = net.DialTimeout("tcp", c.brokerAddr, 5*time.Second)
+
+		if err != nil {
+			failureCount++
+			if failureCount >= failureThreshold {
+				time.Sleep(halfOpenDelay)
+				brokerConn, err = net.DialTimeout("tcp", c.brokerAddr, 5*time.Second)
+				if err == nil {
+					break
+				}
+				failureCount++
+			}
+		} else {
+			break
+		}
+
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to connect to broker after %d attempts: %w", maxAttempts, err)
+	}
+
+	c.tcpConn = brokerConn
+
+	// Get local address for subscription
+	localAddr = brokerConn.LocalAddr().String()
+
+	// Send SUBSCRIBE request to broker
+	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing)
+
+	fmt.Printf("[Consumer %s] -> SUBSCRIBE (topic: %s, processing: %v)\n", c.id[:8], c.topic, c.enableProcessing)
+	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
+		brokerConn.Close()
+		return fmt.Errorf("failed to send SUBSCRIBE: %w", err)
+	}
+
+	// Read SUBSCRIBE_ACK response (broker sends back a SUBSCRIBE message as ACK)
+	msg, err = protocol.ReadTCPMessage(brokerConn)
+	if err != nil {
+		brokerConn.Close()
+		return fmt.Errorf("failed to read SUBSCRIBE_ACK: %w", err)
+	}
+
+	subAck, ok := msg.(*protocol.SubscribeMsg)
+	if !ok {
+		brokerConn.Close()
+		return fmt.Errorf("unexpected response type: %T", msg)
+	}
+
+	if subAck.Topic == "" {
+		brokerConn.Close()
+		return fmt.Errorf("broker subscription failed")
+	}
+
+	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (subscribed to broker for topic: %s)\n", c.id[:8], subAck.Topic)
+
+	// Start receiving results from broker in background goroutine
+	c.wg.Add(1) // Register goroutine before starting
 	go c.receiveResults()
 
 	return nil
 }
 
 func (c *Consumer) receiveResults() {
+	defer c.wg.Done() // Signal completion when goroutine exits
 	defer func() {
 		if c.tcpConn != nil {
 			c.tcpConn.Close()
@@ -125,7 +215,10 @@ func (c *Consumer) receiveResults() {
 
 		default:
 			if c.tcpConn == nil {
-				c.errors <- fmt.Errorf("connection closed")
+				select {
+				case c.errors <- fmt.Errorf("connection closed"):
+				default:
+				}
 				return
 			}
 
@@ -204,6 +297,10 @@ func (c *Consumer) Errors() <-chan error {
 // Close shuts down the consumer
 func (c *Consumer) Close() {
 	close(c.stopSignal)
+	
+	// Wait for goroutine to actually exit (proper synchronization)
+	c.wg.Wait()
+	
 	if c.tcpConn != nil {
 		c.tcpConn.Close()
 		c.tcpConn = nil

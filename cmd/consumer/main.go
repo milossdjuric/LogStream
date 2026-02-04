@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -11,79 +12,99 @@ import (
 )
 
 func main() {
-	// Get configuration from environment
-	leaderAddr := getEnv("LEADER_ADDRESS", "localhost:8001")
-	topic := getEnv("TOPIC", "test-logs")
+	// CLI flags with env var fallback
+	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
+	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to consume from")
+	analytics := flag.Bool("analytics", true, "Request analytics/processing from broker")
+	help := flag.Bool("help", false, "Show help")
 
-	fmt.Println("=== LogStream Consumer ===")
-	fmt.Printf("Leader Address: %s\n", leaderAddr)
-	fmt.Printf("Topic:          %s\n", topic)
-	fmt.Println("================================")
-	fmt.Println()
+	flag.Parse()
 
-	// Create consumer using the client library
-	consumer := client.NewConsumer(topic, leaderAddr)
-
-	// Connect and subscribe
-	fmt.Println("Connecting to LogStream cluster...")
-	if err := consumer.Connect(); err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+	if *help || *leader == "" {
+		fmt.Println("LogStream Consumer")
+		fmt.Println("==================")
+		fmt.Println()
+		fmt.Println("Usage:")
+		fmt.Println("  consumer -leader <address> [options]")
+		fmt.Println()
+		fmt.Println("Options:")
+		fmt.Println("  -leader string")
+		fmt.Println("        Leader broker address (REQUIRED)")
+		fmt.Println("        Example: -leader 192.168.1.10:8001")
+		fmt.Println()
+		fmt.Println("  -topic string")
+		fmt.Println("        Topic name (default: logs)")
+		fmt.Println()
+		fmt.Println("  -analytics bool")
+		fmt.Println("        Request analytics/processing from broker (default: true)")
+		fmt.Println()
+		fmt.Println("Examples:")
+		fmt.Println("  # Consume with analytics")
+		fmt.Println("  ./consumer -leader 192.168.1.10:8001 -topic logs")
+		fmt.Println()
+		fmt.Println("  # Consume raw data only (no analytics)")
+		fmt.Println("  ./consumer -leader 192.168.1.10:8001 -topic logs -analytics=false")
+		os.Exit(0)
 	}
 
-	// Setup graceful shutdown
+	fmt.Println("===========================================")
+	fmt.Println("       LogStream Consumer")
+	fmt.Println("===========================================")
+	fmt.Println()
+	fmt.Printf("Leader:    %s\n", *leader)
+	fmt.Printf("Topic:     %s\n", *topic)
+	fmt.Printf("Analytics: %v\n", *analytics)
+	fmt.Println()
+
+	// Create consumer
+	consumer := client.NewConsumerWithOptions(*topic, *leader, *analytics)
+
+	// Connect to cluster
+	fmt.Println("Connecting to cluster...")
+	if err := consumer.Connect(); err != nil {
+		log.Fatalf("Failed to connect: %v\n", err)
+	}
+	fmt.Println("[OK] Connected successfully")
+	fmt.Println()
+	fmt.Println("Receiving messages (Press Ctrl+C to stop)...")
+	fmt.Println()
+
+	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	go func() {
-		<-sigChan
-		fmt.Println("\n\nShutting down consumer...")
-		consumer.Close()
-		os.Exit(0)
-	}()
-
-	// Process incoming results
-	fmt.Println("\nSubscribed! Waiting for messages (Ctrl+C to quit):")
-	fmt.Println("---")
-
+	// Display received messages (receiveResults() already started in Connect())
+	received := 0
 	for {
 		select {
 		case result := <-consumer.Results():
-			if result != nil {
-			fmt.Printf("[%s] Offset %d: %s\n", result.Topic, result.Offset, string(result.Data))
+			received++
+			fmt.Printf("-----------------------------------------\n")
+			fmt.Printf("Message #%d\n", received)
+			fmt.Printf("Topic:  %s\n", result.Topic)
+			fmt.Printf("Offset: %d\n", result.Offset)
+			
+			if len(result.Data) > 0 {
+				fmt.Printf("Data:   %s\n", string(result.Data))
 			}
 
 		case err := <-consumer.Errors():
-			if err != nil {
-				// Check if connection closed - exit gracefully without logging spam
-				errMsg := err.Error()
-				if errMsg == "connection closed by server" || 
-				   errMsg == "connection closed" {
-					fmt.Println("\nConnection closed by server. Exiting...")
-					consumer.Close()
-					os.Exit(0)
-				}
-				
-				// Check if error contains EOF - also exit gracefully
-				if len(errMsg) > 0 && (errMsg == "EOF" || 
-				   errMsg[len(errMsg)-3:] == "EOF" ||
-				   errMsg == "failed to read size: EOF" ||
-				   errMsg == "failed to read result: failed to read size: EOF") {
-					fmt.Println("\nConnection closed (EOF detected). Exiting...")
-					consumer.Close()
-					os.Exit(0)
-				}
-				
-				// For other errors, log but limit rate to prevent log spam
-				// Use a simple rate limiter: only log every 10th error
-				log.Printf("Error: %v", err)
-			}
+			log.Printf("Error: %v\n", err)
+
+		case <-sigChan:
+			fmt.Printf("\n\n[OK] Received %d messages total\n", received)
+			fmt.Println("\nDisconnecting...")
+			consumer.Close()
+			fmt.Println("[OK] Disconnected")
+			return
 		}
 	}
 }
 
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+// getEnvOrDefault returns environment variable value or default
+func getEnvOrDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
 	}
-	return defaultValue
+	return defaultVal
 }

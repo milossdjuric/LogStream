@@ -9,20 +9,30 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BroadcastConfig holds broadcast configuration
+// BroadcastConfig holds broadcast configuration with circuit breaker settings
 type BroadcastConfig struct {
 	Port       int           // Port to broadcast on
-	Timeout    time.Duration // How long to wait for responses
+	Timeout    time.Duration // How long to wait for responses per attempt
 	MaxRetries int           // Number of broadcast retries
-	RetryDelay time.Duration // Delay between retries
+
+	// Circuit breaker settings
+	RetryDelay           time.Duration // Initial delay between retries
+	MaxRetryDelay        time.Duration // Maximum delay (cap for exponential backoff)
+	BackoffMultiplier    float64       // Multiplier for exponential backoff
+	SplitBrainDelay      time.Duration // Extra delay when split-brain detected
+	ResponseCollectTime  time.Duration // Time to collect multiple responses (for split-brain detection)
 }
 
 func DefaultBroadcastConfig() *BroadcastConfig {
 	return &BroadcastConfig{
-		Port:       8888,
-		Timeout:    5 * time.Second,
-		MaxRetries: 3,
-		RetryDelay: 1 * time.Second,
+		Port:                 8888,
+		Timeout:              5 * time.Second,
+		MaxRetries:           5,                    // Increased from 3 for circuit breaker
+		RetryDelay:           1 * time.Second,      // Initial delay
+		MaxRetryDelay:        10 * time.Second,     // Cap exponential backoff at 10s
+		BackoffMultiplier:    1.5,                  // Exponential backoff multiplier
+		SplitBrainDelay:      5 * time.Second,      // Extra delay when split-brain detected
+		ResponseCollectTime:  500 * time.Millisecond, // Time to collect multiple responses
 	}
 }
 
@@ -200,7 +210,9 @@ func calculateBroadcastAddress(nodeAddress string, port int) (string, error) {
 	}
 
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		// Only skip if interface is down
+		// Allow loopback interfaces for localhost testing (127.0.0.1)
+		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
 
@@ -263,6 +275,7 @@ func calculateBroadcastAddress(nodeAddress string, port int) (string, error) {
 }
 
 // DiscoverClusterWithRetry broadcasts JOIN and waits for JOIN_RESPONSE
+// Implements circuit breaker pattern with exponential backoff and split-brain detection
 func DiscoverClusterWithRetry(senderID string, senderType NodeType, address string, config *BroadcastConfig) (*JoinResponseMsg, error) {
 
 	// Use default config if none provided
@@ -285,38 +298,132 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 		broadcastAddr = fmt.Sprintf("255.255.255.255:%d", config.Port)
 	}
 
-	// Try multiple times to discover the cluster
+	// Circuit breaker: track current delay for exponential backoff
+	currentDelay := config.RetryDelay
+	consecutiveFailures := 0
+
+	// Try multiple times to discover the cluster with circuit breaker pattern
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
+		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
 
 		// Send JOIN broadcast
 		if err := sender.BroadcastJoin(senderID, senderType, address, broadcastAddr); err != nil {
 			return nil, fmt.Errorf("broadcast failed: %w", err)
 		}
 
-		// Wait for response with timeout
-		msg, _, err := sender.ReceiveMessageWithTimeout(config.Timeout)
-		if err != nil {
-			// If we have timeout or other error, retry
-			if attempt < config.MaxRetries-1 {
+		// Collect ALL responses within a collection window (for split-brain detection)
+		responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
 
-				// Sleep for some time before retrying
-				time.Sleep(config.RetryDelay)
+		if len(responses) == 0 {
+			// No responses - increment failure counter and apply backoff
+			consecutiveFailures++
+			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
+
+			if attempt < config.MaxRetries-1 {
+				// Exponential backoff with cap
+				time.Sleep(currentDelay)
+				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+				if currentDelay > config.MaxRetryDelay {
+					currentDelay = config.MaxRetryDelay
+				}
 				continue
 			}
-			return nil, fmt.Errorf("no response after %d attempts: %w", config.MaxRetries, err)
+			return nil, fmt.Errorf("no response after %d attempts", config.MaxRetries)
 		}
 
-		// If we got a JOIN_RESPONSE, return it
-		if response, ok := msg.(*JoinResponseMsg); ok {
-			return response, nil
+		// Reset failure counter on successful response
+		consecutiveFailures = 0
+
+		// Check for split-brain: multiple different leaders responded
+		uniqueLeaders := getUniqueLeaders(responses)
+		if len(uniqueLeaders) > 1 {
+			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
+			for leaderAddr := range uniqueLeaders {
+				fmt.Printf("[Discovery]   - Leader at: %s\n", leaderAddr)
+			}
+
+			// Sleep to allow cluster to resolve split-brain via election
+			fmt.Printf("[Discovery] Sleeping %v to allow election to resolve split-brain...\n", config.SplitBrainDelay)
+			time.Sleep(config.SplitBrainDelay)
+
+			// Apply additional backoff for split-brain scenario
+			currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+			if currentDelay > config.MaxRetryDelay {
+				currentDelay = config.MaxRetryDelay
+			}
+
+			// Retry discovery - do NOT make a deterministic choice
+			// Let the cluster resolve split-brain via election
+			if attempt < config.MaxRetries-1 {
+				continue
+			}
+
+			// If still seeing split-brain after all retries, return error
+			// The caller should handle this (e.g., become leader themselves or fail)
+			return nil, fmt.Errorf("split-brain detected after %d attempts: %d different leaders responding",
+				config.MaxRetries, len(uniqueLeaders))
 		}
 
-		// Sleep before next attempt and retry
-		if attempt < config.MaxRetries-1 {
-			time.Sleep(config.RetryDelay)
-		}
+		// Single leader - cluster is healthy, join it
+		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
+		return responses[0], nil
 	}
 
 	// If we run out of retries, return error
 	return nil, fmt.Errorf("failed to discover cluster after %d attempts", config.MaxRetries)
+}
+
+// collectJoinResponses collects multiple JOIN_RESPONSE messages within a time window
+// This allows detecting split-brain where multiple leaders respond
+func collectJoinResponses(sender *BroadcastConnection, timeout, collectTime time.Duration) []*JoinResponseMsg {
+	var responses []*JoinResponseMsg
+	deadline := time.Now().Add(timeout)
+	collectDeadline := time.Now().Add(collectTime)
+
+	for time.Now().Before(deadline) {
+		// Calculate remaining time for this read
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+
+		// Use shorter timeout for individual reads to allow collecting multiple responses
+		readTimeout := remaining
+		if readTimeout > 200*time.Millisecond {
+			readTimeout = 200 * time.Millisecond
+		}
+
+		msg, _, err := sender.ReceiveMessageWithTimeout(readTimeout)
+		if err != nil {
+			// Timeout on this read - check if we should continue collecting
+			if len(responses) > 0 && time.Now().After(collectDeadline) {
+				// We have at least one response and collection window expired
+				break
+			}
+			// Keep trying until main timeout
+			continue
+		}
+
+		// Check if it's a JOIN_RESPONSE
+		if response, ok := msg.(*JoinResponseMsg); ok {
+			responses = append(responses, response)
+			fmt.Printf("[Discovery] Received JOIN_RESPONSE from leader %s\n", response.LeaderAddress)
+
+			// If collection window expired and we have responses, we're done
+			if time.Now().After(collectDeadline) {
+				break
+			}
+		}
+	}
+
+	return responses
+}
+
+// getUniqueLeaders extracts unique leader addresses from responses
+func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
+	leaders := make(map[string]bool)
+	for _, r := range responses {
+		leaders[r.LeaderAddress] = true
+	}
+	return leaders
 }

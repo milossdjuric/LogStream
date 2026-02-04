@@ -1,11 +1,14 @@
 module github.com/milossdjuric/logstream
 
+go 1.23
 
-go 1.25.4
+toolchain go1.24.12
 
 require (
-	golang.org/x/net v0.48.0
+	golang.org/x/net v0.25.0
 	google.golang.org/protobuf v1.36.11
 )
 
-require golang.org/x/sys v0.39.0 // indirect
+require golang.org/x/sys v0.20.0
+
+require github.com/google/gopacket v1.1.19
