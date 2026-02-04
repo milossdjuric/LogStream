@@ -4,6 +4,8 @@
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log() { echo -e "${BLUE}[>]${NC} $1"; }
@@ -11,8 +13,91 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 error() { echo -e "${RED}[X]${NC} $1"; }
 error_msg() { echo -e "${RED}[!]${NC} $1"; }
 
+# Test-specific functions
+success_test() { echo -e "${GREEN}[PASS]${NC} $1"; }
+
+# Warning message
+warn_msg() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+# Error for tests
+error_test() { echo -e "${RED}[FAIL]${NC} $1"; }
+
+# Test log message
+log_test() { echo -e "${BLUE}[TEST]${NC} $1"; }
+
+# Info message
+info_msg() { echo -e "${CYAN}[INFO]${NC} $1"; }
+
 # Get project root (3 levels up from tests/linux/lib/)
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# Vagrant directory - can be overridden via VAGRANT_DIR environment variable
+# This allows parallel test execution with dedicated VM sets
+# Default: $PROJECT_ROOT/deploy/vagrant
+# Parallel slots: $PROJECT_ROOT/deploy/vagrant-parallel/slot{1,2,3}
+VAGRANT_DIR="${VAGRANT_DIR:-$PROJECT_ROOT/deploy/vagrant}"
+
+# Detect which slot we're in and set appropriate IP addresses
+# This enables parallel testing with different VM networks
+detect_vagrant_slot_ips() {
+    # Default IPs (original vagrant setup)
+    LEADER_IP="${LEADER_IP:-192.168.100.10}"
+    BROKER1_IP="${BROKER1_IP:-192.168.100.20}"
+    BROKER2_IP="${BROKER2_IP:-192.168.100.30}"
+
+    # Detect slot from VAGRANT_DIR path
+    if [[ "$VAGRANT_DIR" == *"slot1"* ]]; then
+        LEADER_IP="192.168.101.10"
+        BROKER1_IP="192.168.101.20"
+        BROKER2_IP="192.168.101.30"
+        VAGRANT_SLOT=1
+    elif [[ "$VAGRANT_DIR" == *"slot2"* ]]; then
+        LEADER_IP="192.168.102.10"
+        BROKER1_IP="192.168.102.20"
+        BROKER2_IP="192.168.102.30"
+        VAGRANT_SLOT=2
+    elif [[ "$VAGRANT_DIR" == *"slot3"* ]]; then
+        LEADER_IP="192.168.103.10"
+        BROKER1_IP="192.168.103.20"
+        BROKER2_IP="192.168.103.30"
+        VAGRANT_SLOT=3
+    else
+        VAGRANT_SLOT=0
+    fi
+
+    export LEADER_IP BROKER1_IP BROKER2_IP VAGRANT_SLOT
+}
+
+# Helper to translate hardcoded IP to slot-specific IP
+# Usage: translate_ip "192.168.100.10" -> returns slot-specific IP
+translate_vagrant_ip() {
+    local ip="$1"
+
+    # Only translate if we're in a slot
+    if [ -z "$VAGRANT_SLOT" ] || [ "$VAGRANT_SLOT" = "0" ]; then
+        echo "$ip"
+        return
+    fi
+
+    # Translate based on last octet
+    case "$ip" in
+        192.168.100.10*)
+            echo "${LEADER_IP}${ip#192.168.100.10}"
+            ;;
+        192.168.100.20*)
+            echo "${BROKER1_IP}${ip#192.168.100.20}"
+            ;;
+        192.168.100.30*)
+            echo "${BROKER2_IP}${ip#192.168.100.30}"
+            ;;
+        *)
+            echo "$ip"
+            ;;
+    esac
+}
+
+# Auto-detect IPs on source
+detect_vagrant_slot_ips
 
 # Network namespace helpers for local testing
 # These functions manage netns setup for multicast support
@@ -89,7 +174,7 @@ trap cleanup EXIT
 # This should be called between tests to ensure clean state
 global_vagrant_cleanup() {
     local wait_time="${1:-3}"
-    local vagrant_dir="$PROJECT_ROOT/deploy/vagrant"
+    local vagrant_dir="${VAGRANT_DIR:-$PROJECT_ROOT/deploy/vagrant}"
     local original_dir="$(pwd)"
 
     log "============================================================"
@@ -167,19 +252,19 @@ global_vagrant_cleanup() {
 cd "$PROJECT_ROOT"
 
 # Helper function to check VM status with retries (for parallel test execution)
-# Must be called from deploy/vagrant directory
+# Uses VAGRANT_DIR environment variable (defaults to deploy/vagrant)
 check_vm_status() {
     local vm=$1
     local max_attempts=5
     local attempt=1
     local delay=1
-    
-    # Ensure we're in the vagrant directory
-    local vagrant_dir="$PROJECT_ROOT/deploy/vagrant"
+
+    # Ensure we're in the vagrant directory (use VAGRANT_DIR env var if set)
+    local vagrant_dir="${VAGRANT_DIR:-$PROJECT_ROOT/deploy/vagrant}"
     if [ ! -f "$vagrant_dir/Vagrantfile" ]; then
         return 1
     fi
-    
+
     while [ $attempt -le $max_attempts ]; do
         if (cd "$vagrant_dir" && vagrant status $vm 2>/dev/null | grep -q "running"); then
             return 0
@@ -194,16 +279,18 @@ check_vm_status() {
 }
 
 # Helper function to run vagrant ssh with retries
+# Uses VAGRANT_DIR environment variable (defaults to deploy/vagrant)
 vagrant_ssh_retry() {
     local vm=$1
     shift
     local cmd="$@"
     local max_attempts=3
     local attempt=1
-    
+    local vagrant_dir="${VAGRANT_DIR:-$PROJECT_ROOT/deploy/vagrant}"
+
     while [ $attempt -le $max_attempts ]; do
-        # Ensure we are in the deploy/vagrant directory for vagrant commands
-        if (cd "$PROJECT_ROOT/deploy/vagrant" && vagrant ssh $vm -c "$cmd" 2>/dev/null); then
+        # Ensure we are in the correct vagrant directory for vagrant commands
+        if (cd "$vagrant_dir" && vagrant ssh $vm -c "$cmd" 2>/dev/null); then
             return 0
         fi
         if [ $attempt -lt $max_attempts ]; then
@@ -215,32 +302,56 @@ vagrant_ssh_retry() {
 }
 
 # Setup log directory based on LOG_BASE_DIR environment variable
-# Usage: setup_log_directory MODE
+# Usage: setup_log_directory MODE [CATEGORY]
 # Sets: LOG_DIR and VM_LOG_DIR variables
+# Categories: core, advanced, client, network
 setup_log_directory() {
     local mode="$1"
+    local category="${2:-}"
+    
     # Get script name from caller (the test script that called this function)
     # Use BASH_SOURCE to get the actual script file, not the sourced common.sh
     local script_path="${BASH_SOURCE[1]:-$0}"
     local script_name=$(basename "$script_path" .sh | sed 's/test-//')
     
+    # Auto-detect category from script name if not provided
+    if [ -z "$category" ]; then
+        case "$script_name" in
+            single|trio|sequence|producer-consumer)
+                category="core"
+                ;;
+            election-automatic|stream-failover|view-sync|state-exchange)
+                category="advanced"
+                ;;
+            client-cleanup|fifo-ordering|one-to-one-mapping)
+                category="client"
+                ;;
+            protocol-compliance|network-analysis)
+                category="network"
+                ;;
+            *)
+                category="other"
+                ;;
+        esac
+    fi
+    
     if [ -n "$LOG_BASE_DIR" ]; then
-        LOG_DIR="$LOG_BASE_DIR/$script_name"
+        LOG_DIR="$LOG_BASE_DIR/$category/$script_name"
         mkdir -p "$LOG_DIR"
         # For vagrant, use synced folder path
         if [ "$mode" = "vagrant" ]; then
-            VM_LOG_DIR="/vagrant/logstream/test-logs/$(basename "$LOG_BASE_DIR")/$script_name"
+            VM_LOG_DIR="/vagrant/logstream/test-logs/$(basename "$LOG_BASE_DIR")/$category/$script_name"
         else
             VM_LOG_DIR="$LOG_DIR"
         fi
     else
         # Fallback: Create log directory in project root for standalone execution
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        LOG_DIR="$PROJECT_ROOT/test-logs/standalone-${script_name}-${TIMESTAMP}"
+        LOG_DIR="$PROJECT_ROOT/test-logs/standalone-${category}-${script_name}-${TIMESTAMP}"
         mkdir -p "$LOG_DIR"
         
         if [ "$mode" = "vagrant" ]; then
-            VM_LOG_DIR="/vagrant/logstream/test-logs/standalone-${script_name}-${TIMESTAMP}"
+            VM_LOG_DIR="/vagrant/logstream/test-logs/standalone-${category}-${script_name}-${TIMESTAMP}"
         else
             VM_LOG_DIR="$LOG_DIR"
         fi
@@ -752,7 +863,17 @@ start_logstream_vm_wrapper() {
     local is_leader="$3"
     local log_file="$4"
     local skip_cleanup="${5:-0}"
-    
+
+    # Translate IP address for parallel slot execution
+    # This allows hardcoded 192.168.100.x IPs to work with slot-specific VMs
+    if [ -n "$VAGRANT_SLOT" ] && [ "$VAGRANT_SLOT" != "0" ]; then
+        local original_address="$node_address"
+        node_address=$(translate_vagrant_ip "$node_address")
+        if [ "$node_address" != "$original_address" ]; then
+            log "Translated IP for slot $VAGRANT_SLOT: $original_address -> $node_address"
+        fi
+    fi
+
     # CRITICAL: Clean up any existing processes BEFORE starting new one
     # This prevents killing the process we're about to start
     # Skip if global cleanup was just performed (saves time)
@@ -842,12 +963,12 @@ start_logstream_vm_wrapper() {
         printf '%s\n' '#!/bin/bash' > '$script_name' && \
         printf '%s\n' 'set +H' >> '$script_name' && \
         printf '%s\n' 'cd /vagrant/logstream' >> '$script_name' && \
-        printf '%s\n' 'export NODE_ADDRESS=\"$node_address\"' >> '$script_name' && \
-        printf '%s\n' 'export IS_LEADER=\"$is_leader\"' >> '$script_name' && \
+        printf 'export NODE_ADDRESS=\"%s\"\n' '$node_address' >> '$script_name' && \
+        printf 'export IS_LEADER=\"%s\"\n' '$is_leader' >> '$script_name' && \
         printf '%s\n' 'export MULTICAST_GROUP=\"239.0.0.1:9999\"' >> '$script_name' && \
         printf '%s\n' 'export BROADCAST_PORT=\"8888\"' >> '$script_name' && \
         printf '%s\n' 'trap \"\" HUP INT TERM' >> '$script_name' && \
-        printf '%s\n' 'nohup stdbuf -oL -eL ./logstream > \"$log_file\" 2>&1 < /dev/null &' >> '$script_name' && \
+        printf 'nohup stdbuf -oL -eL ./logstream > \"%s\" 2>&1 < /dev/null &\n' '$log_file' >> '$script_name' && \
         printf '%s\n' 'PID=\$!' >> '$script_name' && \
         printf '%s\n' 'disown -h \$PID' >> '$script_name' && \
         printf '%s\n' 'sleep 2' >> '$script_name' && \
@@ -856,7 +977,7 @@ start_logstream_vm_wrapper() {
         printf '%s\n' '  exit 0' >> '$script_name' && \
         printf '%s\n' 'else' >> '$script_name' && \
         printf '%s\n' '  echo \"ERROR: Process failed to start or crashed immediately\"' >> '$script_name' && \
-        printf '%s\n' '  tail -20 \"$log_file\" 2>/dev/null || echo \"Log file empty or not readable\"' >> '$script_name' && \
+        printf '  tail -20 \"%s\" 2>/dev/null || echo \"Log file empty or not readable\"\n' '$log_file' >> '$script_name' && \
         printf '%s\n' '  exit 1' >> '$script_name' && \
         printf '%s\n' 'fi' >> '$script_name' && \
         chmod +x '$script_name'

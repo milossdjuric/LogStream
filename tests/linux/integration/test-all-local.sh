@@ -10,14 +10,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# Check binaries exist
-if [ ! -f logstream ]; then
-    echo "ERROR: Binary not found!"
-    echo "Run: ./scripts/rebuild.sh"
+# Rebuild all binaries to ensure fresh versions
+echo "========================================"
+echo "Rebuilding All Binaries"
+echo "========================================"
+echo ""
+
+if [ -x "./scripts/rebuild-all.sh" ]; then
+    if ! ./scripts/rebuild-all.sh; then
+        echo ""
+        echo "ERROR: Binary rebuild failed!"
+        echo "Check errors above and fix compilation issues."
+        exit 1
+    fi
+else
+    echo "ERROR: Rebuild script not found or not executable!"
+    echo "Expected: ./scripts/rebuild-all.sh"
     exit 1
 fi
 
-echo "[OK] Binary ready"
+echo ""
+echo "========================================"
+echo "All Binaries Ready"
+echo "========================================"
 echo ""
 
 # Create logs directory structure
@@ -25,14 +40,54 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_BASE_DIR="$PROJECT_ROOT/test-logs/local-all-${TIMESTAMP}"
 mkdir -p "$LOG_BASE_DIR"
 
-# Note: Manual election test removed - automatic election test covers the functionality
-TEST_NAMES=("SINGLE" "TRIO" "SEQUENCE" "ELECTION-AUTOMATIC" "PRODUCER-CONSUMER")
+# Tests are organized by category: Core, Advanced, Client
+TEST_NAMES=(
+    # Core tests - Basic functionality
+    "SINGLE"
+    "TRIO"
+    "SEQUENCE"
+    "PRODUCER-CONSUMER"
+    # Advanced tests - Leader election, failover, recovery
+    "ELECTION-AUTOMATIC"
+    "STREAM-FAILOVER"
+    "VIEW-SYNC"
+    "STATE-EXCHANGE"
+    # Client tests - Client-side features
+    "CLIENT-CLEANUP"
+    "FIFO-ORDERING"
+    "ONE-TO-ONE-MAPPING"
+)
 TEST_SCRIPTS=(
+    # Core tests
     "./tests/linux/test-single.sh"
     "./tests/linux/test-trio.sh"
     "./tests/linux/test-sequence.sh"
-    "./tests/linux/test-election-automatic.sh"
     "./tests/linux/test-producer-consumer.sh"
+    # Advanced tests
+    "./tests/linux/test-election-automatic.sh"
+    "./tests/linux/test-stream-failover.sh"
+    "./tests/linux/test-view-sync.sh"
+    "./tests/linux/test-state-exchange.sh"
+    # Client tests
+    "./tests/linux/test-client-cleanup.sh"
+    "./tests/linux/test-fifo-ordering.sh"
+    "./tests/linux/test-one-to-one-mapping.sh"
+)
+TEST_CATEGORIES=(
+    # Core tests
+    "core"
+    "core"
+    "core"
+    "core"
+    # Advanced tests
+    "advanced"
+    "advanced"
+    "advanced"
+    "advanced"
+    # Client tests
+    "client"
+    "client"
+    "client"
 )
 
 # Cleanup function
@@ -60,14 +115,24 @@ echo "Running All Tests (Local Mode)"
 echo "Sequential Execution"
 echo "========================================"
 echo ""
-echo "This will run 5 tests sequentially on the local machine:"
-echo "  1. Single broker"
-echo "  2. Trio (3 brokers)"
-echo "  3. Sequence Demo"
-echo "  4. Election (Automatic failure detection)"
-echo "  5. Producer-Consumer"
+echo "This will run 11 tests sequentially on the local machine:"
+echo "  Core tests (basic functionality):"
+echo "    1. Single broker"
+echo "    2. Trio (3 brokers)"
+echo "    3. Sequence Demo"
+echo "    4. Producer-Consumer"
+echo "  Advanced tests (leader election, failover, recovery):"
+echo "    5. Election (Automatic failure detection)"
+echo "    6. Stream Failover (broker failure stream reassignment)"
+echo "    7. View-Sync (view-synchronous group communication)"
+echo "    8. State-Exchange protocol"
+echo "  Client tests (client-side features):"
+echo "    9. Client Cleanup (producer/consumer disconnect cleanup)"
+echo "   10. FIFO Ordering (holdback queue verification)"
+echo "   11. One-to-One Mapping (exclusive producer-consumer per topic)"
 echo ""
 echo "Logs will be saved to: $LOG_BASE_DIR"
+echo "  Structure: $LOG_BASE_DIR/{category}/{test-name}/"
 echo "Press Ctrl+C to stop tests and cleanup."
 echo ""
 
@@ -94,11 +159,12 @@ sleep 2
 run_test() {
     local test_name="$1"
     local test_script="$2"
-    local test_log_dir="$LOG_BASE_DIR/${test_name,,}"
+    local test_category="$3"
+    local test_log_dir="$LOG_BASE_DIR/$test_category/${test_name,,}"
     local test_log_file="$test_log_dir/test.log"
     local exit_code_file="$test_log_dir/exit_code.txt"
     
-    # Create test-specific log directory
+    # Create test-specific log directory with category
     mkdir -p "$test_log_dir"
     
     # Create log file immediately and write header to ensure it exists even if test exits early
@@ -171,7 +237,7 @@ EXIT_CODES=()
 set +e
 
 for i in "${!TEST_SCRIPTS[@]}"; do
-    run_test "${TEST_NAMES[$i]}" "${TEST_SCRIPTS[$i]}"
+    run_test "${TEST_NAMES[$i]}" "${TEST_SCRIPTS[$i]}" "${TEST_CATEGORIES[$i]}"
     test_exit_code=$?
     
     if [ $test_exit_code -eq 0 ]; then
@@ -215,10 +281,12 @@ set +e
     for i in "${!TEST_NAMES[@]}"; do
         exit_code=${EXIT_CODES[$i]}
         test_name="${TEST_NAMES[$i]}"
-        test_log_dir="$LOG_BASE_DIR/${test_name,,}"
+        test_category="${TEST_CATEGORIES[$i]}"
+        test_log_dir="$LOG_BASE_DIR/$test_category/${test_name,,}"
         status=$([ $exit_code -eq 0 ] && echo "PASS" || echo "FAIL")
         echo ""
         echo "Test: $test_name"
+        echo "  Category: $test_category"
         echo "  Status: $status"
         echo "  Exit Code: $exit_code"
         echo "  Log File: $test_log_dir/test.log"
@@ -230,9 +298,14 @@ set +e
 
 echo ""
 echo "Logs saved to: $LOG_BASE_DIR"
-echo "  - Individual test logs: $LOG_BASE_DIR/{test-name}/test.log"
+echo "  - Individual test logs: $LOG_BASE_DIR/{category}/{test-name}/test.log"
 echo "  - Combined log: $LOG_BASE_DIR/combined.log"
 echo "  - Summary: $LOG_BASE_DIR/summary.txt"
+echo ""
+echo "Log categories:"
+echo "  - core/     : Basic functionality tests"
+echo "  - advanced/ : Leader election, failover, recovery tests"
+echo "  - client/   : Client-side feature tests"
 
 # Return non-zero if any test failed
 exit $FAILED

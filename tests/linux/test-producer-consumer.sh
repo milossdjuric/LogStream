@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Timeout in seconds (5 minutes max)
-TEST_TIMEOUT=300
+TEST_TIMEOUT=600  # Increased from 300s to 600s (10min) - Vagrant is slower
 MODE="${1:-local}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -177,25 +177,37 @@ cleanup() {
 # Track if timeout occurred (used to ensure non-zero exit code)
 TIMEOUT_MARKER="/tmp/producer-consumer-test-timeout-$$"
 
-# Set up timeout
-(
-    sleep $TEST_TIMEOUT
-    error_test "Test timeout reached (${TEST_TIMEOUT}s), forcing cleanup..."
-    # Create marker file to indicate timeout
-    touch "$TIMEOUT_MARKER"
-    cleanup
-    # Send TERM signal to parent process
-    kill -TERM $$ 2>/dev/null || true
-    sleep 2
-    # If still alive, force kill
-    kill -9 $$ 2>/dev/null || true
-) &
-TIMEOUT_PID=$!
+# Timeout will be started AFTER setup phase (not here!)
+# This ensures we only time the actual test logic, not VM prep/binary builds/node startup
+TIMEOUT_PID=""
+
+start_test_timeout() {
+    log_test "========================================="
+    log_test "STARTING TEST TIMEOUT: ${TEST_TIMEOUT}s"
+    log_test "========================================="
+    (
+        sleep $TEST_TIMEOUT
+        error_test "Test timeout reached (${TEST_TIMEOUT}s), forcing cleanup..."
+        # Create marker file to indicate timeout
+        touch "$TIMEOUT_MARKER"
+        cleanup
+        # Send TERM signal to parent process
+        kill -TERM $$ 2>/dev/null || true
+        sleep 2
+        # If still alive, force kill
+        kill -9 $$ 2>/dev/null || true
+    ) &
+    TIMEOUT_PID=$!
+    log_test "Test timeout started (PID: $TIMEOUT_PID)"
+}
 
 # Trap cleanup on exit (SIGPIPE will be handled in the write loop)
 cleanup_and_exit() {
     local exit_code=${1:-0}
-    kill $TIMEOUT_PID 2>/dev/null || true
+    # Kill timeout if it was started
+    if [ -n "$TIMEOUT_PID" ]; then
+        kill $TIMEOUT_PID 2>/dev/null || true
+    fi
     cleanup
     # Check for timeout marker - always exit with error if timed out
     if [ -f "$TIMEOUT_MARKER" ]; then
@@ -252,10 +264,10 @@ if [ "$MODE" = "local" ]; then
     sleep 5
     
     log_test ""
-    log_test "Waiting for leader to be ready..."
+    log_test "Waiting for leader to be ready (discovery + init ~15-20s)..."
     # Wait for TCP listener to be ready and actually accepting connections
     leader_ready=false
-    for i in {1..15}; do
+    for i in {1..25}; do
         # Check if TCP listener is started in logs
         if sudo ip netns exec logstream-a grep -q "TCP listener started" "$LEADER_LOG" 2>/dev/null; then
             # Verify TCP port is actually accepting connections using nc or timeout with bash
@@ -293,36 +305,7 @@ if [ "$MODE" = "local" ]; then
         fi
     fi
     
-    log_test "=== STEP 2: Starting Consumer (Subscriber) ==="
-    CONSUMER_LOG="/tmp/logstream-consumer.log"
-    # Create log file with proper permissions for processes in namespace
-    sudo touch "$CONSUMER_LOG"
-    sudo chmod 666 "$CONSUMER_LOG"
-    sudo ip netns exec logstream-b env \
-        LEADER_ADDRESS=172.20.0.10:8001 \
-        TOPIC="test-logs" \
-        stdbuf -oL -eL ./consumer > "$CONSUMER_LOG" 2>&1 &
-    CONSUMER_PID=$!
-    success_test "Consumer started (PID: $CONSUMER_PID) in logstream-b"
-    
-    # Wait for consumer to connect (with retries)
-    log_test "Waiting for consumer to connect..."
-    sleep 5
-    if ! kill -0 "$CONSUMER_PID" 2>/dev/null; then
-        error_test "Consumer process died immediately!"
-        log_test "Consumer log:"
-        sudo ip netns exec logstream-b cat "$CONSUMER_LOG" 2>/dev/null || log_test "  Could not read consumer log"
-        cleanup_and_exit 1
-    fi
-    
-    log_test ""
-    log_test "Consumer registration:"
-    sudo ip netns exec logstream-a tail -20 "$LEADER_LOG" 2>/dev/null | grep -E "CONSUME from|Registered consumer|Subscribed" || log_test "No consumer registration found"
-    sudo ip netns exec logstream-b tail -10 "$CONSUMER_LOG" 2>/dev/null | grep -E "Connected|Subscribed" || log_test "No consumer connection found"
-    success_test "[OK] Consumer registered and subscribed to 'test-logs'"
-    
-    log_test ""
-    log_test "=== STEP 3: Starting Producer ==="
+    log_test "=== STEP 2: Starting Producer ==="
     PRODUCER_LOG="/tmp/logstream-producer.log"
     PIPE="/tmp/producer-input.pipe"
     rm -f "$PIPE"
@@ -366,6 +349,35 @@ if [ "$MODE" = "local" ]; then
     sudo ip netns exec logstream-a tail -20 "$LEADER_LOG" 2>/dev/null | grep -E "PRODUCE from|Registered producer|assigned broker" || log_test "No producer registration found"
     sudo ip netns exec logstream-c tail -10 "$PRODUCER_LOG" 2>/dev/null | grep -E "Connected|Registered|PRODUCE_ACK" || log_test "No producer connection found"
     success_test "[OK] Producer registered for 'test-logs'"
+    
+    log_test ""
+    log_test "=== STEP 3: Starting Consumer (Subscriber) ==="
+    CONSUMER_LOG="/tmp/logstream-consumer.log"
+    # Create log file with proper permissions for processes in namespace
+    sudo touch "$CONSUMER_LOG"
+    sudo chmod 666 "$CONSUMER_LOG"
+    sudo ip netns exec logstream-b env \
+        LEADER_ADDRESS=172.20.0.10:8001 \
+        TOPIC="test-logs" \
+        stdbuf -oL -eL ./consumer > "$CONSUMER_LOG" 2>&1 &
+    CONSUMER_PID=$!
+    success_test "Consumer started (PID: $CONSUMER_PID) in logstream-b"
+    
+    # Wait for consumer to connect (with retries)
+    log_test "Waiting for consumer to connect..."
+    sleep 5
+    if ! kill -0 "$CONSUMER_PID" 2>/dev/null; then
+        error_test "Consumer process died immediately!"
+        log_test "Consumer log:"
+        sudo ip netns exec logstream-b cat "$CONSUMER_LOG" 2>/dev/null || log_test "  Could not read consumer log"
+        cleanup_and_exit 1
+    fi
+    
+    log_test ""
+    log_test "Consumer registration:"
+    sudo ip netns exec logstream-a tail -20 "$LEADER_LOG" 2>/dev/null | grep -E "CONSUME from|Registered consumer|Subscribed" || log_test "No consumer registration found"
+    sudo ip netns exec logstream-b tail -10 "$CONSUMER_LOG" 2>/dev/null | grep -E "Connected|Subscribed" || log_test "No consumer connection found"
+    success_test "[OK] Consumer registered and subscribed to 'test-logs'"
     
     log_test ""
     log_test "=== STEP 4: Sending Test Messages ==="
@@ -432,15 +444,15 @@ if [ "$MODE" = "local" ]; then
     
     log_test ""
     log_test "Consumer activity (received messages):"
-    sudo ip netns exec logstream-b tail -15 "$CONSUMER_LOG" 2>/dev/null | grep -E "\[test-logs\] Offset" || log_test "No consumer activity found"
+    sudo ip netns exec logstream-b tail -15 "$CONSUMER_LOG" 2>/dev/null | grep -E "^Topic:  test-logs|^Offset:" || log_test "No consumer activity found"
     
     log_test ""
     log_test "========================================="
     log_test "DATA FLOW VERIFICATION:"
     log_test "========================================="
     
-    SENT=$(sudo ip netns exec logstream-c tail -50 "$PRODUCER_LOG" 2>/dev/null | grep -cE "DATA|sent" || echo "0")
-    RECEIVED=$(sudo ip netns exec logstream-b tail -50 "$CONSUMER_LOG" 2>/dev/null | grep -c "\[test-logs\] Offset" || echo "0")
+    SENT=$(sudo ip netns exec logstream-c tail -50 "$PRODUCER_LOG" 2>/dev/null | grep -cE "DATA seq=" || echo "0")
+    RECEIVED=$(sudo ip netns exec logstream-b tail -100 "$CONSUMER_LOG" 2>/dev/null | grep -c "^Offset: [0-9]" || echo "0")
     
     log_test "Messages sent by producer:     $SENT"
     log_test "Messages received by consumer: $RECEIVED"
@@ -650,7 +662,62 @@ elif [ "$MODE" = "vagrant" ]; then
     success_test "[OK] Leader accepting connections"
     
     log_test ""
-    log_test "=== STEP 2: Starting Consumer (Subscriber) ==="
+    log_test "=== STEP 2: Starting Producer ==="
+    if ! prepare_vm_log_file leader "$PRODUCER_LOG"; then
+        error_test "Failed to prepare producer log file"
+        exit 1
+    fi
+    
+    # Start producer using a wrapper script - just connect, don't send messages
+    producer_script="/tmp/start-producer-$$-$(date +%s).sh"
+    if ! vagrant_ssh_retry leader "
+        printf '%s\n' '#!/bin/bash' > '$producer_script' && \
+        printf '%s\n' 'set +H' >> '$producer_script' && \
+        printf '%s\n' 'cd /vagrant/logstream' >> '$producer_script' && \
+        printf '%s\n' 'export LEADER_ADDRESS=\"192.168.100.10:8001\"' >> '$producer_script' && \
+        printf '%s\n' 'export TOPIC=\"test-logs\"' >> '$producer_script' && \
+        printf '%s\n' 'trap \"\" HUP INT TERM' >> '$producer_script' && \
+        printf '%s\n' 'echo \"Producer connecting...\"' >> '$producer_script' && \
+        printf 'setsid nohup stdbuf -oL -eL sh -c \"sleep 5 | LEADER_ADDRESS=\\\"\$LEADER_ADDRESS\\\" TOPIC=\\\"\$TOPIC\\\" ./producer\" > \"%s\" 2>&1 < /dev/null &\n' "$PRODUCER_LOG" >> '$producer_script' && \
+        printf '%s\n' 'PID=\$!' >> '$producer_script' && \
+        printf '%s\n' 'disown -h \$PID' >> '$producer_script' && \
+        printf '%s\n' 'sleep 3' >> '$producer_script' && \
+        printf '%s\n' 'if kill -0 \$PID 2>/dev/null; then' >> '$producer_script' && \
+        printf '%s\n' '  echo \"Producer started successfully with PID \$PID\"' >> '$producer_script' && \
+        printf '%s\n' '  exit 0' >> '$producer_script' && \
+        printf '%s\n' 'else' >> '$producer_script' && \
+        printf '%s\n' '  echo \"ERROR: Producer failed to start or crashed immediately\"' >> '$producer_script' && \
+        printf '  tail -20 \"%s\" 2>/dev/null || echo \"Log file empty or not readable\"\n' "$PRODUCER_LOG" >> '$producer_script' && \
+        printf '%s\n' '  exit 1' >> '$producer_script' && \
+        printf '%s\n' 'fi' >> '$producer_script' && \
+        chmod +x '$producer_script'
+    " 2>/dev/null; then
+        error_test "Failed to create producer startup script"
+        exit 1
+    fi
+    
+    producer_output=$(vagrant_ssh_retry leader "bash '$producer_script'" 2>/dev/null)
+    producer_exit_code=$?
+    log_test "Producer startup output: $producer_output"
+    
+    # Clean up the script after a delay
+    (sleep 5 && vagrant_ssh_retry leader "rm -f '$producer_script'" 2>/dev/null &) &
+    
+    if [ $producer_exit_code -ne 0 ]; then
+        error_test "Failed to start producer - startup script failed"
+        exit 1
+    fi
+    
+    sleep 5
+    
+    log_test ""
+    log_test "Producer registration:"
+    vagrant_ssh_retry leader "tail -20 '$LEADER_LOG' 2>/dev/null" 2>/dev/null | grep -E "PRODUCE from|Registered producer" || log_test "No producer registration found"
+    vagrant_ssh_retry leader "tail -10 '$PRODUCER_LOG' 2>/dev/null" 2>/dev/null | grep -E "Connected|Registered" || log_test "No producer connection found"
+    success_test "[OK] Producer registered"
+    
+    log_test ""
+    log_test "=== STEP 3: Starting Consumer (Subscriber) ==="
     if ! prepare_vm_log_file broker1 "$CONSUMER_LOG"; then
         error_test "Failed to prepare consumer log file"
         exit 1
@@ -665,7 +732,7 @@ elif [ "$MODE" = "vagrant" ]; then
         printf '%s\n' 'export LEADER_ADDRESS=\"192.168.100.10:8001\"' >> '$consumer_script' && \
         printf '%s\n' 'export TOPIC=\"test-logs\"' >> '$consumer_script' && \
         printf '%s\n' 'trap \"\" HUP INT TERM' >> '$consumer_script' && \
-        printf '%s\n' 'setsid nohup stdbuf -oL -eL ./consumer > \"$CONSUMER_LOG\" 2>&1 < /dev/null &' >> '$consumer_script' && \
+        printf 'setsid nohup stdbuf -oL -eL ./consumer > \"%s\" 2>&1 < /dev/null &\n' "$CONSUMER_LOG" >> '$consumer_script' && \
         printf '%s\n' 'PID=\$!' >> '$consumer_script' && \
         printf '%s\n' 'disown -h \$PID' >> '$consumer_script' && \
         printf '%s\n' 'sleep 2' >> '$consumer_script' && \
@@ -674,7 +741,7 @@ elif [ "$MODE" = "vagrant" ]; then
         printf '%s\n' '  exit 0' >> '$consumer_script' && \
         printf '%s\n' 'else' >> '$consumer_script' && \
         printf '%s\n' '  echo \"ERROR: Consumer failed to start or crashed immediately\"' >> '$consumer_script' && \
-        printf '%s\n' '  tail -20 \"$CONSUMER_LOG\" 2>/dev/null || echo \"Log file empty or not readable\"' >> '$consumer_script' && \
+        printf '  tail -20 \"%s\" 2>/dev/null || echo \"Log file empty or not readable\"\n' "$CONSUMER_LOG" >> '$consumer_script' && \
         printf '%s\n' '  exit 1' >> '$consumer_script' && \
         printf '%s\n' 'fi' >> '$consumer_script' && \
         chmod +x '$consumer_script'
@@ -704,58 +771,13 @@ elif [ "$MODE" = "vagrant" ]; then
     success_test "[OK] Consumer registered"
     
     log_test ""
-    log_test "=== STEP 3: Starting Producer ==="
-    if ! prepare_vm_log_file leader "$PRODUCER_LOG"; then
-        error_test "Failed to prepare producer log file"
-        exit 1
-    fi
-    
-    # Start producer using a wrapper script - just connect, don't send messages
-    producer_script="/tmp/start-producer-$$-$(date +%s).sh"
-    if ! vagrant_ssh_retry leader "
-        printf '%s\n' '#!/bin/bash' > '$producer_script' && \
-        printf '%s\n' 'set +H' >> '$producer_script' && \
-        printf '%s\n' 'cd /vagrant/logstream' >> '$producer_script' && \
-        printf '%s\n' 'export LEADER_ADDRESS=\"192.168.100.10:8001\"' >> '$producer_script' && \
-        printf '%s\n' 'export TOPIC=\"test-logs\"' >> '$producer_script' && \
-        printf '%s\n' 'trap \"\" HUP INT TERM' >> '$producer_script' && \
-        printf '%s\n' 'setsid nohup stdbuf -oL -eL bash -c \"echo \\\"Producer connecting...\\\"; sleep 5 | ./producer\" > \"$PRODUCER_LOG\" 2>&1 < /dev/null &' >> '$producer_script' && \
-        printf '%s\n' 'PID=\$!' >> '$producer_script' && \
-        printf '%s\n' 'disown -h \$PID' >> '$producer_script' && \
-        printf '%s\n' 'sleep 3' >> '$producer_script' && \
-        printf '%s\n' 'if kill -0 \$PID 2>/dev/null; then' >> '$producer_script' && \
-        printf '%s\n' '  echo \"Producer started successfully with PID \$PID\"' >> '$producer_script' && \
-        printf '%s\n' '  exit 0' >> '$producer_script' && \
-        printf '%s\n' 'else' >> '$producer_script' && \
-        printf '%s\n' '  echo \"ERROR: Producer failed to start or crashed immediately\"' >> '$producer_script' && \
-        printf '%s\n' '  tail -20 \"$PRODUCER_LOG\" 2>/dev/null || echo \"Log file empty or not readable\"' >> '$producer_script' && \
-        printf '%s\n' '  exit 1' >> '$producer_script' && \
-        printf '%s\n' 'fi' >> '$producer_script' && \
-        chmod +x '$producer_script'
-    " 2>/dev/null; then
-        error_test "Failed to create producer startup script"
-        exit 1
-    fi
-    
-    producer_output=$(vagrant_ssh_retry leader "bash '$producer_script'" 2>/dev/null)
-    producer_exit_code=$?
-    log_test "Producer startup output: $producer_output"
-    
-    # Clean up the script after a delay
-    (sleep 5 && vagrant_ssh_retry leader "rm -f '$producer_script'" 2>/dev/null &) &
-    
-    if [ $producer_exit_code -ne 0 ]; then
-        error_test "Failed to start producer - startup script failed"
-        exit 1
-    fi
-    
-    sleep 5
-    
+    log_test "========================================="
+    log_test "SETUP PHASE COMPLETE"
+    log_test "========================================="
     log_test ""
-    log_test "Producer registration:"
-    vagrant_ssh_retry leader "tail -20 '$LEADER_LOG' 2>/dev/null" 2>/dev/null | grep -E "PRODUCE from|Registered producer" || log_test "No producer registration found"
-    vagrant_ssh_retry leader "tail -10 '$PRODUCER_LOG' 2>/dev/null" 2>/dev/null | grep -E "Connected|Registered" || log_test "No producer connection found"
-    success_test "[OK] Producer registered"
+    
+    # NOW start the timeout - setup is done, only test logic will be timed
+    start_test_timeout
     
     log_test ""
     log_test "========================================="
@@ -829,7 +851,12 @@ else
 fi
 
 # Cancel timeout since we completed successfully
-kill $TIMEOUT_PID 2>/dev/null || true
+if [ -n "$TIMEOUT_PID" ]; then
+    kill $TIMEOUT_PID 2>/dev/null || true
+    wait $TIMEOUT_PID 2>/dev/null || true  # Wait for timeout process to fully exit
+fi
+# Remove timeout marker if it was created (race condition fix)
+rm -f "$TIMEOUT_MARKER" 2>/dev/null || true
 # Note: Don't call cleanup here - let the EXIT trap handle it
 # This ensures logs are copied even if we exit normally
 success_test "Test completed successfully"

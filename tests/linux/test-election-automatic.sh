@@ -3,7 +3,7 @@
 # Test for AUTOMATIC failure detection (no manual trigger)
 # This test waits longer to see if automatic failure detection works
 
-TEST_TIMEOUT=900
+TEST_TIMEOUT=1200  # Increased from 900s to 1200s (20min) - Vagrant is slower
 MODE="${1:-docker}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -17,17 +17,17 @@ TEST_PREFIX="[TEST-ELECTION-AUTO]"
 log_test() { 
     local msg="${TEST_PREFIX} $1"
     echo -e "${BLUE}${msg}${NC}"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
+    [ -n "$TEST_OUTPUT_LOG" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
 }
 success_test() { 
     local msg="${TEST_PREFIX} $1"
     echo -e "${GREEN}${msg}${NC}"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
+    [ -n "$TEST_OUTPUT_LOG" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
 }
 error_test() { 
     local msg="${TEST_PREFIX} $1"
     echo -e "${RED}${msg}${NC}"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
+    [ -n "$TEST_OUTPUT_LOG" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') ${msg}" >> "$TEST_OUTPUT_LOG" 2>/dev/null || true
 }
 
 # Cleanup function
@@ -136,23 +136,35 @@ cleanup() {
     error_test "Cleanup complete"
 }
 
-# Set up timeout
+# Timeout will be started AFTER setup phase (not here!)
+# This ensures we only time the actual test logic, not VM prep/binary builds/node startup
 TIMEOUT_FLAG="/tmp/test-election-auto-timeout-$$"
 rm -f "$TIMEOUT_FLAG"
-(
-    sleep $TEST_TIMEOUT
-    error_test "Test timeout reached (${TEST_TIMEOUT}s), forcing cleanup..."
-    touch "$TIMEOUT_FLAG"
-    cleanup
-    # Exit with error code when timeout occurs
-    kill -TERM $$ 2>/dev/null || true
-) &
-TIMEOUT_PID=$!
+TIMEOUT_PID=""
+
+start_test_timeout() {
+    log_test "========================================="
+    log_test "STARTING TEST TIMEOUT: ${TEST_TIMEOUT}s"
+    log_test "========================================="
+    (
+        sleep $TEST_TIMEOUT
+        error_test "Test timeout reached (${TEST_TIMEOUT}s), forcing cleanup..."
+        touch "$TIMEOUT_FLAG"
+        cleanup
+        # Exit with error code when timeout occurs
+        kill -TERM $$ 2>/dev/null || true
+    ) &
+    TIMEOUT_PID=$!
+    log_test "Test timeout started (PID: $TIMEOUT_PID)"
+}
 
 # Trap cleanup on exit - exit with error on TERM (timeout), success on normal exit
 cleanup_and_exit() {
     stop_time_tracker
-    kill $TIMEOUT_PID 2>/dev/null || true
+    # Kill timeout if it was started
+    if [ -n "$TIMEOUT_PID" ]; then
+        kill $TIMEOUT_PID 2>/dev/null || true
+    fi
     cleanup
     if [ -f "$TIMEOUT_FLAG" ]; then
         rm -f "$TIMEOUT_FLAG"
@@ -676,78 +688,94 @@ elif [ "$MODE" = "vagrant" ]; then
         exit 1
     fi
     
-    # Start follower 1 with retry
-    # Skip cleanup for broker1 since we just did global cleanup
-    log_time "Starting Node B (Follower 1)..."
-    if prepare_vm_log_file broker1 "$NODE_B_LOG" && \
-       start_logstream_vm_wrapper broker1 "192.168.100.20:8002" "false" "$NODE_B_LOG" "1"; then
-        success_test "Node B (Follower) started"
-        log_time "Node B (Follower 1) started successfully"
-        log_test ""
-        log_test "Verifying Node B (Follower) process..."
-        sleep 2
-        if ! verify_process_running broker1 "$NODE_B_LOG" "logstream" 7; then
-            error_test "Node B process verification failed"
-            exit 1
-        fi
-        log_test ""
-        # Give follower 1 time to join and stabilize before starting follower 2
-        log_test "Waiting for follower 1 to join cluster..."
-        sleep 5
-    else
+    # Prepare follower log files
+    log_test "Preparing follower log files..."
+    prepare_vm_log_file broker1 "$NODE_B_LOG"
+    prepare_vm_log_file broker2 "$NODE_C_LOG"
+    
+    # Start both followers in parallel (they can discover the leader simultaneously)
+    log_time "Starting Node B and C (Followers) in parallel..."
+    
+    (start_logstream_vm_wrapper broker1 "192.168.100.20:8002" "false" "$NODE_B_LOG" "1" && echo "Node B complete") &
+    NODE_B_PID=$!
+    
+    (start_logstream_vm_wrapper broker2 "192.168.100.30:8003" "false" "$NODE_C_LOG" "1" && echo "Node C complete") &
+    NODE_C_PID=$!
+    
+    log_test "Waiting for both followers to start..."
+    
+    # Wait for both followers
+    STARTUP_FAILED=0
+    if ! wait $NODE_B_PID; then
         error_test "Failed to start Node B - SSH connection failed"
+        STARTUP_FAILED=1
+    else
+        success_test "Node B (Follower 1) started"
+        log_time "Node B (Follower 1) started successfully"
+    fi
+    
+    if ! wait $NODE_C_PID; then
+        error_test "Failed to start Node C - SSH connection failed"
+        STARTUP_FAILED=1
+    else
+        success_test "Node C (Follower 2) started"
+        log_time "Node C (Follower 2) started successfully"
+    fi
+    
+    # Exit if any startup failed
+    if [ $STARTUP_FAILED -eq 1 ]; then
+        error_test "One or more followers failed to start"
         exit 1
     fi
     
-    # Start follower 2 with retry
-    # Skip cleanup for broker2 since we just did global cleanup
-    log_time "Starting Node C (Follower 2)..."
-    if prepare_vm_log_file broker2 "$NODE_C_LOG" && \
-       start_logstream_vm_wrapper broker2 "192.168.100.30:8003" "false" "$NODE_C_LOG" "1"; then
-        success_test "Node C (Follower) started"
-        log_time "Node C (Follower 2) started successfully"
-        log_test ""
-        log_test "Verifying Node C (Follower) process..."
-        sleep 2
-        if ! verify_process_running broker2 "$NODE_C_LOG" "logstream" 7; then
-            error_test "Node C process verification failed"
-            # Try to get diagnostic information before exiting
-            log_test "Attempting to gather diagnostic information for broker2..."
-            log_test "Checking if log file exists on broker2 VM..."
-            vagrant_ssh_retry broker2 "test -f '$NODE_C_LOG' && echo 'Log file exists' || echo 'Log file does NOT exist'" 2>/dev/null || true
-            log_test "Checking log file size on broker2 VM..."
-            vagrant_ssh_retry broker2 "stat -c%s '$NODE_C_LOG' 2>/dev/null || echo '0'" 2>/dev/null || true
-            log_test "Checking for any logstream processes on broker2 VM..."
-            vagrant_ssh_retry broker2 "ps aux | grep -E '[l]ogstream' || echo 'No logstream processes found'" 2>/dev/null || true
-            log_test "Attempting to copy broker2 log for diagnostics..."
-            if [ -n "$NODE_C_LOG" ]; then
-                copy_vm_log_to_host broker2 "$NODE_C_LOG" "$LOG_DIR/broker2-node-c.log" 2>/dev/null || true
-            fi
-            error_test "Node C failed to start properly - see logs above for details"
-            exit 1
+    log_test ""
+    log_test "Verifying Node B (Follower) process..."
+    sleep 2
+    if ! verify_process_running broker1 "$NODE_B_LOG" "logstream" 7; then
+        error_test "Node B process verification failed"
+        exit 1
+    fi
+    
+    log_test ""
+    log_test "Verifying Node C (Follower) process..."
+    sleep 2
+    if ! verify_process_running broker2 "$NODE_C_LOG" "logstream" 7; then
+        error_test "Node C process verification failed"
+        # Try to get diagnostic information before exiting
+        log_test "Attempting to gather diagnostic information for broker2..."
+        log_test "Checking if log file exists on broker2 VM..."
+        vagrant_ssh_retry broker2 "test -f '$NODE_C_LOG' && echo 'Log file exists' || echo 'Log file does NOT exist'" 2>/dev/null || true
+        log_test "Checking log file size on broker2 VM..."
+        vagrant_ssh_retry broker2 "stat -c%s '$NODE_C_LOG' 2>/dev/null || echo '0'" 2>/dev/null || true
+        log_test "Checking for any logstream processes on broker2 VM..."
+        vagrant_ssh_retry broker2 "ps aux | grep -E '[l]ogstream' || echo 'No logstream processes found'" 2>/dev/null || true
+        log_test "Attempting to copy broker2 log for diagnostics..."
+        if [ -n "$NODE_C_LOG" ]; then
+            copy_vm_log_to_host broker2 "$NODE_C_LOG" "$LOG_DIR/broker2-node-c.log" 2>/dev/null || true
         fi
-        log_test ""
-        # Give broker2 time to discover and join the cluster
-        log_test "Waiting for Node C to discover and join cluster..."
-        sleep 10
-        # Verify broker2 actually joined as follower (not leader)
-        if vagrant_ssh_retry broker2 "grep -q 'Joined existing cluster as follower\|becomeFollower' '$NODE_C_LOG' 2>/dev/null" 2>/dev/null; then
-            success_test "Node C successfully joined cluster as follower"
-        elif vagrant_ssh_retry broker2 "grep -q 'automatically declaring myself leader\|becomeLeader' '$NODE_C_LOG' 2>/dev/null" 2>/dev/null; then
-            error_test "Node C incorrectly declared itself leader - cluster discovery failed!"
-            log_test "This indicates broker2 could not discover the existing cluster."
-            log_test "Checking leader and broker1 logs..."
-            get_vm_log_content leader "$NODE_A_LOG" 30 || true
-            get_vm_log_content broker1 "$NODE_B_LOG" 30 || true
-            exit 1
-        else
-            error_test "Could not determine Node C's role from logs"
-            log_test "Node C log excerpt:"
-            get_vm_log_content broker2 "$NODE_C_LOG" 50 || true
-            exit 1
-        fi
+        error_test "Node C failed to start properly - see logs above for details"
+        exit 1
+    fi
+    
+    log_test ""
+    # Give followers time to discover and join the cluster
+    log_test "Waiting for both followers to discover and join cluster..."
+    sleep 10
+    
+    # Verify broker2 actually joined as follower (not leader)
+    if vagrant_ssh_retry broker2 "grep -q 'Joined existing cluster as follower\|becomeFollower' '$NODE_C_LOG' 2>/dev/null" 2>/dev/null; then
+        success_test "Node C successfully joined cluster as follower"
+    elif vagrant_ssh_retry broker2 "grep -q 'automatically declaring myself leader\|becomeLeader' '$NODE_C_LOG' 2>/dev/null" 2>/dev/null; then
+        error_test "Node C incorrectly declared itself leader - cluster discovery failed!"
+        log_test "This indicates broker2 could not discover the existing cluster."
+        log_test "Checking leader and broker1 logs..."
+        get_vm_log_content leader "$NODE_A_LOG" 30 || true
+        get_vm_log_content broker1 "$NODE_B_LOG" 30 || true
+        exit 1
     else
-        error_test "Failed to start Node C - SSH connection failed"
+        error_test "Could not determine Node C's role from logs"
+        log_test "Node C log excerpt:"
+        get_vm_log_content broker2 "$NODE_C_LOG" 50 || true
         exit 1
     fi
     
@@ -824,43 +852,74 @@ elif [ "$MODE" = "vagrant" ]; then
     
     log_test ""
     log_test "========================================="
+    log_test "SETUP PHASE COMPLETE"
+    log_test "========================================="
+    log_test ""
+    
+    # NOW start the timeout - setup is done, only test logic will be timed
+    start_test_timeout
+    
+    log_test ""
+    log_test "========================================="
     log_test "SIMULATING LEADER FAILURE"
     log_test "========================================="
     log_time "Starting leader failure simulation..."
-    log_test "Stopping leader (node-a)..."
-    
+
+    # CRITICAL: Detect actual leader - nodes discover each other via broadcast,
+    # so the first node to start becomes leader (NOT necessarily "leader" VM)
+    log_test "Detecting actual leader from logs..."
+    ACTUAL_LEADER_VM=""
+
+    if vagrant ssh leader -c "grep -q 'No cluster found, becoming leader\|Startup complete as LEADER' '$NODE_A_LOG' 2>/dev/null" 2>/dev/null; then
+        ACTUAL_LEADER_VM="leader"
+        log_test "  Detected actual leader: leader VM (node-a)"
+    elif vagrant ssh broker1 -c "grep -q 'No cluster found, becoming leader\|Startup complete as LEADER' '$NODE_B_LOG' 2>/dev/null" 2>/dev/null; then
+        ACTUAL_LEADER_VM="broker1"
+        log_test "  Detected actual leader: broker1 VM (node-b)"
+    elif vagrant ssh broker2 -c "grep -q 'No cluster found, becoming leader\|Startup complete as LEADER' '$NODE_C_LOG' 2>/dev/null" 2>/dev/null; then
+        ACTUAL_LEADER_VM="broker2"
+        log_test "  Detected actual leader: broker2 VM (node-c)"
+    fi
+
+    if [ -z "$ACTUAL_LEADER_VM" ]; then
+        warn_test "  Could not determine actual leader from logs, defaulting to 'leader' VM"
+        ACTUAL_LEADER_VM="leader"
+    fi
+
+    log_test "Stopping $ACTUAL_LEADER_VM (actual leader)..."
+
     # Try to halt the VM first (most realistic failure scenario)
     # This simulates a complete machine crash/network partition
-    log_test "Attempting to halt leader VM (simulating machine failure)..."
-    if (cd "$PROJECT_ROOT/deploy/vagrant" && vagrant halt leader 2>&1); then
-        success_test "Leader VM halted successfully at $(date +%H:%M:%S)"
+    log_test "Attempting to halt $ACTUAL_LEADER_VM VM (simulating machine failure)..."
+    if (cd "$PROJECT_ROOT/deploy/vagrant" && vagrant halt "$ACTUAL_LEADER_VM" 2>&1); then
+        success_test "$ACTUAL_LEADER_VM VM halted successfully at $(date +%H:%M:%S)"
         log_test "VM halt simulates complete machine failure - followers should detect this"
         sleep 3  # Give network time to propagate the failure
     else
         # Fallback: Kill the process if VM halt fails
         log_test "VM halt failed, falling back to process kill..."
         log_test "Leader process found, killing..."
-        
+
         # First, verify the process is running
-        if ! vagrant_ssh_retry leader 'pgrep -f logstream > /dev/null' 2>/dev/null; then
+        if ! vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'pgrep -f logstream > /dev/null' 2>/dev/null; then
             error_test "Leader process not found - may have already stopped"
         else
             # Kill the process - try multiple methods
-            vagrant_ssh_retry leader 'pkill -9 -f logstream' 2>&1 || true
+            vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'pkill -9 -f logstream' 2>&1 || true
             sleep 2
-            
+
             # Verify the process is actually dead
-            if vagrant_ssh_retry leader 'pgrep -f logstream > /dev/null' 2>/dev/null; then
+            if vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'pgrep -f logstream > /dev/null' 2>/dev/null; then
                 error_test "Leader process still running after kill attempt!"
                 log_test "Trying more aggressive kill..."
-                vagrant_ssh_retry leader 'pkill -9 -f "logstream|./logstream"' 2>&1 || true
+                vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'pkill -9 -f "logstream|./logstream"' 2>&1 || true
                 sleep 2
-                
+
                 # Check again
-                if vagrant_ssh_retry leader 'pgrep -f logstream > /dev/null' 2>/dev/null; then
+                if vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'pgrep -f logstream > /dev/null' 2>/dev/null; then
                     error_test "CRITICAL: Leader process cannot be killed!"
                     log_test "Process details:"
-                    vagrant_ssh_retry leader 'ps aux | grep -E "[l]ogstream"' 2>&1 || true
+                    vagrant_ssh_retry "$ACTUAL_LEADER_VM" 'ps aux | grep -E "[l]ogstream"' 2>&1 || true
                     exit 1
                 fi
             fi
@@ -980,6 +1039,11 @@ else
 fi
 
 # Cancel timeout since we completed successfully
-kill $TIMEOUT_PID 2>/dev/null || true
+if [ -n "$TIMEOUT_PID" ]; then
+    kill $TIMEOUT_PID 2>/dev/null || true
+    wait $TIMEOUT_PID 2>/dev/null || true  # Wait for timeout process to fully exit
+fi
+# Remove timeout marker if it was created (race condition fix)
+rm -f "$TIMEOUT_FLAG" 2>/dev/null || true
 success_test "Test completed successfully"
 
