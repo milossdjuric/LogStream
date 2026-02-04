@@ -12,6 +12,12 @@ services:
         ipv4_address: 172.28.0.10
     cap_add:
       - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z 172.28.0.10 8001 || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
     labels:
       - "logstream.test=producer-consumer"
 
@@ -26,9 +32,11 @@ services:
       logstream-net:
         ipv4_address: 172.28.0.20
     depends_on:
-      - leader
+      leader:
+        condition: service_healthy
     stdin_open: true
     tty: true
+    command: sh -c "sleep 5 && ./producer"
     labels:
       - "logstream.test=producer-consumer"
 
@@ -43,7 +51,9 @@ services:
       logstream-net:
         ipv4_address: 172.28.0.30
     depends_on:
-      - leader
+      leader:
+        condition: service_healthy
+    command: sh -c "sleep 5 && ./consumer"
     labels:
       - "logstream.test=producer-consumer"
 
