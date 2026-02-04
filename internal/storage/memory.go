@@ -70,6 +70,137 @@ func (m *MemoryLog) LowestOffset() uint64 {
 	return m.baseOffset
 }
 
+// TruncateTo removes all records with offsets greater than the given offset.
+// Used during view-synchronous recovery to ensure log consistency.
+func (m *MemoryLog) TruncateTo(maxOffset uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.records) == 0 {
+		return nil
+	}
+
+	// Calculate how many records to keep
+	// If maxOffset is below baseOffset, we need to clear everything
+	if maxOffset < m.baseOffset {
+		m.records = make([][]byte, 0)
+		return nil
+	}
+
+	// Calculate the number of records to keep
+	keepCount := int(maxOffset - m.baseOffset + 1)
+	if keepCount > len(m.records) {
+		// Nothing to truncate
+		return nil
+	}
+
+	if keepCount <= 0 {
+		m.records = make([][]byte, 0)
+	} else {
+		m.records = m.records[:keepCount]
+	}
+
+	return nil
+}
+
+// LogEntry represents a single entry with offset and data
+// Used for view-synchronous log merge during state exchange
+type LogEntry struct {
+	Offset    uint64
+	Data      []byte
+	Timestamp int64
+}
+
+// GetAllEntries returns all entries in the log with their offsets
+// Used for view-synchronous state exchange to collect full log state
+func (m *MemoryLog) GetAllEntries() []LogEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	entries := make([]LogEntry, len(m.records))
+	for i, record := range m.records {
+		offset := m.baseOffset + uint64(i)
+		// Decode timestamp from record if possible
+		ts, _, err := DecodeRecord(record)
+		if err != nil {
+			ts = 0
+		}
+		// Make a copy of the data
+		dataCopy := make([]byte, len(record))
+		copy(dataCopy, record)
+		entries[i] = LogEntry{
+			Offset:    offset,
+			Data:      dataCopy,
+			Timestamp: ts,
+		}
+	}
+	return entries
+}
+
+// AppendAtOffset appends a record at a specific offset
+// Used during view-synchronous log merge to apply entries from other members
+// If the offset already exists and data matches, it's a no-op
+// If offset is beyond current log, fills gaps with nil
+func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// If log is empty, set base offset
+	if len(m.records) == 0 {
+		m.baseOffset = offset
+		recCopy := make([]byte, len(data))
+		copy(recCopy, data)
+		m.records = append(m.records, recCopy)
+		return nil
+	}
+
+	// Calculate position in slice
+	if offset < m.baseOffset {
+		// Offset is before our base, need to prepend
+		// This is rare but can happen during merge
+		newBase := offset
+		gap := int(m.baseOffset - offset)
+		newRecords := make([][]byte, gap+len(m.records))
+
+		// First entry is our new data
+		recCopy := make([]byte, len(data))
+		copy(recCopy, data)
+		newRecords[0] = recCopy
+
+		// Copy existing records at their new positions
+		copy(newRecords[gap:], m.records)
+
+		m.records = newRecords
+		m.baseOffset = newBase
+		return nil
+	}
+
+	pos := int(offset - m.baseOffset)
+
+	// If position is within existing range
+	if pos < len(m.records) {
+		// Entry already exists - overwrite with merged data
+		// (In VS protocol, all entries at same offset should be identical)
+		recCopy := make([]byte, len(data))
+		copy(recCopy, data)
+		m.records[pos] = recCopy
+		return nil
+	}
+
+	// Position is beyond current log - extend
+	// Fill gaps with empty entries
+	for len(m.records) < pos {
+		m.records = append(m.records, nil)
+	}
+
+	// Append the new record
+	recCopy := make([]byte, len(data))
+	copy(recCopy, data)
+	m.records = append(m.records, recCopy)
+
+	return nil
+}
+
 // CleanupOldLogs removes records older than the retention duration.
 func (m *MemoryLog) CleanupOldLogs(retention time.Duration) error {
 	m.mu.Lock()
