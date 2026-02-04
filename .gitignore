@@ -21,3 +21,12 @@ logs/
 
 # Vagrant local state (contains private keys and machine-specific data)
 .vagrant/
+
+# Test output files
+*.test
+*-tests.log
+bash-integration-tests.log
+go-integration-tests.log
+
+# Generated protobuf (duplicate - keep only internal/protocol/messages.pb.go)
+internal/protocol/proto/messages.pb.go
