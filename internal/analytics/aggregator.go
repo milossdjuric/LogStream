@@ -89,3 +89,86 @@ func (a *LogAggregator) GetRate(duration time.Duration) float64 {
 	count := a.CountInWindow(start, now)
 	return float64(count) / duration.Seconds()
 }
+
+// TopicAnalytics holds computed analytics for a topic
+type TopicAnalytics struct {
+	Topic          string
+	TotalCount     int64
+	WindowDuration time.Duration // Configured window duration
+	WindowCount    int64         // Count of records in the configured window
+	WindowRate     float64       // Messages per second within the configured window
+}
+
+// ComputeTopicAnalytics computes analytics for a given topic log using the configured window duration
+func ComputeTopicAnalytics(topic string, log LogReader, windowDuration time.Duration) *TopicAnalytics {
+	agg := NewLogAggregator(log)
+	now := time.Now()
+	windowStart := now.Add(-windowDuration)
+	windowCount := agg.CountInWindow(windowStart, now)
+
+	return &TopicAnalytics{
+		Topic:          topic,
+		TotalCount:     agg.TotalCount(),
+		WindowDuration: windowDuration,
+		WindowCount:    windowCount,
+		WindowRate:     float64(windowCount) / windowDuration.Seconds(),
+	}
+}
+
+// MultiLogAggregator aggregates across multiple logs (topics)
+type MultiLogAggregator struct {
+	logs map[string]LogReader
+}
+
+// NewMultiLogAggregator creates an aggregator for multiple topic logs
+func NewMultiLogAggregator() *MultiLogAggregator {
+	return &MultiLogAggregator{
+		logs: make(map[string]LogReader),
+	}
+}
+
+// AddLog adds a topic log to the aggregator
+func (m *MultiLogAggregator) AddLog(topic string, log LogReader) {
+	m.logs[topic] = log
+}
+
+// CountByPatternAcrossTopics counts records matching pattern across all or specific topic
+func (m *MultiLogAggregator) CountByPatternAcrossTopics(pattern string, topic string) int64 {
+	if topic != "" {
+		if log, exists := m.logs[topic]; exists {
+			return NewLogAggregator(log).CountByPattern(pattern)
+		}
+		return 0
+	}
+
+	var total int64
+	for _, log := range m.logs {
+		total += NewLogAggregator(log).CountByPattern(pattern)
+	}
+	return total
+}
+
+// CountInWindowAcrossTopics counts records in time window across all or specific topic
+func (m *MultiLogAggregator) CountInWindowAcrossTopics(start, end time.Time, topic string) int64 {
+	if topic != "" {
+		if log, exists := m.logs[topic]; exists {
+			return NewLogAggregator(log).CountInWindow(start, end)
+		}
+		return 0
+	}
+
+	var total int64
+	for _, log := range m.logs {
+		total += NewLogAggregator(log).CountInWindow(start, end)
+	}
+	return total
+}
+
+// GetAllTopicsStats returns analytics for all registered topics using the configured window duration
+func (m *MultiLogAggregator) GetAllTopicsStats(windowDuration time.Duration) map[string]*TopicAnalytics {
+	stats := make(map[string]*TopicAnalytics)
+	for topic, log := range m.logs {
+		stats[topic] = ComputeTopicAnalytics(topic, log, windowDuration)
+	}
+	return stats
+}
