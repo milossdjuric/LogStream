@@ -47,6 +47,19 @@ func NewConsumeMsg(senderID string, topic string, consumerAddr string, seqNum in
 	}
 }
 
+// TCP unicast from Consumer to assigned Broker (for stream subscription after registration)
+func NewSubscribeMsg(senderID, topic, consumerID, consumerAddr string, enableProcessing bool) *SubscribeMsg {
+	return &SubscribeMsg{
+		SubscribeMessage: &SubscribeMessage{
+			Header:           newHeader(MessageType_SUBSCRIBE, senderID, NodeType_CONSUMER, 0),
+			Topic:            topic,
+			ConsumerId:       consumerID,
+			ConsumerAddress:  consumerAddr,
+			EnableProcessing: enableProcessing,
+		},
+	}
+}
+
 // TCP unicast from Broker to Consumer
 func NewResultMsg(senderID string, topic string, data []byte, offset, seqNum int64) *ResultMsg {
 	return &ResultMsg{
@@ -62,10 +75,11 @@ func NewResultMsg(senderID string, topic string, data []byte, offset, seqNum int
 // TCP unicast for Leader to Producer/Consumer
 // TCP unicast for Broker to Leader
 // UDP multicast for Leader to Brokers
-func NewHeartbeatMsg(senderID string, senderType NodeType, seqNum int64) *HeartbeatMsg {
+func NewHeartbeatMsg(senderID string, senderType NodeType, seqNum int64, viewNumber int64) *HeartbeatMsg {
 	return &HeartbeatMsg{
 		HeartbeatMessage: &HeartbeatMessage{
-			Header: newHeader(MessageType_HEARTBEAT, senderID, senderType, seqNum),
+			Header:     newHeader(MessageType_HEARTBEAT, senderID, senderType, seqNum),
+			ViewNumber: viewNumber,
 		},
 	}
 }
@@ -107,24 +121,101 @@ func NewJoinResponseMsg(leaderID, leaderAddr, multicastGroup string, brokers []s
 }
 
 // TCP unicast from Broker to next Broker in logical ring
-func NewElectionMsg(senderID, candidateID string, electionID int64, phase ElectionMessage_Phase) *ElectionMsg {
+// ringParticipants ensures all nodes use the same filtered ring for consistency
+func NewElectionMsg(senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string) *ElectionMsg {
 	return &ElectionMsg{
 		ElectionMessage: &ElectionMessage{
-			Header:      newHeader(MessageType_ELECTION, senderID, NodeType_BROKER, 0),
-			CandidateId: candidateID,
-			ElectionId:  electionID,
-			Phase:       phase,
+			Header:           newHeader(MessageType_ELECTION, senderID, NodeType_BROKER, 0),
+			CandidateId:      candidateID,
+			ElectionId:       electionID,
+			Phase:            phase,
+			RingParticipants: ringParticipants,
 		},
 	}
 }
 
 // UDP multicast from Leader to Brokers, FIFO ordering
-func NewReplicateMsg(senderID string, stateSnapshot []byte, updateType string, seqNum int64) *ReplicateMsg {
+// View-synchronous: includes viewNumber and leaderID for consistency checks
+func NewReplicateMsg(senderID string, stateSnapshot []byte, updateType string, seqNum int64, viewNumber int64, leaderID string) *ReplicateMsg {
 	return &ReplicateMsg{
 		ReplicateMessage: &ReplicateMessage{
 			Header:        newHeader(MessageType_REPLICATE, senderID, NodeType_LEADER, seqNum),
 			StateSnapshot: stateSnapshot,
 			UpdateType:    updateType,
+			ViewNumber:    viewNumber,
+			LeaderId:      leaderID,
+		},
+	}
+}
+
+// TCP unicast from Follower to Leader acknowledging REPLICATE
+// Passive replication: backups send acknowledgement (per slides)
+func NewReplicateAckMsg(senderID string, ackedSeq, viewNumber int64, success bool, errorMessage string) *ReplicateAckMsg {
+	return &ReplicateAckMsg{
+		ReplicateAckMessage: &ReplicateAckMessage{
+			Header:       newHeader(MessageType_REPLICATE_ACK, senderID, NodeType_BROKER, 0),
+			AckedSeq:     ackedSeq,
+			ViewNumber:   viewNumber,
+			Success:      success,
+			ErrorMessage: errorMessage,
+		},
+	}
+}
+
+// ============== View-Synchronous Recovery Message Factories ==============
+
+// TCP unicast from new leader to followers during recovery
+func NewStateExchangeMsg(senderID string, electionID, viewNumber int64) *StateExchangeMsg {
+	return &StateExchangeMsg{
+		StateExchangeMessage: &StateExchangeMessage{
+			Header:     newHeader(MessageType_STATE_EXCHANGE, senderID, NodeType_LEADER, 0),
+			ElectionId: electionID,
+			ViewNumber: viewNumber,
+		},
+	}
+}
+
+// TCP unicast from followers to new leader during recovery
+// topicLogs contains full log entries for view-synchronous UNION merge
+func NewStateExchangeResponseMsg(senderID string, electionID, lastAppliedSeq int64, stateSnapshot []byte, hasCompleteState bool, logOffsets map[string]uint64, topicLogs []*TopicLogEntries) *StateExchangeResponseMsg {
+	return &StateExchangeResponseMsg{
+		StateExchangeResponseMessage: &StateExchangeResponseMessage{
+			Header:           newHeader(MessageType_STATE_EXCHANGE_RESPONSE, senderID, NodeType_BROKER, 0),
+			ElectionId:       electionID,
+			LastAppliedSeq:   lastAppliedSeq,
+			StateSnapshot:    stateSnapshot,
+			HasCompleteState: hasCompleteState,
+			LogOffsets:       logOffsets, // Deprecated but kept for compatibility
+			TopicLogs:        topicLogs,
+		},
+	}
+}
+
+// TCP unicast from leader to all brokers to install new view
+// mergedLogs contains union of all log entries for view-synchronous consistency
+func NewViewInstallMsg(senderID string, viewNumber, agreedSeq int64, stateSnapshot []byte, memberIDs, memberAddresses []string, agreedLogOffsets map[string]uint64, mergedLogs []*TopicLogEntries) *ViewInstallMsg {
+	return &ViewInstallMsg{
+		ViewInstallMessage: &ViewInstallMessage{
+			Header:           newHeader(MessageType_VIEW_INSTALL, senderID, NodeType_LEADER, 0),
+			ViewNumber:       viewNumber,
+			AgreedSeq:        agreedSeq,
+			StateSnapshot:    stateSnapshot,
+			MemberIds:        memberIDs,
+			MemberAddresses:  memberAddresses,
+			AgreedLogOffsets: agreedLogOffsets, // Deprecated but kept for compatibility
+			MergedLogs:       mergedLogs,
+		},
+	}
+}
+
+// TCP unicast from brokers to leader acknowledging view installation
+func NewViewInstallAckMsg(senderID string, viewNumber int64, success bool, errorMessage string) *ViewInstallAckMsg {
+	return &ViewInstallAckMsg{
+		ViewInstallAckMessage: &ViewInstallAckMessage{
+			Header:       newHeader(MessageType_VIEW_INSTALL_ACK, senderID, NodeType_BROKER, 0),
+			ViewNumber:   viewNumber,
+			Success:      success,
+			ErrorMessage: errorMessage,
 		},
 	}
 }

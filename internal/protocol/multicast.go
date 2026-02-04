@@ -322,20 +322,23 @@ func (mc *MulticastConnection) GetLocalAddr() net.Addr {
 }
 
 // SendHeartbeatMulticast sends a heartbeat to the multicast group
-func SendHeartbeatMulticast(sender *MulticastConnection, senderID string, senderType NodeType, multicastAddr string) error {
-	msg := NewHeartbeatMsg(senderID, senderType, 0)
+// View-synchronous: includes viewNumber to detect zombie leaders
+func SendHeartbeatMulticast(sender *MulticastConnection, senderID string, senderType NodeType, viewNumber int64, multicastAddr string) error {
+	msg := NewHeartbeatMsg(senderID, senderType, 0, viewNumber)
 	return sender.SendMessage(msg, multicastAddr)
 }
 
 // SendReplicationMulticast sends state replication to the multicast group
-func SendReplicationMulticast(sender *MulticastConnection, leaderID string, stateSnapshot []byte, updateType string, seqNum int64, multicastAddr string) error {
-	msg := NewReplicateMsg(leaderID, stateSnapshot, updateType, seqNum)
+// View-synchronous: includes viewNumber and leaderID for consistency validation by receivers
+func SendReplicationMulticast(sender *MulticastConnection, leaderID string, stateSnapshot []byte, updateType string, seqNum int64, viewNumber int64, multicastAddr string) error {
+	msg := NewReplicateMsg(leaderID, stateSnapshot, updateType, seqNum, viewNumber, leaderID)
 	return sender.SendMessage(msg, multicastAddr)
 }
 
 // SendElectionMulticast sends an election message to the multicast group
-func SendElectionMulticast(sender *MulticastConnection, senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, multicastAddr string) error {
-	msg := NewElectionMsg(senderID, candidateID, electionID, phase)
+// ringParticipants ensures all nodes use the same filtered ring for consistency
+func SendElectionMulticast(sender *MulticastConnection, senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string, multicastAddr string) error {
+	msg := NewElectionMsg(senderID, candidateID, electionID, phase, ringParticipants)
 	return sender.SendMessage(msg, multicastAddr)
 }
 

@@ -52,6 +52,17 @@ func (m *ResultMsg) Unmarshal(data []byte) error {
 	return proto.Unmarshal(data, m.ResultMessage)
 }
 
+// TCP unicast from Consumer to assigned Broker (for stream subscription)
+type SubscribeMsg struct {
+	*SubscribeMessage
+}
+
+func (m *SubscribeMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *SubscribeMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.SubscribeMessage) }
+func (m *SubscribeMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.SubscribeMessage)
+}
+
 // TCP unicast for Leader to Producer/Consumer
 // TCP unicast for Broker to Leader
 // UDP multicast for Leader to Brokers
@@ -109,6 +120,18 @@ func (m *ReplicateMsg) Unmarshal(data []byte) error {
 	return proto.Unmarshal(data, m.ReplicateMessage)
 }
 
+// TCP unicast from Follower to Leader acknowledging REPLICATE
+// Passive replication: backups send acknowledgement (per slides)
+type ReplicateAckMsg struct {
+	*ReplicateAckMessage
+}
+
+func (m *ReplicateAckMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *ReplicateAckMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.ReplicateAckMessage) }
+func (m *ReplicateAckMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.ReplicateAckMessage)
+}
+
 // TCP unicast from Broker to specific sender
 // UDP multicast from Broker to all (if sender unknown)
 type NackMsg struct {
@@ -119,6 +142,54 @@ func (m *NackMsg) GetHeader() *MessageHeader { return m.Header }
 func (m *NackMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.NackMessage) }
 func (m *NackMsg) Unmarshal(data []byte) error {
 	return proto.Unmarshal(data, m.NackMessage)
+}
+
+// ============== View-Synchronous Recovery Messages ==============
+
+// TCP unicast from new leader to followers during recovery
+type StateExchangeMsg struct {
+	*StateExchangeMessage
+}
+
+func (m *StateExchangeMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *StateExchangeMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.StateExchangeMessage) }
+func (m *StateExchangeMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.StateExchangeMessage)
+}
+
+// TCP unicast from followers to new leader during recovery
+type StateExchangeResponseMsg struct {
+	*StateExchangeResponseMessage
+}
+
+func (m *StateExchangeResponseMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *StateExchangeResponseMsg) Marshal() ([]byte, error) {
+	return proto.Marshal(m.StateExchangeResponseMessage)
+}
+func (m *StateExchangeResponseMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.StateExchangeResponseMessage)
+}
+
+// TCP unicast from leader to all brokers to install new view
+type ViewInstallMsg struct {
+	*ViewInstallMessage
+}
+
+func (m *ViewInstallMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *ViewInstallMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.ViewInstallMessage) }
+func (m *ViewInstallMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.ViewInstallMessage)
+}
+
+// TCP unicast from brokers to leader acknowledging view installation
+type ViewInstallAckMsg struct {
+	*ViewInstallAckMessage
+}
+
+func (m *ViewInstallAckMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *ViewInstallAckMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.ViewInstallAckMessage) }
+func (m *ViewInstallAckMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.ViewInstallAckMessage)
 }
 
 func GetMessageType(msg Message) MessageType {

@@ -3,16 +3,25 @@ package protocol;
 option go_package = "./protocol";
 
 enum MessageType {
-  PRODUCE = 0;        
-  DATA = 1;           
-  CONSUME = 2;        
-  RESULT = 3;         
-  REPLICATE = 4;     
-  HEARTBEAT = 5;    
-  JOIN = 6;          
-  JOIN_RESPONSE = 7;  
-  ELECTION = 8;      
-  NACK = 9;           
+  PRODUCE = 0;
+  DATA = 1;
+  CONSUME = 2;
+  RESULT = 3;
+  REPLICATE = 4;
+  HEARTBEAT = 5;
+  JOIN = 6;
+  JOIN_RESPONSE = 7;
+  ELECTION = 8;
+  NACK = 9;
+  // View-synchronous recovery messages
+  STATE_EXCHANGE = 10;          // New leader requests state from followers
+  STATE_EXCHANGE_RESPONSE = 11; // Followers respond with their last applied sequence
+  VIEW_INSTALL = 12;            // Leader installs new view
+  VIEW_INSTALL_ACK = 13;        // Followers acknowledge view installation
+  // Consumer-to-broker subscription
+  SUBSCRIBE = 14;               // Consumer subscribes to broker for results
+  // Replication acknowledgement (passive replication - backups send ACK)
+  REPLICATE_ACK = 15;           // Follower acknowledges REPLICATE message
 }
 
 enum NodeType {
@@ -59,11 +68,22 @@ message ResultMessage {
   int64 offset = 4;
 }
 
+// TCP unicast from Consumer to assigned Broker (after CONSUME registration with leader)
+// Consumer connects to the broker assigned to handle their topic
+message SubscribeMessage {
+  MessageHeader header = 1;
+  string topic = 2;                // Topic to subscribe to
+  string consumer_id = 3;          // Consumer ID (registered with leader)
+  string consumer_address = 4;     // Consumer address for verification
+  bool enable_processing = 5;      // Whether to apply data processing (aggregation, etc.)
+}
+
 // TCP unicast for Leader to Producer/Consumer
 // TCP unicast for Broker to Leader
 // UDP multicast for Leader to Brokers
 message HeartbeatMessage {
   MessageHeader header = 1;
+  int64 view_number = 2;  // View number to detect zombie leaders
 }
 
 // UDP broadcast from new node to discover cluster
@@ -91,13 +111,29 @@ message ElectionMessage {
     VICTORY = 1;
   }
   Phase phase = 4;
+  // Ring participants for consistent ring computation during election
+  // All nodes use the same filtered list to ensure ring consistency
+  repeated string ring_participants = 5;
 }
 
 // UDP multicast from Leader to Brokers, FIFO ordering
+// View-synchronous: includes view_number to ensure consistency
 message ReplicateMessage {
   MessageHeader header = 1;
   bytes state_snapshot = 2;
   string update_type = 3;
+  int64 view_number = 4;        // View number this update belongs to
+  string leader_id = 5;         // Leader ID that sent this update (for validation)
+}
+
+// TCP unicast from Follower to Leader acknowledging REPLICATE
+// Passive replication: backups send acknowledgement (per slides)
+message ReplicateAckMessage {
+  MessageHeader header = 1;
+  int64 acked_seq = 2;          // Sequence number being acknowledged
+  int64 view_number = 3;        // View number of the acknowledged message
+  bool success = 4;             // Whether application succeeded
+  string error_message = 5;     // Error message if failed
 }
 
 // TCP unicast from Broker to specific sender
@@ -134,16 +170,96 @@ message ConsumerInfo {
   int64 last_heartbeat = 4;
 }
 
+// StreamAssignment tracks one-to-one producer-consumer mapping per topic
+// Each topic has exactly one producer, one consumer, and one broker handling it
+message StreamAssignment {
+  string topic = 1;              // Topic name (unique key)
+  string producer_id = 2;        // Producer ID owning this stream
+  string consumer_id = 3;        // Consumer ID subscribed to this stream
+  string assigned_broker_id = 4; // Broker ID handling this stream
+  string broker_address = 5;     // Broker address for data flow
+}
+
 // Snapshot of the current registry state (brokers only - legacy)
 message RegistrySnapshot {
   map<string, BrokerInfo> brokers = 1;
   int64 seq_num = 2;
 }
 
-// ClusterStateSnapshot includes all state: brokers + producers + consumers
+// ClusterStateSnapshot includes all state: brokers + producers + consumers + streams
 message ClusterStateSnapshot {
   map<string, BrokerInfo> brokers = 1;
   map<string, ProducerInfo> producers = 2;
   map<string, ConsumerInfo> consumers = 3;
   int64 seq_num = 4;  // Monotonic sequence for FIFO ordering
+  map<string, StreamAssignment> streams = 5;  // Topic -> StreamAssignment (one-to-one mapping)
+}
+
+// ============== View-Synchronous Recovery Messages ==============
+
+// LogEntry represents a single entry in a topic log
+// Used for view-synchronous log merge during state exchange
+message LogEntry {
+  uint64 offset = 1;           // Offset in the log
+  bytes data = 2;              // Raw data
+  int64 timestamp = 3;         // Timestamp when entry was created
+}
+
+// TopicLogEntries holds all entries for a single topic
+message TopicLogEntries {
+  string topic = 1;
+  repeated LogEntry entries = 2;
+}
+
+// TCP unicast from new leader to followers during recovery
+// Requests each broker's last applied sequence number
+message StateExchangeMessage {
+  MessageHeader header = 1;
+  int64 election_id = 2;        // Election ID to correlate responses
+  int64 view_number = 3;        // Proposed new view number
+}
+
+// TCP unicast from followers to new leader during recovery
+// Reports broker's last applied sequence number
+message StateExchangeResponseMessage {
+  MessageHeader header = 1;
+  int64 election_id = 2;              // Election ID being responded to
+  int64 last_applied_seq = 3;         // Last successfully applied sequence number
+  bytes state_snapshot = 4;           // Optional: full state snapshot for recovery
+  bool has_complete_state = 5;        // Whether state_snapshot contains valid data
+  map<string, uint64> log_offsets = 6; // DEPRECATED: kept for backward compatibility
+  // View-synchronous log merge: full log entries instead of just offsets
+  // This ensures no acknowledged data is lost during view change
+  repeated TopicLogEntries topic_logs = 7;
+}
+
+// TCP unicast from leader to all brokers to install new view
+message ViewInstallMessage {
+  MessageHeader header = 1;
+  int64 view_number = 2;              // New view number (monotonically increasing)
+  int64 agreed_seq = 3;               // Majority-agreed sequence number
+  bytes state_snapshot = 4;           // Agreed state to synchronize
+  repeated string member_ids = 5;     // Active members in this view
+  repeated string member_addresses = 6; // Addresses of active members
+  map<string, uint64> agreed_log_offsets = 7; // DEPRECATED: kept for backward compatibility
+  // View-synchronous log merge: merged log entries (union of all logs)
+  // Ensures no acknowledged data is lost - all entries from any member are preserved
+  repeated TopicLogEntries merged_logs = 8;
+}
+
+// TCP unicast from brokers to leader acknowledging view installation
+message ViewInstallAckMessage {
+  MessageHeader header = 1;
+  int64 view_number = 2;              // View number being acknowledged
+  bool success = 3;                   // Whether installation succeeded
+  string error_message = 4;           // Error message if failed
+}
+
+// ViewInfo tracks the current view state (for replication)
+message ViewInfo {
+  int64 view_number = 1;              // Monotonically increasing view number
+  string leader_id = 2;               // Current leader ID
+  repeated string member_ids = 3;     // All active member IDs
+  int64 agreed_seq = 4;               // Last majority-agreed sequence number
+  int64 created_at = 5;               // Timestamp when view was created
 }

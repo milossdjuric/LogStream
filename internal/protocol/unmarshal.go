@@ -50,16 +50,22 @@ func ReadUDPMessage(conn *net.UDPConn) (Message, *net.UDPAddr, error) {
 type MessageFactory func() proto.Message
 
 var messageRegistry = map[MessageType]MessageFactory{
-	MessageType_PRODUCE:       func() proto.Message { return &ProduceMessage{} },
-	MessageType_DATA:          func() proto.Message { return &DataMessage{} },
-	MessageType_CONSUME:       func() proto.Message { return &ConsumeMessage{} },
-	MessageType_RESULT:        func() proto.Message { return &ResultMessage{} },
-	MessageType_HEARTBEAT:     func() proto.Message { return &HeartbeatMessage{} },
-	MessageType_JOIN:          func() proto.Message { return &JoinMessage{} },
-	MessageType_JOIN_RESPONSE: func() proto.Message { return &JoinResponseMessage{} },
-	MessageType_ELECTION:      func() proto.Message { return &ElectionMessage{} },
-	MessageType_REPLICATE:     func() proto.Message { return &ReplicateMessage{} },
-	MessageType_NACK:          func() proto.Message { return &NackMessage{} },
+	MessageType_PRODUCE:                 func() proto.Message { return &ProduceMessage{} },
+	MessageType_DATA:                    func() proto.Message { return &DataMessage{} },
+	MessageType_CONSUME:                 func() proto.Message { return &ConsumeMessage{} },
+	MessageType_RESULT:                  func() proto.Message { return &ResultMessage{} },
+	MessageType_SUBSCRIBE:               func() proto.Message { return &SubscribeMessage{} },
+	MessageType_HEARTBEAT:               func() proto.Message { return &HeartbeatMessage{} },
+	MessageType_JOIN:                    func() proto.Message { return &JoinMessage{} },
+	MessageType_JOIN_RESPONSE:           func() proto.Message { return &JoinResponseMessage{} },
+	MessageType_ELECTION:                func() proto.Message { return &ElectionMessage{} },
+	MessageType_REPLICATE:               func() proto.Message { return &ReplicateMessage{} },
+	MessageType_REPLICATE_ACK:           func() proto.Message { return &ReplicateAckMessage{} },
+	MessageType_NACK:                    func() proto.Message { return &NackMessage{} },
+	MessageType_STATE_EXCHANGE:          func() proto.Message { return &StateExchangeMessage{} },
+	MessageType_STATE_EXCHANGE_RESPONSE: func() proto.Message { return &StateExchangeResponseMessage{} },
+	MessageType_VIEW_INSTALL:            func() proto.Message { return &ViewInstallMessage{} },
+	MessageType_VIEW_INSTALL_ACK:        func() proto.Message { return &ViewInstallAckMessage{} },
 }
 
 func unmarshalMessage(data []byte) (Message, error) {
@@ -95,6 +101,8 @@ func wrapProtoMessage(pm proto.Message) (Message, error) {
 		return &ConsumeMsg{ConsumeMessage: m}, nil
 	case *ResultMessage:
 		return &ResultMsg{ResultMessage: m}, nil
+	case *SubscribeMessage:
+		return &SubscribeMsg{SubscribeMessage: m}, nil
 	case *HeartbeatMessage:
 		return &HeartbeatMsg{HeartbeatMessage: m}, nil
 	case *JoinMessage:
@@ -105,8 +113,18 @@ func wrapProtoMessage(pm proto.Message) (Message, error) {
 		return &ElectionMsg{ElectionMessage: m}, nil
 	case *ReplicateMessage:
 		return &ReplicateMsg{ReplicateMessage: m}, nil
+	case *ReplicateAckMessage:
+		return &ReplicateAckMsg{ReplicateAckMessage: m}, nil
 	case *NackMessage:
 		return &NackMsg{NackMessage: m}, nil
+	case *StateExchangeMessage:
+		return &StateExchangeMsg{StateExchangeMessage: m}, nil
+	case *StateExchangeResponseMessage:
+		return &StateExchangeResponseMsg{StateExchangeResponseMessage: m}, nil
+	case *ViewInstallMessage:
+		return &ViewInstallMsg{ViewInstallMessage: m}, nil
+	case *ViewInstallAckMessage:
+		return &ViewInstallAckMsg{ViewInstallAckMessage: m}, nil
 	default:
 		return nil, fmt.Errorf("unknown proto message type: %T", pm)
 	}
