@@ -1,6 +1,12 @@
-logstream
-producer
-consumer
+# Compiled binaries (at root level only)
+/logstream
+/producer
+/consumer
+/logstreamctl
+/broker
+
+# Claude Code context file (local development only)
+CLAUDE.md
 
 # Test logs
 test-logs/

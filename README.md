@@ -1,7 +1,16 @@
 # LogStream
 
-A distributed log streaming platform 
+A distributed log streaming platform implementing view-synchronous replication with passive replication semantics.
 
+## Overview
+
+LogStream is a distributed system for log streaming that provides:
+- Automatic leader election using LCR ring algorithm
+- View-synchronous membership management
+- FIFO ordered message delivery
+- Phi accrual failure detection
+- Consistent hash ring for load balancing
+- Producer-consumer stream assignment
 
 Each node:
 - Joins the multicast group on startup
@@ -17,106 +26,39 @@ Each node:
 - Docker and Docker Compose (for containerized testing)
 - Network connectivity (multicast-capable network interface)
 
+### Build
+
+```bash
+go build -o logstream main.go
+go build -o producer cmd/producer/main.go
+go build -o consumer cmd/consumer/main.go
+```
+
+### Run
+
+```bash
+# Single node (becomes leader)
+NODE_ADDRESS=192.168.1.10:8001 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
+
+# Additional nodes (become followers)
+NODE_ADDRESS=192.168.1.20:8001 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
+```
+
 ### Find Your Network Interface
+
 ```bash
 go run cmd/netdiag/main.go
 ```
-
-This displays available network interfaces and their IP addresses.
-
-## Testing Scenarios
-
-### 1. Docker Testing (Recommended for Development)
-
-Uses Docker Compose with isolated networks. See `deploy/docker/` for details.
-
-```bash
-# Run test scripts with docker mode
-cd tests/linux
-./test-single.sh docker
-./test-trio.sh docker
-./test-election-automatic.sh docker
-
-# Or use compose directly
-cd deploy/docker/compose
-docker compose -f trio.yaml up -d
-docker compose -f trio.yaml logs -f
-docker compose -f trio.yaml down
-```
-
-Available compose files in `deploy/docker/compose/`:
-- `single.yaml` - Single leader node
-- `trio.yaml` - Leader + 2 followers
-- `sequence.yaml` - Sequence number demo
-- `producer-consumer.yaml` - Producer/consumer test
-- `election.yaml` - Leader election test
-
-### 2. Local Testing with Network Namespaces (Linux)
-
-Uses isolated network namespaces for multicast testing. See `deploy/netns/` for details.
-
-```bash
-# Setup namespaces (one-time)
-cd deploy/netns
-sudo ./setup-netns.sh
-
-# Run tests with local mode
-cd tests/linux
-sudo ./test-single.sh local
-sudo ./test-trio.sh local
-
-# Cleanup
-cd deploy/netns
-sudo ./cleanup.sh
-```
-
-### 3. Vagrant Testing (Full VM Isolation)
-
-Uses Vagrant with libvirt/KVM for complete VM isolation. See `deploy/vagrant/` for details.
-
-```bash
-# Install vagrant-libvirt plugin (one-time)
-./scripts/install-vagrant-libvirt.sh
-
-# Start VMs
-cd deploy/vagrant
-vagrant up
-
-# Run tests with vagrant mode
-cd tests/linux
-./test-single.sh vagrant
-./test-trio.sh vagrant
-
-# Stop VMs
-cd deploy/vagrant
-vagrant halt
-```
-
-### 4. Manual Testing
-
-For manual testing or physical machines:
-
-```bash
-# Build
-go build -o logstream main.go
-
-# Terminal 1 (Leader)
-NODE_ADDRESS=192.168.1.10:8001 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
-
-# Terminal 2 (Follower)
-NODE_ADDRESS=192.168.1.20:8002 MULTICAST_GROUP=239.0.0.1:9999 ./logstream
-```
-
-**Important**: Configure firewall rules on all machines (see Firewall Configuration below).
-
 
 ## Configuration
 
 ### Environment Variables
 
-- `NODE_ADDRESS`: Node's IP:PORT (auto-detected if not provided)
-- `MULTICAST_GROUP`: Multicast address (default: 239.0.0.1:9999)
-- `BROADCAST_PORT`: UDP broadcast port (default: 8888)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| NODE_ADDRESS | Auto-detect | Node's IP:PORT |
+| MULTICAST_GROUP | 239.0.0.1:9999 | Multicast address for heartbeats |
+| BROADCAST_PORT | 8888 | UDP broadcast port for discovery |
 
 ### Auto-Detection
 
@@ -125,195 +67,128 @@ If NODE_ADDRESS is not specified, the system automatically:
 2. Selects the primary non-loopback interface
 3. Assigns default port 8001
 
-### Leader Election
+## Architecture
 
-Leaders are determined automatically through election protocol - no manual configuration needed. The first node to start typically becomes the leader, and leadership transfers automatically if the leader fails.
+### Core Components
 
-## Expected Output
+- **Node**: Central broker implementation handling leader/follower roles
+- **Protocol**: Protobuf-based messaging layer
+- **State**: Cluster state management with FIFO ordering
+- **Storage**: In-memory log storage per topic
+- **Failure Detection**: Phi accrual detector for automatic failure detection
+- **Load Balancing**: Consistent hash ring for topic assignment
 
-### Leader Node
-```
-=== LogStream Configuration ===
-Node Address:      192.168.1.74:8001
-Multicast Group:   239.0.0.1:9999
-Broadcast Port:    8888
-Network Interface: 192.168.1.74
-================================
+### Message Types
 
-[Multicast] Joined group 239.0.0.1 on interface wlp4s0 (port reuse enabled)
-[Node a1b2c3d4] Started at 192.168.1.74:8001
-[Node a1b2c3d4] Elected as LEADER
-[Leader a1b2c3d4] -> HEARTBEAT
-[Leader a1b2c3d4] -> REPLICATE seq=1 type=REGISTRY
-```
+| Message | Direction | Transport | Purpose |
+|---------|-----------|-----------|---------|
+| JOIN | Node to Cluster | UDP Broadcast | Cluster discovery |
+| JOIN_RESPONSE | Leader to Node | UDP Unicast | Discovery response |
+| HEARTBEAT | Leader to Followers | UDP Multicast | Liveness |
+| REPLICATE | Leader to Followers | UDP Multicast | State replication |
+| REPLICATE_ACK | Follower to Leader | TCP | Replication ack |
+| ELECTION | Node to Next | TCP | LCR election |
+| STATE_EXCHANGE | Leader to Followers | TCP | Recovery state request |
+| VIEW_INSTALL | Leader to Followers | TCP | Install new view |
 
-The leader sends messages and also receives its own via multicast loopback (this is expected behavior).
+### Key Behaviors
 
-### Follower Node
-```
-=== LogStream Configuration ===
-Node Address:      192.168.1.74:8002
-Multicast Group:   239.0.0.1:9999
-Broadcast Port:    8888
-Network Interface: 192.168.1.74
-================================
+**Leader Election**: LCR ring-based algorithm
+1. Nodes detect reachable peers in parallel
+2. Ring computed from sorted reachable node IDs
+3. Election message circulates with highest ID
+4. Node receiving its own ID becomes leader
 
-[Multicast] Joined group 239.0.0.1 on interface wlp4s0 (port reuse enabled)
-[Node x9y8z7w6] Started at 192.168.1.74:8002
-[Node x9y8z7w6] Discovered leader: a1b2c3d4
-[x9y8z7w6] <- HEARTBEAT from a1b2c3d4
-[x9y8z7w6] <- REPLICATE seq=5 type=REGISTRY from a1b2c3d4
-```
+**View-Synchronous Recovery**: After leader election
+1. New leader freezes operations
+2. Collects state from all followers (full log entries)
+3. Merges logs using UNION semantics (all entries preserved)
+4. Installs new view with merged state
+5. Operations resume
 
-Follower joined at seq=5 (late joining). It receives messages from the current sequence onwards.
+**Failure Detection**: Phi Accrual + Timeout
+- Suspicion threshold: phi > 8.0
+- Failure threshold: phi > 10.0
+- Fallback timeout: 15 seconds
 
-## Key Behaviors
+## Testing
 
-### Late Joining
+See TESTS_QUICK_REFERENCE.md for quick commands or TESTS_COMPLETE_GUIDE.md for detailed documentation.
 
-When a follower starts after the leader:
-- It joins the multicast group
-- Receives messages from the current sequence number onwards
-- Does NOT receive messages sent before it joined
+### Quick Test
 
-Example:
-```
-Leader sends: seq 1, 2, 3, 4, 5, 6...
-Follower joins at time when leader is at seq=5
-Follower receives: seq 5, 6, 7, 8...
-```
-
-
-### SO_REUSEPORT
-
-Multiple processes can listen on port 9999 simultaneously:
-- Leader receives its own multicast messages (loopback)
-- Followers receive leader's messages
-- All nodes share the same multicast port
-
-
-## Firewall Configuration (TODO: Check for sure)
-
-### Linux (UFW)
 ```bash
-sudo ufw allow 8001/tcp
-sudo ufw allow 8002/tcp
-sudo ufw allow 8888/udp
-sudo ufw allow 9999/udp
+# Unit tests
+go test -v ./tests/unit/
+
+# Integration tests (requires network namespaces)
+sudo ./deploy/netns/setup-netns.sh
+cd tests/linux && ./test-trio.sh local
 ```
 
-### Windows
-```cmd
-netsh advfirewall firewall add rule name="LogStream TCP" dir=in action=allow protocol=TCP localport=8001,8002
-netsh advfirewall firewall add rule name="LogStream UDP" dir=in action=allow protocol=UDP localport=8888,9999
+### Test Modes
+
+| Mode | Platform | Best For |
+|------|----------|----------|
+| local | Network namespaces | Development |
+| docker | Docker containers | CI/CD |
+| vagrant | KVM VMs | Pre-production |
+
+## Project Structure
+
+```
+LogStream/
+├── main.go                    # Main entry point
+├── cmd/
+│   ├── broker/main.go         # Broker entry point
+│   ├── producer/main.go       # Producer client
+│   ├── consumer/main.go       # Consumer client
+│   └── netdiag/main.go        # Network diagnostics
+├── internal/
+│   ├── node/                  # Core broker implementation
+│   ├── protocol/              # Protobuf messaging
+│   ├── state/                 # Cluster state management
+│   ├── storage/               # Log storage
+│   ├── failure/               # Failure detection
+│   └── loadbalance/           # Consistent hash ring
+├── tests/
+│   ├── unit/                  # Go unit tests
+│   ├── integration/           # Go integration tests
+│   └── linux/                 # Bash integration tests
+└── deploy/
+    ├── docker/                # Docker deployment
+    ├── netns/                 # Network namespace scripts
+    └── vagrant/               # Vagrant VM deployment
 ```
 
 ## Troubleshooting
 
-### Check Network Connectivity
+### Common Issues
+
+**All nodes become leaders:**
+- UDP multicast/broadcast not working on localhost
+- Use network namespaces or Docker
+
+**Election never completes:**
+- Check TCP connectivity between nodes
+- Verify ring topology consistency
+
+**Consumer not receiving data:**
+- Verify producer is sending to correct broker
+- Check topic assignment via hash ring
+
+### Debug Commands
+
 ```bash
-# Ping other machine
-ping 192.168.1.30
+# Check cluster state
+grep "ClusterState" node.log
 
-# Check if ports are open
-telnet 192.168.1.30 8001
+# Check election progress
+grep -E "ELECTION|I WIN|COORDINATOR" node.log
 
-# View network interfaces
-ip addr show          # Linux
-ipconfig /all         # Windows
+# Kill all processes
+pkill -f logstream
 ```
-
-### Docker Logs
-```bash
-# All containers
-docker compose logs -f
-
-# Specific container
-docker compose logs -f leader
-docker compose logs -f broker1
-docker compose logs -f broker2
-
-# Check container status
-docker compose ps
-```
-
-### Common Issues (TODO: Check again)
-
-**No messages received:**
-- Check firewall rules on all machines
-- Verify multicast is enabled on network interfaces
-- Ensure both nodes are on the same network subnet
-- Check router supports multicast (some don't)
-
-**Port already in use:**
-- Stop other instances: `docker compose down`
-- Kill process: `lsof -ti:8001 | xargs kill -9` (Linux/macOS)
-
-**Docker permission denied:**
-- Add user to docker group: `sudo usermod -aG docker $USER`
-- Then log out and back in for changes to take effect
-
-## Development
-
-### Build Locally
-```bash
-go build -o logstream main.go
-
-# Or use the rebuild script (cleans up processes/ports first)
-./scripts/rebuild.sh      # Linux/macOS
-scripts\rebuild.bat       # Windows
-```
-
-### Run with Custom Config
-```bash
-export NODE_ADDRESS="192.168.1.25:8001"
-export MULTICAST_GROUP="239.0.0.1:9999"
-export BROADCAST_PORT="8888"
-
-go run main.go
-```
-
-### Regenerate Protocol Buffers
-```bash
-protoc --go_out=. --go_opt=paths=source_relative \
-    internal/protocol/broker.proto
-```
-
-## Testing Summary
-
-| Test Type | Platform | Isolation | Best For |
-|-----------|----------|-----------|----------|
-| Docker | Any | Container networks | Development, CI/CD |
-| Network Namespaces | Linux | Virtual interfaces | Quick local testing |
-| Vagrant | Linux | Full VMs (KVM) | Pre-production validation |
-| Manual | Any | Physical/VM | Production deployment |
-
-
-
-### Protocol Buffers Schema
-```protobuf
-message Message {
-    MessageType type = 1;
-    string node_id = 2;
-    uint64 sequence = 3;
-    bytes data = 4;
-}
-
-enum MessageType {
-    HEARTBEAT = 0;
-    REPLICATE = 1;
-}
-```
-
-### Node ID Generation
-
-Each node generates a unique 8-character ID using:
-```
-SHA256(IP:PORT + timestamp + random_bytes)[:8]
-```
-
-Example: `a1b2c3d4`, `x9y8z7w6`
-
 
 ## License
 
