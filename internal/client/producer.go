@@ -19,14 +19,20 @@ type Producer struct {
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
 	stopHeartbeat chan struct{}
-	seqNum        int64 // Monotonically increasing sequence number for FIFO ordering
+	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
 	wg            sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
 // NewProducer creates a new producer
+// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewProducer(topic, leaderAddr string) *Producer {
+	// Generate ID based on topic if no leader address (will discover later)
+	idSeed := leaderAddr
+	if idSeed == "" {
+		idSeed = topic
+	}
 	return &Producer{
-		id:            protocol.GenerateClientID("producer", leaderAddr),
+		id:            protocol.GenerateClientID("producer", idSeed),
 		topic:         topic,
 		leaderAddr:    leaderAddr,
 		stopHeartbeat: make(chan struct{}),
@@ -35,6 +41,7 @@ func NewProducer(topic, leaderAddr string) *Producer {
 }
 
 // Connect registers with the leader via TCP
+// If no leader address was provided, auto-discovers the cluster via broadcast first
 func (p *Producer) Connect() error {
 	const (
 		maxAttempts      = 10
@@ -43,6 +50,17 @@ func (p *Producer) Connect() error {
 		halfOpenDelay    = 2 * time.Second
 		failureThreshold = 5
 	)
+
+	// Auto-discover leader if not provided
+	if p.leaderAddr == "" {
+		fmt.Printf("[Producer %s] No leader address provided, discovering via broadcast...\n", p.id[:8])
+		leaderAddr, err := protocol.DiscoverLeader(nil)
+		if err != nil {
+			return fmt.Errorf("failed to discover cluster: %w", err)
+		}
+		p.leaderAddr = leaderAddr
+		fmt.Printf("[Producer %s] Discovered leader at %s\n", p.id[:8], p.leaderAddr)
+	}
 
 	failureCount := 0
 	var conn net.Conn

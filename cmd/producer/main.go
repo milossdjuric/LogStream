@@ -19,22 +19,23 @@ func main() {
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to produce to")
 	rate := flag.Int("rate", 0, "Messages per second (0 = interactive mode)")
+	interval := flag.Int("interval", 0, "Interval between messages in milliseconds (overrides -rate)")
 	count := flag.Int("count", 0, "Number of messages to send (0 = unlimited)")
 	message := flag.String("message", "log message", "Message template for auto mode")
 	help := flag.Bool("help", false, "Show help")
 
 	flag.Parse()
 
-	if *help || *leader == "" {
+	if *help {
 		fmt.Println("LogStream Producer")
 		fmt.Println("==================")
 		fmt.Println()
 		fmt.Println("Usage:")
-		fmt.Println("  producer -leader <address> [options]")
+		fmt.Println("  producer [options]")
 		fmt.Println()
 		fmt.Println("Options:")
 		fmt.Println("  -leader string")
-		fmt.Println("        Leader broker address (REQUIRED)")
+		fmt.Println("        Leader broker address (optional - auto-discovers via broadcast if not set)")
 		fmt.Println("        Example: -leader 192.168.1.10:8001")
 		fmt.Println()
 		fmt.Println("  -topic string")
@@ -43,6 +44,10 @@ func main() {
 		fmt.Println("  -rate int")
 		fmt.Println("        Messages per second, 0 for interactive (default: 0)")
 		fmt.Println()
+		fmt.Println("  -interval int")
+		fmt.Println("        Interval between messages in milliseconds (overrides -rate)")
+		fmt.Println("        Example: -interval 2000 = 1 message every 2 seconds")
+		fmt.Println()
 		fmt.Println("  -count int")
 		fmt.Println("        Number of messages to send, 0 for unlimited (default: 0)")
 		fmt.Println()
@@ -50,14 +55,23 @@ func main() {
 		fmt.Println("        Message template for auto mode (default: log message)")
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  # Interactive mode - type messages")
-		fmt.Println("  ./producer -leader 192.168.1.10:8001 -topic logs")
+		fmt.Println("  # Auto-discover cluster, interactive mode")
+		fmt.Println("  ./producer -topic logs")
 		fmt.Println()
-		fmt.Println("  # Auto mode - 10 messages per second")
+		fmt.Println("  # Auto-discover cluster, auto mode - 10 messages per second")
+		fmt.Println("  ./producer -topic logs -rate 10")
+		fmt.Println()
+		fmt.Println("  # Explicit leader address")
 		fmt.Println("  ./producer -leader 192.168.1.10:8001 -topic logs -rate 10")
 		fmt.Println()
 		fmt.Println("  # Send 100 messages and exit")
-		fmt.Println("  ./producer -leader 192.168.1.10:8001 -topic logs -rate 10 -count 100")
+		fmt.Println("  ./producer -topic logs -rate 10 -count 100")
+		fmt.Println()
+		fmt.Println("  # Slow rate - 1 message every 2 seconds")
+		fmt.Println("  ./producer -topic logs -interval 2000")
+		fmt.Println()
+		fmt.Println("  # Slow rate - 1 message every 5 seconds")
+		fmt.Println("  ./producer -topic logs -interval 5000")
 		os.Exit(0)
 	}
 
@@ -65,7 +79,11 @@ func main() {
 	fmt.Println("       LogStream Producer")
 	fmt.Println("===========================================")
 	fmt.Println()
-	fmt.Printf("Leader:  %s\n", *leader)
+	if *leader != "" {
+		fmt.Printf("Leader:  %s\n", *leader)
+	} else {
+		fmt.Println("Leader:  (auto-discover via broadcast)")
+	}
 	fmt.Printf("Topic:   %s\n", *topic)
 	fmt.Println()
 
@@ -85,9 +103,18 @@ func main() {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
 
-	if *rate > 0 {
-		// Auto mode - send messages at specified rate
-		fmt.Printf("Sending messages at %d msg/sec", *rate)
+	if *rate > 0 || *interval > 0 {
+		// Auto mode - send messages at specified rate/interval
+		var tickInterval time.Duration
+		if *interval > 0 {
+			// Use explicit interval (milliseconds)
+			tickInterval = time.Duration(*interval) * time.Millisecond
+			fmt.Printf("Sending messages every %dms (%.2f msg/sec)", *interval, 1000.0/float64(*interval))
+		} else {
+			// Use rate (messages per second)
+			tickInterval = time.Second / time.Duration(*rate)
+			fmt.Printf("Sending messages at %d msg/sec", *rate)
+		}
 		if *count > 0 {
 			fmt.Printf(" (total: %d messages)", *count)
 		}
@@ -97,8 +124,7 @@ func main() {
 
 		go func() {
 			defer close(done)
-			interval := time.Second / time.Duration(*rate)
-			ticker := time.NewTicker(interval)
+			ticker := time.NewTicker(tickInterval)
 			defer ticker.Stop()
 
 			sent := 0

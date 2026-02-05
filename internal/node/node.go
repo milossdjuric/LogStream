@@ -419,6 +419,8 @@ func (n *Node) printPhiDetectorStatus() {
 
 func (n *Node) GetBrokerForTopic(topic string) (brokerID string, brokerAddress string, err error) {
 	if stream, exists := n.clusterState.GetStreamAssignment(topic); exists {
+		fmt.Printf("[Node %s] GetBrokerForTopic(%s): Using existing stream assignment -> broker=%s, addr=%s\n",
+			n.id[:8], topic, stream.AssignedBrokerId[:8], stream.BrokerAddress)
 		return stream.AssignedBrokerId, stream.BrokerAddress, nil
 	}
 
@@ -432,5 +434,7 @@ func (n *Node) GetBrokerForTopic(topic string) (brokerID string, brokerAddress s
 		return "", "", fmt.Errorf("broker %s not found in cluster state", brokerID[:8])
 	}
 
+	fmt.Printf("[Node %s] GetBrokerForTopic(%s): Ring selected broker=%s, addr=%s\n",
+		n.id[:8], topic, brokerID[:8], broker.Address)
 	return brokerID, broker.Address, nil
 }

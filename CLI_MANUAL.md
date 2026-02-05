@@ -6,612 +6,645 @@ Command-line interface reference for LogStream cluster management tool, broker, 
 
 ## Table of Contents
 
-1. [logstreamctl - Cluster Management](#logstreamctl---cluster-management)
-2. [Build Commands](#build-commands)
-3. [Broker Commands](#broker-commands)
-4. [Producer Commands](#producer-commands)
-5. [Consumer Commands](#consumer-commands)
-6. [Network Diagnostics](#network-diagnostics)
-7. [Environment Variables](#environment-variables)
-8. [Debug Commands](#debug-commands)
+1. [Quick Start - Copy-Paste Examples](#quick-start---copy-paste-examples)
+2. [Cluster Discovery via UDP Broadcast](#cluster-discovery-via-udp-broadcast)
+3. [Build All Binaries](#build-all-binaries)
+4. [logstreamctl - Cluster Management](#logstreamctl---cluster-management)
+5. [All Broker Start Combinations](#all-broker-start-combinations)
+6. [All Producer Start Combinations](#all-producer-start-combinations)
+7. [All Consumer Start Combinations](#all-consumer-start-combinations)
+8. [Process Management](#process-management)
+9. [Environment Variables](#environment-variables)
+10. [Debug Commands](#debug-commands)
+
+---
+
+## Quick Start - Copy-Paste Examples
+
+**Build everything first:**
+```bash
+go build -o logstreamctl cmd/logstreamctl/main.go && go build -o logstream main.go && go build -o producer cmd/producer/main.go && go build -o consumer cmd/consumer/main.go
+```
+
+**Initialize (first time only):**
+```bash
+./logstreamctl config init
+```
+
+**Terminal 1 - Start broker (auto-detect IP):**
+```bash
+./logstreamctl start broker --name node1
+```
+
+**Terminal 2 - Start producer (discovers cluster via UDP broadcast):**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --rate 5
+```
+
+**Terminal 3 - Start consumer (discovers cluster via UDP broadcast):**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs
+```
+
+**Stop everything:**
+```bash
+./logstreamctl stop --all
+```
+
+---
+
+## Cluster Discovery via UDP Broadcast
+
+All LogStream components (brokers, producers, consumers) use **UDP broadcast** for automatic cluster discovery. No manual IP configuration is required when all nodes are on the same subnet.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     UDP Broadcast Discovery                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   Client (Producer/Consumer)              Leader Broker          │
+│          │                                      │                │
+│          │──── JOIN (UDP broadcast) ──────────►│ port 8888      │
+│          │     (subnet broadcast address)       │                │
+│          │                                      │                │
+│          │◄─── JOIN_RESPONSE (UDP unicast) ────│                │
+│          │     (leader address returned)        │                │
+│          │                                      │                │
+│          │──── PRODUCE/CONSUME (TCP) ─────────►│ port 8001      │
+│          │     (connect to discovered leader)   │                │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Discovery Features
+
+| Feature | Description |
+|---------|-------------|
+| **Auto-detect broadcast address** | Calculates subnet-specific broadcast (e.g., 172.28.226.255) |
+| **Circuit breaker pattern** | Exponential backoff on failures (1s, 1.5s, 2.25s... max 10s) |
+| **Split-brain detection** | Detects multiple leaders, waits for election to resolve |
+| **Retry logic** | 5 attempts with increasing delays |
+
+### When to Use Explicit `--leader`
+
+Use the `--leader` flag explicitly when:
+- Clients are on a **different subnet** than brokers (broadcast doesn't cross subnets)
+- Firewall blocks **UDP port 8888** (broadcast port)
+- Running in **Docker** with host networking disabled
+- Testing with **localhost** (broadcast unreliable on loopback)
+
+```bash
+# Cross-subnet or firewall scenarios - specify leader explicitly
+./logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs
+```
+
+---
+
+## Build All Binaries
+
+```bash
+# Build all at once (copy-paste this)
+go build -o logstreamctl cmd/logstreamctl/main.go && \
+go build -o logstream main.go && \
+go build -o producer cmd/producer/main.go && \
+go build -o consumer cmd/consumer/main.go
+
+# Verify builds
+ls -la logstreamctl logstream producer consumer
+```
 
 ---
 
 ## logstreamctl - Cluster Management
 
-The `logstreamctl` tool manages LogStream processes across machines. Each machine runs its own `logstreamctl` instance, and processes communicate over LAN via the LogStream protocol (UDP broadcast for discovery, UDP multicast for replication, TCP for clients).
-
-### Installation
-
-```bash
-go build -o logstreamctl cmd/logstreamctl/main.go
-```
-
 ### Command Reference
 
 | Command | Description |
 |---------|-------------|
-| `logstreamctl start broker` | Start a broker node |
-| `logstreamctl start producer` | Start a producer client |
-| `logstreamctl start consumer` | Start a consumer client |
-| `logstreamctl stop <name>` | Stop a specific process by name |
-| `logstreamctl stop --all` | Stop all managed processes |
-| `logstreamctl list` | List all managed processes with status |
-| `logstreamctl logs <name>` | View logs for a process |
-| `logstreamctl logs <name> --follow` | Follow logs in real-time (like tail -f) |
-| `logstreamctl status` | Show status of local processes |
-| `logstreamctl election <name>` | Trigger election on a broker (sends SIGUSR1) |
-| `logstreamctl config init` | Initialize state directory |
-| `logstreamctl config show` | Show state directory paths |
-| `logstreamctl help` | Show help |
-| `logstreamctl version` | Show version |
+| `./logstreamctl start broker` | Start a broker node |
+| `./logstreamctl start producer` | Start a producer client |
+| `./logstreamctl start consumer` | Start a consumer client |
+| `./logstreamctl stop <name>` | Stop a specific process by name |
+| `./logstreamctl stop --all` | Stop all managed processes |
+| `./logstreamctl list` | List all managed processes with status |
+| `./logstreamctl logs <name>` | View logs for a process |
+| `./logstreamctl logs <name> --follow` | Follow logs in real-time |
+| `./logstreamctl status` | Show status of local processes |
+| `./logstreamctl election <name>` | Trigger election on a broker |
+| `./logstreamctl config init` | Initialize state directory |
+| `./logstreamctl config show` | Show state directory paths |
+| `./logstreamctl help` | Show help |
 
 ### First-Time Setup
 
 ```bash
 # Initialize state directory (~/.logstream/)
-logstreamctl config init
+./logstreamctl config init
 
-# Verify the directory was created
-logstreamctl config show
-# Output:
-# State directory: /home/user/.logstream
-# PID directory:   /home/user/.logstream/pids
-# Log directory:   /home/user/.logstream/logs
-# State file:      /home/user/.logstream/processes.json
+# Verify
+./logstreamctl config show
 ```
 
-### Foreground vs Background Mode
+---
 
-**Foreground (default)**: Process runs in your terminal. You see output directly. Ctrl+C stops it. Terminal must stay open.
+## All Broker Start Combinations
 
-**Background (--background flag)**: Process runs as daemon. Output goes to log file. Terminal is free. Process survives terminal close.
+### Address Options
+
+The broker `--address` flag supports three formats:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| Omitted | `--name node1` | Auto-detect IP, use port 8001 |
+| Port only | `--address 8002` | Auto-detect IP, use specified port |
+| Full IP:PORT | `--address 172.28.226.255:8001` | Use exact address |
+
+### Broker Examples (Copy-Paste Ready)
+
+**Simplest - auto-detect everything:**
+```bash
+./logstreamctl start broker --name node1
+```
+
+**Auto-detect IP, custom port:**
+```bash
+./logstreamctl start broker --name node1 --address 8001
+```
+
+**Explicit IP and port:**
+```bash
+./logstreamctl start broker --name node1 --address 172.28.226.255:8001
+```
+
+**Run in background (daemon mode):**
+```bash
+./logstreamctl start broker --name node1 --background
+```
+
+**Background with explicit address:**
+```bash
+./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --background
+```
+
+**Custom multicast group:**
+```bash
+./logstreamctl start broker --name node1 --multicast 239.0.0.5:9999
+```
+
+**Custom broadcast port:**
+```bash
+./logstreamctl start broker --name node1 --broadcast-port 8889
+```
+
+**Full options:**
+```bash
+./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --multicast 239.0.0.1:9999 --broadcast-port 8888 --background
+```
+
+### Multi-Broker Cluster (Same Machine)
 
 ```bash
-# Foreground - blocks terminal, see output directly
-logstreamctl start broker --name node1 --address 192.168.1.10:8001
-# Press Ctrl+C to stop
+# Terminal 1 - Leader (port 8001)
+./logstreamctl start broker --name node1 --address 8001
 
-# Background - returns immediately, output to ~/.logstream/logs/node1.log
-logstreamctl start broker --name node1 --address 192.168.1.10:8001 --background
+# Terminal 2 - Follower (port 8002)
+./logstreamctl start broker --name node2 --address 8002
+
+# Terminal 3 - Follower (port 8003)
+./logstreamctl start broker --name node3 --address 8003
 ```
 
-### Starting Processes
+### Broker Options Reference
 
-**Start a broker:**
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--name` | `-n` | (required) | Unique process name |
+| `--address` | `-a` | auto:8001 | IP:PORT, or just PORT, or omit for auto |
+| `--multicast` | `-m` | 239.0.0.1:9999 | Multicast group for heartbeats |
+| `--broadcast-port` | `-b` | 8888 | UDP broadcast port for discovery |
+| `--background` | `-bg` | false | Run as daemon |
+
+---
+
+## All Producer Start Combinations
+
+Producers discover the cluster leader automatically via **UDP broadcast on port 8888**. The `--leader` flag is optional.
+
+### Producer Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Auto-discover | (default) | Discovers cluster leader via UDP broadcast |
+| Interactive | `--rate 0` | Type messages manually in terminal |
+| Auto rate | `--rate N` | Send N messages per second automatically |
+| Interval | `--interval N` | Send 1 message every N milliseconds (for slow rates) |
+| Limited count | `--count N` | Stop after sending N messages |
+| Background | `--background` | Run as daemon (requires --rate or --interval) |
+
+### Producer Examples (Copy-Paste Ready)
+
+**Auto-discover via UDP broadcast, interactive mode:**
 ```bash
-# Foreground (default) - see output directly
-logstreamctl start broker --name node1 --address 192.168.1.10:8001
-
-# Background - runs as daemon
-logstreamctl start broker --name node1 --address 192.168.1.10:8001 --background
+./logstreamctl start producer --name prod1 --topic logs
 ```
 
-**Start a producer:**
+**Auto-discover via UDP broadcast, 5 messages per second:**
 ```bash
-# Interactive mode (type messages manually)
-logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs
-
-# Auto mode - send 10 messages per second
-logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs --rate 10
-
-# Background mode (requires --rate > 0)
-logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs --rate 10 --background
+./logstreamctl start producer --name prod1 --topic logs --rate 5
 ```
 
-**Start a consumer:**
+**Auto-discover via UDP broadcast, 10 messages per second:**
 ```bash
-# Foreground - see received messages
-logstreamctl start consumer --name cons1 --leader 192.168.1.10:8001 --topic logs
-
-# Background - output to log file
-logstreamctl start consumer --name cons1 --leader 192.168.1.10:8001 --topic logs --background
+./logstreamctl start producer --name prod1 --topic logs --rate 10
 ```
 
-### Broker Options
+**Slow rate - 1 message every 2 seconds (using --interval in milliseconds):**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --interval 2000
+```
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--name` | `-n` | Process name (required, must be unique) |
-| `--address` | `-a` | Node address IP:PORT (required) |
-| `--multicast` | `-m` | Multicast group (default: 239.0.0.1:9999) |
-| `--broadcast-port` | `-b` | Broadcast port (default: 8888) |
-| `--background` | `-bg` | Run in background (default: foreground) |
+**Slow rate - 1 message every 5 seconds:**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --interval 5000
+```
 
-### Producer Options
+**Slow rate - 1 message every 10 seconds:**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --interval 10000
+```
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--name` | `-n` | Process name (required, must be unique) |
-| `--leader` | `-l` | Leader broker address IP:PORT (required) |
-| `--topic` | `-t` | Topic name (default: logs) |
-| `--rate` | `-r` | Messages per second (default: 0 = interactive mode) |
-| `--count` | `-c` | Total messages to send (default: 0 = unlimited) |
-| `--message` | `-m` | Message template for auto mode |
-| `--background` | `-bg` | Run in background (requires --rate > 0) |
+**Explicit leader address (when UDP broadcast doesn't work - cross-subnet, firewall, etc.):**
+```bash
+./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --rate 5
+```
 
-### Consumer Options
+**Send exactly 100 messages then stop:**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --rate 5 --count 100
+```
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--name` | `-n` | Process name (required, must be unique) |
-| `--leader` | `-l` | Leader broker address IP:PORT (required) |
-| `--topic` | `-t` | Topic name (default: logs) |
-| `--no-analytics` | | Disable analytics processing |
-| `--background` | `-bg` | Run in background |
+**Custom message template:**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --rate 5 --message "sensor-data"
+```
 
-### Process Management
+**Background mode (daemon):**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --rate 5 --background
+```
+
+**Different topics:**
+```bash
+./logstreamctl start producer --name prod1 --topic sensors --rate 5
+./logstreamctl start producer --name prod2 --topic metrics --rate 5
+./logstreamctl start producer --name prod3 --topic events --rate 5
+```
+
+**Full options with explicit leader:**
+```bash
+./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --rate 10 --count 1000 --message "log-entry" --background
+```
+
+### Producer Options Reference
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--name` | `-n` | (required) | Unique process name |
+| `--leader` | `-l` | UDP broadcast | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
+| `--topic` | `-t` | logs | Topic name |
+| `--rate` | `-r` | 0 | Messages/sec (0 = interactive) |
+| `--interval` | `-i` | 0 | Interval in ms between messages (overrides --rate) |
+| `--count` | `-c` | 0 | Total messages (0 = unlimited) |
+| `--message` | `-m` | "log message" | Message template |
+| `--background` | `-bg` | false | Run as daemon |
+
+### Rate vs Interval
+
+Use `--rate` for fast rates (1+ messages per second):
+- `--rate 1` = 1 message/sec
+- `--rate 5` = 5 messages/sec
+- `--rate 10` = 10 messages/sec
+
+Use `--interval` for slow rates (less than 1 message per second):
+- `--interval 2000` = 1 message every 2 seconds (0.5 msg/sec)
+- `--interval 5000` = 1 message every 5 seconds (0.2 msg/sec)
+- `--interval 10000` = 1 message every 10 seconds (0.1 msg/sec)
+
+If both are specified, `--interval` takes precedence.
+
+---
+
+## All Consumer Start Combinations
+
+Consumers discover the cluster leader automatically via **UDP broadcast on port 8888**. The `--leader` flag is optional.
+
+### Consumer Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Auto-discover | (default) | Discovers cluster leader via UDP broadcast |
+| With analytics | (default) | Receive processed data with stats |
+| Raw data | `--no-analytics` | Receive raw data only |
+| Background | `--background` | Run as daemon |
+
+### Consumer Examples (Copy-Paste Ready)
+
+**Auto-discover via UDP broadcast, with analytics:**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs
+```
+
+**Auto-discover via UDP broadcast, raw data only:**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs --no-analytics
+```
+
+**Explicit leader address (when UDP broadcast doesn't work - cross-subnet, firewall, etc.):**
+```bash
+./logstreamctl start consumer --name cons1 --leader 172.28.226.255:8001 --topic logs
+```
+
+**Background mode (daemon):**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs --background
+```
+
+**Background without analytics:**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs --no-analytics --background
+```
+
+**Different topics:**
+```bash
+./logstreamctl start consumer --name cons1 --topic sensors
+./logstreamctl start consumer --name cons2 --topic metrics
+./logstreamctl start consumer --name cons3 --topic events
+```
+
+### Consumer Options Reference
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--name` | `-n` | (required) | Unique process name |
+| `--leader` | `-l` | UDP broadcast | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
+| `--topic` | `-t` | logs | Topic name |
+| `--no-analytics` | | false | Disable analytics processing |
+| `--background` | `-bg` | false | Run as daemon |
+
+---
+
+## Process Management
+
+### List Processes
 
 ```bash
-# List all managed processes
-logstreamctl list
-# Output:
-# NAME    TYPE      STATUS   PID     ADDRESS/LEADER     TOPIC   UPTIME
-# node1   broker    running  12345   192.168.1.10:8001  -       5m30s
-# prod1   producer  running  12346   192.168.1.10:8001  logs    5m28s
-# cons1   consumer  stopped  12347   192.168.1.10:8001  logs    -
-
-# Stop a specific process
-logstreamctl stop node1
-# Output: Stopping 'node1' (PID 12345)...
-#         Stopped 'node1'
-
-# Stop all managed processes
-logstreamctl stop --all
-
-# View last 50 lines of logs
-logstreamctl logs node1
-
-# View last 100 lines
-logstreamctl logs node1 --lines 100
-
-# Follow logs in real-time (Ctrl+C to stop)
-logstreamctl logs node1 --follow
-
-# Show local process status
-logstreamctl status
+./logstreamctl list
 ```
 
-### Election Control
+Output:
+```
+NAME    TYPE      STATUS   PID     ADDRESS/LEADER       TOPIC   UPTIME
+node1   broker    running  12345   172.28.226.255:8001  -       5m30s
+prod1   producer  running  12346   172.28.226.255:8001  logs    5m28s
+cons1   consumer  running  12347   172.28.226.255:8001  logs    5m25s
+```
+
+### Stop Processes
 
 ```bash
-# Trigger election on a broker (sends SIGUSR1 signal)
-logstreamctl election node1
-# Output: Triggering election on 'node1' (PID 12345)...
-#         Election signal sent
-#         Check logs with: logstreamctl logs node1 --follow
+# Stop specific process
+./logstreamctl stop node1
+
+# Stop all processes
+./logstreamctl stop --all
 ```
 
-### State Directory Structure
+### View Logs
+
+```bash
+# Last 50 lines
+./logstreamctl logs node1
+
+# Last 100 lines
+./logstreamctl logs node1 --lines 100
+
+# Follow in real-time (like tail -f)
+./logstreamctl logs node1 --follow
+```
+
+### Trigger Election
+
+```bash
+# Force a new leader election
+./logstreamctl election node1
+
+# Then watch the logs
+./logstreamctl logs node1 --follow
+```
+
+### Status
+
+```bash
+./logstreamctl status
+```
+
+---
+
+## Complete Workflow Examples
+
+### Example 1: Single Broker with Producer and Consumer (UDP Broadcast Discovery)
+
+```bash
+# Terminal 1 - Broker (listens for JOIN broadcasts on UDP port 8888)
+./logstreamctl start broker --name node1
+
+# Terminal 2 - Producer (discovers broker via UDP broadcast, 5 msg/sec)
+./logstreamctl start producer --name prod1 --topic logs --rate 5
+
+# Terminal 3 - Consumer (discovers broker via UDP broadcast)
+./logstreamctl start consumer --name cons1 --topic logs
+```
+
+### Example 2: Three-Broker Cluster (UDP Broadcast Discovery)
+
+```bash
+# Terminal 1 - Leader (first broker becomes leader)
+./logstreamctl start broker --name node1 --address 8001
+
+# Terminal 2 - Follower 1 (discovers leader via UDP broadcast)
+./logstreamctl start broker --name node2 --address 8002
+
+# Terminal 3 - Follower 2 (discovers leader via UDP broadcast)
+./logstreamctl start broker --name node3 --address 8003
+
+# Terminal 4 - Producer (discovers leader via UDP broadcast)
+./logstreamctl start producer --name prod1 --topic logs --rate 10
+
+# Terminal 5 - Consumer (discovers leader via UDP broadcast)
+./logstreamctl start consumer --name cons1 --topic logs
+```
+
+### Example 3: Background Daemons (UDP Broadcast Discovery)
+
+```bash
+# Start everything in background (all discover via UDP broadcast)
+./logstreamctl start broker --name node1 --background
+./logstreamctl start producer --name prod1 --topic logs --rate 5 --background
+./logstreamctl start consumer --name cons1 --topic logs --background
+
+# Check status
+./logstreamctl list
+
+# View logs
+./logstreamctl logs node1 --follow
+./logstreamctl logs prod1 --follow
+./logstreamctl logs cons1 --follow
+
+# Stop when done
+./logstreamctl stop --all
+```
+
+### Example 4: Multiple Topics (UDP Broadcast Discovery)
+
+```bash
+# Start broker (listens for JOIN broadcasts)
+./logstreamctl start broker --name node1
+
+# Different terminals for different topics (all discover via UDP broadcast)
+./logstreamctl start producer --name prod-sensors --topic sensors --rate 5
+./logstreamctl start producer --name prod-metrics --topic metrics --rate 10
+./logstreamctl start producer --name prod-events --topic events --rate 2
+
+./logstreamctl start consumer --name cons-sensors --topic sensors
+./logstreamctl start consumer --name cons-metrics --topic metrics
+./logstreamctl start consumer --name cons-events --topic events
+```
+
+---
+
+## State Directory Structure
 
 All logstreamctl state is stored in `~/.logstream/`:
 
 ```
 ~/.logstream/
 ├── pids/                    # PID files for process tracking
-│   ├── node1.pid            # Contains: 12345
-│   ├── prod1.pid            # Contains: 12346
-│   └── cons1.pid            # Contains: 12347
+│   ├── node1.pid
+│   ├── prod1.pid
+│   └── cons1.pid
 ├── logs/                    # Log files for background processes
-│   ├── node1.log            # Broker stdout/stderr
-│   ├── prod1.log            # Producer stdout/stderr
-│   └── cons1.log            # Consumer stdout/stderr
-└── processes.json           # Process metadata (JSON)
+│   ├── node1.log
+│   ├── prod1.log
+│   └── cons1.log
+└── processes.json           # Process metadata
 ```
 
-**PID Files** (`~/.logstream/pids/<name>.pid`):
-- Plain text file containing the process ID
-- Used to check if process is still running
-- Automatically cleaned up when process stops
+---
 
-**Log Files** (`~/.logstream/logs/<name>.log`):
-- Stdout and stderr from background processes
-- Appended to (not overwritten) on restart
-- View with: `logstreamctl logs <name>`
-- Follow with: `logstreamctl logs <name> --follow`
-
-**Process Metadata** (`~/.logstream/processes.json`):
-```json
-{
-  "processes": {
-    "node1": {
-      "name": "node1",
-      "type": "broker",
-      "pid": 12345,
-      "address": "192.168.1.10:8001",
-      "started_at": "2026-02-04T10:30:00Z",
-      "args": ["--name", "node1", "--address", "192.168.1.10:8001"]
-    },
-    "prod1": {
-      "name": "prod1",
-      "type": "producer",
-      "pid": 12346,
-      "leader": "192.168.1.10:8001",
-      "topic": "logs",
-      "started_at": "2026-02-04T10:31:00Z",
-      "args": ["--name", "prod1", "--leader", "192.168.1.10:8001", "--topic", "logs"]
-    }
-  }
-}
-```
-
-### Multi-Machine LAN Deployment
-
-Each machine runs its own `logstreamctl`. Brokers discover each other via UDP broadcast on the LAN.
-
-**Machine A (192.168.1.10) - Leader + Producer:**
-```bash
-# Initialize (first time only)
-logstreamctl config init
-
-# Start broker (will become leader as first node)
-logstreamctl start broker --name node1 --address 192.168.1.10:8001
-
-# In another terminal, or use --background:
-logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs --rate 10 --background
-
-# Check what's running
-logstreamctl list
-```
-
-**Machine B (192.168.1.11) - Followers + Consumer:**
-```bash
-# Initialize (first time only)
-logstreamctl config init
-
-# Start two follower brokers (they discover node1 via broadcast)
-logstreamctl start broker --name node2 --address 192.168.1.11:8001 --background
-logstreamctl start broker --name node3 --address 192.168.1.11:8002 --background
-
-# Start consumer (connects to leader on Machine A)
-logstreamctl start consumer --name cons1 --leader 192.168.1.10:8001 --topic logs --background
-
-# Check what's running
-logstreamctl list
-# NAME    TYPE      STATUS   PID     ADDRESS/LEADER     TOPIC   UPTIME
-# node2   broker    running  23456   192.168.1.11:8001  -       2m30s
-# node3   broker    running  23457   192.168.1.11:8002  -       2m28s
-# cons1   consumer  running  23458   192.168.1.10:8001  logs    2m25s
-
-# View consumer output
-logstreamctl logs cons1 --follow
-```
-
-**Testing Failover:**
-```bash
-# On Machine A - kill the leader
-logstreamctl stop node1
-
-# On Machine B - watch the logs for election
-logstreamctl logs node2 --follow
-# You should see: "LEADER FAILURE DETECTED", "Starting election", "I am the new leader"
-
-# Or trigger election manually
-logstreamctl election node2
-```
-
-### Cleanup
-
-```bash
-# Stop all processes on this machine
-logstreamctl stop --all
-
-# View remaining state
-ls -la ~/.logstream/
-
-# Clear all logs (optional)
-rm ~/.logstream/logs/*.log
-
-# Full reset (removes all state)
-rm -rf ~/.logstream/
-```
-
-### Troubleshooting
+## Troubleshooting
 
 **Process won't start - "already running":**
 ```bash
-# Check if it's really running
-logstreamctl list
-
-# If status shows "stopped" but error persists, the state is stale
-# Stop will clean it up:
-logstreamctl stop <name>
+./logstreamctl list
+./logstreamctl stop <name>
 ```
 
 **Can't find binary:**
 ```bash
-# logstreamctl looks for binaries in:
-# 1. Current directory (./logstream, ./producer, ./consumer)
-# 2. System PATH
-
-# Make sure binaries are built:
-go build -o logstream main.go
-go build -o producer cmd/producer/main.go
-go build -o consumer cmd/consumer/main.go
+go build -o logstreamctl cmd/logstreamctl/main.go && go build -o logstream main.go && go build -o producer cmd/producer/main.go && go build -o consumer cmd/consumer/main.go
 ```
 
 **Brokers not discovering each other:**
-```bash
-# Check network connectivity
-ping 192.168.1.11
-
-# Check UDP broadcast is working (same subnet required)
-# Brokers use UDP broadcast on port 8888 for discovery
-
-# Check multicast (used for heartbeats)
-# Brokers use UDP multicast 239.0.0.1:9999
-```
+- Ensure all brokers are on the same subnet
+- Check UDP broadcast port 8888 is not blocked
+- Check UDP multicast 239.0.0.1:9999 is working
 
 **View raw log file:**
 ```bash
-# Log files are plain text
 cat ~/.logstream/logs/node1.log
-
-# Or use tail
 tail -f ~/.logstream/logs/node1.log
 ```
 
 ---
 
-## Build Commands
+## Direct Binary Usage (Without logstreamctl)
 
-### Build All Components
+You can also run binaries directly with environment variables:
+
+### Broker (./logstream)
 
 ```bash
-# Build the cluster management tool
-go build -o logstreamctl cmd/logstreamctl/main.go
+# Auto-detect
+./logstream
 
-# Build the main broker node
-go build -o logstream main.go
+# With explicit address
+NODE_ADDRESS=172.28.226.255:8001 ./logstream
 
-# Build the producer client
-go build -o producer cmd/producer/main.go
-
-# Build the consumer client
-go build -o consumer cmd/consumer/main.go
-
-# Build all at once
-go build -o logstreamctl cmd/logstreamctl/main.go && \
-go build -o logstream main.go && \
-go build -o producer cmd/producer/main.go && \
-go build -o consumer cmd/consumer/main.go
+# Full config
+NODE_ADDRESS=172.28.226.255:8001 MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 ./logstream
 ```
 
-### Regenerate Protocol Buffers
+### Producer (./producer)
 
 ```bash
-# After modifying internal/protocol/proto/messages.proto
-cd internal/protocol/proto
-./genproto.sh
+LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./producer
+```
 
-# Or manually:
-protoc --go_out=. --go_opt=paths=source_relative internal/protocol/proto/messages.proto
+### Consumer (./consumer)
+
+```bash
+LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./consumer
 ```
 
 ---
 
-## Broker Commands
+## Network Namespace Testing
 
-The broker is the main LogStream node that handles cluster membership, leader election, state replication, and data routing.
-
-### Basic Startup
+For multi-broker testing on a single machine:
 
 ```bash
-# Auto-detect network interface
-./logstream
-
-# Specify node address
-NODE_ADDRESS=192.168.1.10:8001 ./logstream
-
-# Specify multicast group
-MULTICAST_GROUP=239.0.0.1:9999 ./logstream
-
-# Full configuration
-NODE_ADDRESS=192.168.1.10:8001 \
-MULTICAST_GROUP=239.0.0.1:9999 \
-BROADCAST_PORT=8888 \
-./logstream
-```
-
-### Run in Network Namespace (Testing)
-
-```bash
-# Setup network namespaces first
+# Setup (one-time)
 sudo ./deploy/netns/setup-netns.sh
 
-# Run leader in namespace logstream-a
-sudo ip netns exec logstream-a env \
-    NODE_ADDRESS=172.20.0.10:8001 \
-    MULTICAST_GROUP=239.0.0.1:9999 \
-    BROADCAST_PORT=8888 \
-    ./logstream
+# Start brokers
+sudo ip netns exec logstream-a env NODE_ADDRESS=172.20.0.10:8001 ./logstream &
+sudo ip netns exec logstream-b env NODE_ADDRESS=172.20.0.20:8001 ./logstream &
+sudo ip netns exec logstream-c env NODE_ADDRESS=172.20.0.30:8001 ./logstream &
 
-# Run follower in namespace logstream-b
-sudo ip netns exec logstream-b env \
-    NODE_ADDRESS=172.20.0.20:8001 \
-    MULTICAST_GROUP=239.0.0.1:9999 \
-    BROADCAST_PORT=8888 \
-    ./logstream
+# Start producer
+sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./producer &
 
-# Run follower in namespace logstream-c
-sudo ip netns exec logstream-c env \
-    NODE_ADDRESS=172.20.0.30:8001 \
-    MULTICAST_GROUP=239.0.0.1:9999 \
-    BROADCAST_PORT=8888 \
-    ./logstream
+# Start consumer
+sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./consumer &
+
+# Cleanup
+sudo ./deploy/netns/cleanup.sh
 ```
 
-### Run with Docker
+---
+
+## Docker Testing
 
 ```bash
 cd deploy/docker/compose
-
-# Single broker
-docker compose -f single.yaml up -d
-docker compose -f single.yaml logs -f
-docker compose -f single.yaml down
 
 # Three broker cluster
 docker compose -f trio.yaml up -d
 docker compose -f trio.yaml logs -f
 docker compose -f trio.yaml down
-
-# With producer and consumer
-docker compose -f producer-consumer.yaml up -d
-docker compose -f producer-consumer.yaml logs -f
-docker compose -f producer-consumer.yaml down
 ```
-
-### Run with Vagrant
-
-```bash
-cd deploy/vagrant
-
-# Start VMs (first time: downloads box, provisions)
-vagrant up
-
-# SSH into leader VM
-vagrant ssh leader
-
-# SSH into follower VMs
-vagrant ssh broker1
-vagrant ssh broker2
-
-# Rebuild binary on all VMs
-./rebuild-binary.sh
-
-# Check VM status
-vagrant status
-
-# Stop VMs (preserves state)
-vagrant halt
-
-# Destroy VMs (deletes everything)
-vagrant destroy -f
-```
-
----
-
-## Producer Commands
-
-The producer connects to the leader broker, gets assigned to a broker via consistent hash ring, and sends data messages.
-
-### Basic Usage
-
-```bash
-# Connect to leader at default address
-./producer
-
-# Specify leader address
-LEADER_ADDRESS=192.168.1.10:8001 ./producer
-
-# Specify topic
-TOPIC=my-topic LEADER_ADDRESS=192.168.1.10:8001 ./producer
-
-# Full configuration
-LEADER_ADDRESS=192.168.1.10:8001 \
-TOPIC=logs \
-PRODUCER_ID=producer-1 \
-./producer
-```
-
-### Run in Network Namespace (Testing)
-
-```bash
-# Run producer in namespace logstream-a (where leader is)
-sudo ip netns exec logstream-a env \
-    LEADER_ADDRESS=172.20.0.10:8001 \
-    TOPIC=test-topic \
-    ./producer
-
-# Run producer connecting to remote leader
-sudo ip netns exec logstream-b env \
-    LEADER_ADDRESS=172.20.0.10:8001 \
-    TOPIC=test-topic \
-    ./producer
-```
-
-### Producer Workflow
-
-1. Producer sends PRODUCE message to leader (TCP)
-2. Leader assigns broker via consistent hash ring
-3. Leader responds with PRODUCE_ACK containing assigned broker address
-4. Producer sends DATA messages to assigned broker (UDP)
-
----
-
-## Consumer Commands
-
-The consumer connects to the leader broker, gets assigned to a broker, subscribes to a topic, and receives data messages.
-
-### Basic Usage
-
-```bash
-# Connect to leader at default address
-./consumer
-
-# Specify leader address
-LEADER_ADDRESS=192.168.1.10:8001 ./consumer
-
-# Specify topic
-TOPIC=my-topic LEADER_ADDRESS=192.168.1.10:8001 ./consumer
-
-# Full configuration
-LEADER_ADDRESS=192.168.1.10:8001 \
-TOPIC=logs \
-CONSUMER_ID=consumer-1 \
-./consumer
-```
-
-### Run in Network Namespace (Testing)
-
-```bash
-# Run consumer in namespace logstream-a
-sudo ip netns exec logstream-a env \
-    LEADER_ADDRESS=172.20.0.10:8001 \
-    TOPIC=test-topic \
-    ./consumer
-
-# Run consumer connecting to remote leader
-sudo ip netns exec logstream-c env \
-    LEADER_ADDRESS=172.20.0.10:8001 \
-    TOPIC=test-topic \
-    ./consumer
-```
-
-### Consumer Workflow
-
-1. Consumer sends CONSUME message to leader (TCP)
-2. Leader responds with CONSUME_ACK containing assigned broker address
-3. Consumer sends SUBSCRIBE message to assigned broker (TCP)
-4. Broker streams RESULT messages to consumer (TCP)
 
 ---
 
 ## Network Diagnostics
 
-The netdiag tool helps identify network interfaces and diagnose connectivity issues.
-
-### Usage
+Find your IP address:
 
 ```bash
-# Build the tool
-go build -o netdiag cmd/netdiag/main.go
-
-# Run diagnostics
-./netdiag
-
-# Or run directly
 go run cmd/netdiag/main.go
 ```
-
-### Output
-
-The tool displays:
-- Available network interfaces
-- IP addresses for each interface
-- Multicast-capable interfaces
-- Recommended NODE_ADDRESS for the system
 
 ---
 

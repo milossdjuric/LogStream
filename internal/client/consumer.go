@@ -26,9 +26,15 @@ type Consumer struct {
 }
 
 // NewConsumer creates a new consumer
+// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewConsumer(topic, leaderAddr string) *Consumer {
+	// Generate ID based on topic if no leader address (will discover later)
+	idSeed := leaderAddr
+	if idSeed == "" {
+		idSeed = topic
+	}
 	return &Consumer{
-		id:               protocol.GenerateClientID("consumer", leaderAddr),
+		id:               protocol.GenerateClientID("consumer", idSeed),
 		topic:            topic,
 		leaderAddr:       leaderAddr,
 		results:          make(chan *protocol.ResultMessage, 100),
@@ -39,6 +45,7 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 }
 
 // NewConsumerWithOptions creates a new consumer with options
+// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewConsumerWithOptions(topic, leaderAddr string, enableProcessing bool) *Consumer {
 	c := NewConsumer(topic, leaderAddr)
 	c.enableProcessing = enableProcessing
@@ -46,6 +53,7 @@ func NewConsumerWithOptions(topic, leaderAddr string, enableProcessing bool) *Co
 }
 
 // Connect registers with the leader and then subscribes to the assigned broker
+// If no leader address was provided, auto-discovers the cluster via broadcast first
 func (c *Consumer) Connect() error {
 	const (
 		maxAttempts      = 10
@@ -54,6 +62,17 @@ func (c *Consumer) Connect() error {
 		halfOpenDelay    = 2 * time.Second
 		failureThreshold = 5
 	)
+
+	// Auto-discover leader if not provided
+	if c.leaderAddr == "" {
+		fmt.Printf("[Consumer %s] No leader address provided, discovering via broadcast...\n", c.id[:8])
+		leaderAddr, err := protocol.DiscoverLeader(nil)
+		if err != nil {
+			return fmt.Errorf("failed to discover cluster: %w", err)
+		}
+		c.leaderAddr = leaderAddr
+		fmt.Printf("[Consumer %s] Discovered leader at %s\n", c.id[:8], c.leaderAddr)
+	}
 
 	time.Sleep(initialDelay)
 

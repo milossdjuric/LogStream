@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -115,13 +117,25 @@ func printUsage() {
 	fmt.Println("  # Initialize (first time)")
 	fmt.Println("  logstreamctl config init")
 	fmt.Println()
-	fmt.Println("  # Start a broker")
+	fmt.Println("  # Start a broker (auto-detect IP, use port 8001)")
+	fmt.Println("  logstreamctl start broker --name node1")
+	fmt.Println()
+	fmt.Println("  # Start a broker on specific port (auto-detect IP)")
+	fmt.Println("  logstreamctl start broker --name node2 --address 8002")
+	fmt.Println()
+	fmt.Println("  # Start a broker with explicit address")
 	fmt.Println("  logstreamctl start broker --name node1 --address 192.168.1.10:8001")
 	fmt.Println()
-	fmt.Println("  # Start a producer")
+	fmt.Println("  # Start a producer (auto-discover cluster)")
+	fmt.Println("  logstreamctl start producer --name prod1 --topic logs --rate 5")
+	fmt.Println()
+	fmt.Println("  # Start a producer with explicit leader")
 	fmt.Println("  logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs")
 	fmt.Println()
-	fmt.Println("  # Start a consumer")
+	fmt.Println("  # Start a consumer (auto-discover cluster)")
+	fmt.Println("  logstreamctl start consumer --name cons1 --topic logs")
+	fmt.Println()
+	fmt.Println("  # Start a consumer with explicit leader")
 	fmt.Println("  logstreamctl start consumer --name cons1 --leader 192.168.1.10:8001 --topic logs")
 	fmt.Println()
 	fmt.Println("  # List running processes")
@@ -193,7 +207,8 @@ func startBroker(args []string) {
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  --name, -n           Process name (required)")
-			fmt.Println("  --address, -a        Node address IP:PORT (required)")
+			fmt.Println("  --address, -a        Node address IP:PORT (default: auto-detect:8001)")
+			fmt.Println("                       Can also specify just port: --address 8002")
 			fmt.Println("  --multicast, -m      Multicast group (default: 239.0.0.1:9999)")
 			fmt.Println("  --broadcast-port, -b Broadcast port (default: 8888)")
 			fmt.Println("  --background, -bg    Run in background (default: foreground)")
@@ -205,9 +220,43 @@ func startBroker(args []string) {
 		fmt.Println("Error: --name is required")
 		os.Exit(1)
 	}
+
+	// Auto-detect IP if address not provided
 	if address == "" {
-		fmt.Println("Error: --address is required")
-		os.Exit(1)
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Error: --address not provided and auto-detection failed: %v\n", err)
+			fmt.Println("Please specify --address explicitly")
+			os.Exit(1)
+		}
+		// Find an available port starting from 8001
+		port := findAvailablePort(detectedIP, 8001)
+		address = fmt.Sprintf("%s:%d", detectedIP, port)
+		fmt.Printf("Auto-detected address: %s\n", address)
+	} else if !strings.Contains(address, ":") {
+		// If only port provided, auto-detect IP
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Error: auto-detection failed: %v\n", err)
+			os.Exit(1)
+		}
+		// Check if the specified port is available, if not find next available
+		specifiedPort, _ := strconv.Atoi(address)
+		port := findAvailablePort(detectedIP, specifiedPort)
+		if port != specifiedPort {
+			fmt.Printf("Port %d is in use, using port %d instead\n", specifiedPort, port)
+		}
+		address = fmt.Sprintf("%s:%d", detectedIP, port)
+		fmt.Printf("Auto-detected address: %s\n", address)
+	} else {
+		// Full address provided, check if port is available
+		host, portStr, _ := net.SplitHostPort(address)
+		specifiedPort, _ := strconv.Atoi(portStr)
+		if !isPortAvailable(host, specifiedPort) {
+			port := findAvailablePort(host, specifiedPort)
+			fmt.Printf("Port %d is in use, using port %d instead\n", specifiedPort, port)
+			address = fmt.Sprintf("%s:%d", host, port)
+		}
 	}
 
 	// Check if name already exists
@@ -331,6 +380,7 @@ func startProducer(args []string) {
 	leader := ""
 	topic := "logs"
 	rate := 0
+	interval := 0
 	count := 0
 	message := "log message"
 	background := false
@@ -357,6 +407,11 @@ func startProducer(args []string) {
 				rate, _ = strconv.Atoi(args[i+1])
 				i++
 			}
+		case "--interval", "-i":
+			if i+1 < len(args) {
+				interval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--count", "-c":
 			if i+1 < len(args) {
 				count, _ = strconv.Atoi(args[i+1])
@@ -377,22 +432,20 @@ func startProducer(args []string) {
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  --name, -n        Process name (required)")
-			fmt.Println("  --leader, -l      Leader address IP:PORT (required)")
+			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
 			fmt.Println("  --rate, -r        Messages per second (default: 0 = interactive)")
+			fmt.Println("  --interval, -i    Interval between messages in ms (overrides --rate)")
+			fmt.Println("                    Example: --interval 2000 = 1 message every 2 seconds")
 			fmt.Println("  --count, -c       Total messages to send (default: 0 = unlimited)")
 			fmt.Println("  --message, -m     Message template (default: log message)")
-			fmt.Println("  --background, -bg Run in background (requires --rate > 0)")
+			fmt.Println("  --background, -bg Run in background (requires --rate or --interval)")
 			os.Exit(0)
 		}
 	}
 
 	if name == "" {
 		fmt.Println("Error: --name is required")
-		os.Exit(1)
-	}
-	if leader == "" {
-		fmt.Println("Error: --leader is required")
 		os.Exit(1)
 	}
 
@@ -416,10 +469,14 @@ func startProducer(args []string) {
 
 	// Build command args
 	cmdArgs := []string{
-		"-leader", leader,
 		"-topic", topic,
 	}
-	if rate > 0 {
+	if leader != "" {
+		cmdArgs = append(cmdArgs, "-leader", leader)
+	}
+	if interval > 0 {
+		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(interval))
+	} else if rate > 0 {
 		cmdArgs = append(cmdArgs, "-rate", strconv.Itoa(rate))
 	}
 	if count > 0 {
@@ -429,10 +486,16 @@ func startProducer(args []string) {
 		cmdArgs = append(cmdArgs, "-message", message)
 	}
 
+	// Display leader info
+	leaderDisplay := leader
+	if leaderDisplay == "" {
+		leaderDisplay = "(auto-discover via broadcast)"
+	}
+
 	if background {
-		// Background mode - need rate > 0 for non-interactive
-		if rate == 0 {
-			fmt.Println("Warning: producer in background mode requires --rate > 0")
+		// Background mode - need rate or interval for non-interactive
+		if rate == 0 && interval == 0 {
+			fmt.Println("Warning: producer in background mode requires --rate or --interval")
 			fmt.Println("Setting --rate 1 (1 message/sec)")
 			rate = 1
 			cmdArgs = append(cmdArgs, "-rate", "1")
@@ -476,7 +539,7 @@ func startProducer(args []string) {
 		writePidFile(name, cmd.Process.Pid)
 
 		fmt.Printf("Started producer '%s' (PID %d)\n", name, cmd.Process.Pid)
-		fmt.Printf("  Leader: %s\n", leader)
+		fmt.Printf("  Leader: %s\n", leaderDisplay)
 		fmt.Printf("  Topic:  %s\n", topic)
 		fmt.Printf("  Rate:   %d msg/sec\n", rate)
 		fmt.Printf("  Logs:   %s\n", logFile)
@@ -497,7 +560,7 @@ func startProducer(args []string) {
 			Args:      args,
 		}
 
-		fmt.Printf("Starting producer '%s' -> %s\n", name, leader)
+		fmt.Printf("Starting producer '%s' -> %s\n", name, leaderDisplay)
 		fmt.Printf("  Topic: %s\n", topic)
 		fmt.Println("Press Ctrl+C to stop")
 		fmt.Println()
@@ -562,7 +625,7 @@ func startConsumer(args []string) {
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  --name, -n        Process name (required)")
-			fmt.Println("  --leader, -l      Leader address IP:PORT (required)")
+			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
 			fmt.Println("  --no-analytics    Disable analytics processing")
 			fmt.Println("  --background, -bg Run in background")
@@ -572,10 +635,6 @@ func startConsumer(args []string) {
 
 	if name == "" {
 		fmt.Println("Error: --name is required")
-		os.Exit(1)
-	}
-	if leader == "" {
-		fmt.Println("Error: --leader is required")
 		os.Exit(1)
 	}
 
@@ -599,11 +658,19 @@ func startConsumer(args []string) {
 
 	// Build command args
 	cmdArgs := []string{
-		"-leader", leader,
 		"-topic", topic,
+	}
+	if leader != "" {
+		cmdArgs = append(cmdArgs, "-leader", leader)
 	}
 	if !analytics {
 		cmdArgs = append(cmdArgs, "-analytics=false")
+	}
+
+	// Display leader info
+	leaderDisplay := leader
+	if leaderDisplay == "" {
+		leaderDisplay = "(auto-discover via broadcast)"
 	}
 
 	if background {
@@ -645,7 +712,7 @@ func startConsumer(args []string) {
 		writePidFile(name, cmd.Process.Pid)
 
 		fmt.Printf("Started consumer '%s' (PID %d)\n", name, cmd.Process.Pid)
-		fmt.Printf("  Leader:    %s\n", leader)
+		fmt.Printf("  Leader:    %s\n", leaderDisplay)
 		fmt.Printf("  Topic:     %s\n", topic)
 		fmt.Printf("  Analytics: %v\n", analytics)
 		fmt.Printf("  Logs:      %s\n", logFile)
@@ -666,7 +733,7 @@ func startConsumer(args []string) {
 			Args:      args,
 		}
 
-		fmt.Printf("Starting consumer '%s' -> %s\n", name, leader)
+		fmt.Printf("Starting consumer '%s' -> %s\n", name, leaderDisplay)
 		fmt.Printf("  Topic:     %s\n", topic)
 		fmt.Printf("  Analytics: %v\n", analytics)
 		fmt.Println("Press Ctrl+C to stop")
@@ -1180,7 +1247,89 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd%dh", days, hours)
 }
 
+// autoDetectIP finds the first private IPv4 address on a non-loopback interface
+func autoDetectIP() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	for _, iface := range interfaces {
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			// Only use IPv4 private addresses
+			if ip4 := ip.To4(); ip4 != nil {
+				if isPrivateIP(ip4) {
+					return ip4.String(), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no suitable network interface found")
+}
+
+// isPrivateIP checks if an IP is in a private range
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, cidr := range privateRanges {
+		_, subnet, _ := net.ParseCIDR(cidr)
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // copyOutput copies from reader to writer until EOF
 func copyOutput(dst io.Writer, src io.Reader) {
 	io.Copy(dst, src)
+}
+
+// isPortAvailable checks if a TCP port is available on the given IP
+func isPortAvailable(ip string, port int) bool {
+	addr := fmt.Sprintf("%s:%d", ip, port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
+}
+
+// findAvailablePort finds the first available port starting from startPort
+func findAvailablePort(ip string, startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		if isPortAvailable(ip, port) {
+			return port
+		}
+	}
+	// If no port found in range, return startPort and let it fail with a clear error
+	return startPort
 }

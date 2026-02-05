@@ -199,11 +199,16 @@ func (n *Node) receiveUDPData() {
 			// Check if we've been shut down
 			select {
 			case <-n.shutdownCtx.Done():
-				fmt.Printf("[Node %s] [UDP-DATA-Listener] Shutdown detected during read error, exiting cleanly\n", 
+				fmt.Printf("[Node %s] [UDP-DATA-Listener] Shutdown detected during read error, exiting cleanly\n",
 					n.id[:8])
 				return
 			default:
-				// Not shutdown - log the error but don't crash
+				// Not shutdown - check if it's just a timeout (normal when no producers sending)
+				if strings.Contains(err.Error(), "i/o timeout") {
+					// Timeouts are expected when no data is being sent - don't log
+					continue
+				}
+				// Log non-timeout errors
 				log.Printf("[Node %s] [UDP-DATA-Listener] Read error (will retry): %v\n", n.id[:8], err)
 				time.Sleep(100 * time.Millisecond) // Brief pause before retry
 				continue

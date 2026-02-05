@@ -41,17 +41,26 @@ func (q *DataHoldbackQueue) Enqueue(msg *DataHoldbackMessage) error {
 	defer q.mu.Unlock()
 
 	producerID := msg.ProducerID
-	
+	seqNum := msg.SequenceNum
+
 	// Initialize producer state if needed
+	// When seeing a producer for the first time, use the incoming message's sequence
+	// as the starting point. This handles rejoining nodes that missed earlier messages.
 	if _, exists := q.producers[producerID]; !exists {
+		var shortID string
+		if len(producerID) > 8 {
+			shortID = producerID[:8]
+		} else {
+			shortID = producerID
+		}
+		fmt.Printf("[Holdback] New producer %s detected, starting from seq=%d\n", shortID, seqNum)
 		q.producers[producerID] = &ProducerHoldback{
-			nextExpected: 1,
+			nextExpected: seqNum, // Start from the first message we see, not always 1
 			buffer:       make(map[int64]*DataHoldbackMessage),
 		}
 	}
 
 	ph := q.producers[producerID]
-	seqNum := msg.SequenceNum
 
 	// If this is the expected sequence, deliver it and check buffer
 	if seqNum == ph.nextExpected {

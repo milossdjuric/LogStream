@@ -20,16 +20,16 @@ func main() {
 
 	flag.Parse()
 
-	if *help || *leader == "" {
+	if *help {
 		fmt.Println("LogStream Consumer")
 		fmt.Println("==================")
 		fmt.Println()
 		fmt.Println("Usage:")
-		fmt.Println("  consumer -leader <address> [options]")
+		fmt.Println("  consumer [options]")
 		fmt.Println()
 		fmt.Println("Options:")
 		fmt.Println("  -leader string")
-		fmt.Println("        Leader broker address (REQUIRED)")
+		fmt.Println("        Leader broker address (optional - auto-discovers via broadcast if not set)")
 		fmt.Println("        Example: -leader 192.168.1.10:8001")
 		fmt.Println()
 		fmt.Println("  -topic string")
@@ -39,11 +39,14 @@ func main() {
 		fmt.Println("        Request analytics/processing from broker (default: true)")
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  # Consume with analytics")
+		fmt.Println("  # Auto-discover cluster, consume with analytics")
+		fmt.Println("  ./consumer -topic logs")
+		fmt.Println()
+		fmt.Println("  # Explicit leader address")
 		fmt.Println("  ./consumer -leader 192.168.1.10:8001 -topic logs")
 		fmt.Println()
 		fmt.Println("  # Consume raw data only (no analytics)")
-		fmt.Println("  ./consumer -leader 192.168.1.10:8001 -topic logs -analytics=false")
+		fmt.Println("  ./consumer -topic logs -analytics=false")
 		os.Exit(0)
 	}
 
@@ -51,7 +54,11 @@ func main() {
 	fmt.Println("       LogStream Consumer")
 	fmt.Println("===========================================")
 	fmt.Println()
-	fmt.Printf("Leader:    %s\n", *leader)
+	if *leader != "" {
+		fmt.Printf("Leader:    %s\n", *leader)
+	} else {
+		fmt.Println("Leader:    (auto-discover via broadcast)")
+	}
 	fmt.Printf("Topic:     %s\n", *topic)
 	fmt.Printf("Analytics: %v\n", *analytics)
 	fmt.Println()

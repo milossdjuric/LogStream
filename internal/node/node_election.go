@@ -279,14 +279,23 @@ func (n *Node) StartElection() error {
 	brokerCount := n.clusterState.GetBrokerCount()
 	fmt.Printf("[Node %s] Registry has %d brokers in frozen state\n", n.id[:8], brokerCount)
 
-	if brokerCount < 2 {
-		// Registry not synchronized yet - can't run election
-		fmt.Printf("[Node %s] Cannot start election - registry not synchronized (brokers: %d, need at least 2)\n",
-			n.id[:8], brokerCount)
+	if brokerCount < 1 {
+		// No brokers at all - something is seriously wrong
+		fmt.Printf("[Node %s] Cannot start election - no brokers in registry\n", n.id[:8])
 		fmt.Printf("[Node %s] Resetting any existing election state\n", n.id[:8])
 		n.election.Reset()
 		n.unfreezeOperations() // Unfreeze since we're not proceeding
-		return fmt.Errorf("registry not synchronized: only %d broker(s), need at least 2", brokerCount)
+		return fmt.Errorf("registry empty: no brokers registered")
+	}
+
+	// If only 1 broker (this node), become leader immediately - no election needed
+	if brokerCount == 1 {
+		fmt.Printf("[Node %s] Only 1 broker in registry - becoming leader immediately (sole survivor)\n", n.id[:8])
+		electionID := time.Now().UnixNano()
+		n.election.StartElection(n.id, electionID)
+		n.election.DeclareVictory(n.id)
+		n.becomeLeaderAfterElection(electionID)
+		return nil
 	}
 
 	// PHASE 1: Detect which nodes are reachable (failure detection)

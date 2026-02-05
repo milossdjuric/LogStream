@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,14 @@ func NewClusterState() *ClusterState {
 func (cs *ClusterState) RegisterBroker(id, address string, isLeader bool) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+
+	// Validate address has a port (not just IP)
+	if address != "" && !strings.Contains(address, ":") {
+		fmt.Printf("[ClusterState] WARNING: RegisterBroker called with address missing port: %s\n", address)
+	}
+	if strings.HasSuffix(address, ":0") {
+		fmt.Printf("[ClusterState] WARNING: RegisterBroker called with port 0: %s\n", address)
+	}
 
 	cs.brokers[id] = &protocol.BrokerInfo{
 		Id:            id,
@@ -120,6 +129,12 @@ func (cs *ClusterState) GetBroker(id string) (*protocol.BrokerInfo, bool) {
 		return nil, false
 	}
 
+	// Debug: detect port 0 issue
+	if strings.HasSuffix(broker.Address, ":0") {
+		fmt.Printf("[ClusterState] WARNING: GetBroker returning broker %s with port 0 address: %s\n",
+			shortID(id), broker.Address)
+	}
+
 	return proto.Clone(broker).(*protocol.BrokerInfo), true
 }
 
@@ -188,6 +203,7 @@ func (cs *ClusterState) UpdateProducerHeartbeat(id string) {
 }
 
 // CheckProducerTimeouts removes producers that haven't sent heartbeat
+// Also removes the corresponding stream assignments
 func (cs *ClusterState) CheckProducerTimeouts(timeout time.Duration) []string {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -199,12 +215,23 @@ func (cs *ClusterState) CheckProducerTimeouts(timeout time.Duration) []string {
 		lastSeen := time.Duration(now - producer.LastHeartbeat)
 
 		if lastSeen > timeout {
+			topic := producer.Topic
+
+			// Remove producer from registry
 			delete(cs.producers, id)
 			cs.seqNum++
 			removed = append(removed, id)
 
 			fmt.Printf("[ClusterState] Timeout: Removed producer %s (last seen: %s, seq=%d)\n",
 				shortID(id), lastSeen.Round(time.Second), cs.seqNum)
+
+			// Also remove the stream assignment for this topic
+			if _, exists := cs.streams[topic]; exists {
+				delete(cs.streams, topic)
+				cs.seqNum++
+				fmt.Printf("[ClusterState] Timeout: Removed stream for topic %s (producer timed out, seq=%d)\n",
+					topic, cs.seqNum)
+			}
 		}
 	}
 
@@ -351,12 +378,26 @@ func (cs *ClusterState) CheckConsumerTimeouts(timeout time.Duration) []string {
 		lastSeen := time.Duration(now - consumer.LastHeartbeat)
 
 		if lastSeen > timeout {
+			// Get consumer's topics before removing
+			topics := consumer.Topics
+
+			// Remove consumer from registry
 			delete(cs.consumers, id)
 			cs.seqNum++
 			removed = append(removed, id)
 
 			fmt.Printf("[ClusterState] Timeout: Removed consumer %s (last seen: %s, seq=%d)\n",
 				shortID(id), lastSeen.Round(time.Second), cs.seqNum)
+
+			// Also clear the consumer from stream assignments for their topics
+			for _, topic := range topics {
+				if stream, exists := cs.streams[topic]; exists && stream.ConsumerId == id {
+					stream.ConsumerId = ""
+					cs.seqNum++
+					fmt.Printf("[ClusterState] Timeout: Cleared consumer from stream for topic %s (consumer timed out, seq=%d)\n",
+						topic, cs.seqNum)
+				}
+			}
 		}
 	}
 

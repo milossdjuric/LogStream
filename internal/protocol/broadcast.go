@@ -427,3 +427,95 @@ func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
 	}
 	return leaders
 }
+
+// DiscoverLeader discovers the cluster leader via broadcast.
+// This is a simplified wrapper for clients (producers/consumers) that only need the leader address.
+// Returns the leader address on success, or error if discovery fails.
+func DiscoverLeader(config *BroadcastConfig) (string, error) {
+	if config == nil {
+		config = DefaultBroadcastConfig()
+	}
+
+	// Generate a temporary client ID for discovery
+	tempID := fmt.Sprintf("discovery-%d", time.Now().UnixNano())
+
+	// Get local IP for calculating broadcast address
+	localIP, err := getLocalPrivateIP()
+	if err != nil {
+		return "", fmt.Errorf("failed to get local IP for discovery: %w", err)
+	}
+
+	// Use discovery with circuit breaker pattern
+	// We use NodeType_PRODUCER but it doesn't matter - leader responds to any JOIN
+	response, err := DiscoverClusterWithRetry(tempID, NodeType_PRODUCER, localIP+":0", config)
+	if err != nil {
+		return "", fmt.Errorf("cluster discovery failed: %w", err)
+	}
+
+	return response.LeaderAddress, nil
+}
+
+// getLocalPrivateIP finds the first private IPv4 address on a non-loopback interface
+func getLocalPrivateIP() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	for _, iface := range interfaces {
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			// Check for IPv4
+			if ip4 := ip.To4(); ip4 != nil {
+				// Check if it's a private IP
+				if isPrivateIP(ip4) {
+					return ip4.String(), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no suitable private network interface found")
+}
+
+// isPrivateIP checks if an IP is in a private range (RFC 1918)
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, cidr := range privateRanges {
+		_, subnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}

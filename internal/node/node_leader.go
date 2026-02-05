@@ -21,7 +21,7 @@ func (n *Node) runLeaderDuties() {
 
 	heartbeatTicker := time.NewTicker(5 * time.Second)
 	clientHeartbeatTicker := time.NewTicker(30 * time.Second)
-	timeoutTicker := time.NewTicker(10 * time.Second)
+	timeoutTicker := time.NewTicker(5 * time.Second) // Check more frequently for faster cleanup
 	defer heartbeatTicker.Stop()
 	defer clientHeartbeatTicker.Stop()
 	defer timeoutTicker.Stop()
@@ -48,7 +48,7 @@ func (n *Node) runLeaderDuties() {
 				n.replicateAllState()
 			}
 
-			deadProducers := n.clusterState.CheckProducerTimeouts(60 * time.Second)
+			deadProducers := n.clusterState.CheckProducerTimeouts(30 * time.Second)
 			if len(deadProducers) > 0 {
 				for _, producerID := range deadProducers {
 					n.cleanupProducer(producerID)
@@ -56,7 +56,7 @@ func (n *Node) runLeaderDuties() {
 				n.replicateAllState()
 			}
 
-			deadConsumers := n.clusterState.CheckConsumerTimeouts(60 * time.Second)
+			deadConsumers := n.clusterState.CheckConsumerTimeouts(30 * time.Second)
 			if len(deadConsumers) > 0 {
 				for _, consumerID := range deadConsumers {
 					n.cleanupConsumer(consumerID)
