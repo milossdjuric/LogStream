@@ -430,6 +430,8 @@ func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
 
 // DiscoverLeader discovers the cluster leader via broadcast.
 // This is a simplified wrapper for clients (producers/consumers) that only need the leader address.
+// Broadcasts to ALL private network interfaces (not just the first one), matching how nodes discover.
+// This ensures cross-subnet discovery works (e.g., WSL2 to LAN, multi-NIC machines).
 // Returns the leader address on success, or error if discovery fails.
 func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	if config == nil {
@@ -439,31 +441,116 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	// Generate a temporary client ID for discovery
 	tempID := fmt.Sprintf("discovery-%d", time.Now().UnixNano())
 
-	// Get local IP for calculating broadcast address
-	localIP, err := getLocalPrivateIP()
-	if err != nil {
-		return "", fmt.Errorf("failed to get local IP for discovery: %w", err)
+	// Get ALL private IPs across all interfaces
+	// Nodes pass their explicit address to DiscoverClusterWithRetry, which computes
+	// the broadcast address for that subnet. Clients don't have an explicit address,
+	// so we broadcast to ALL private subnets to maximize discovery reach.
+	allIPs := getAllPrivateIPs()
+	if len(allIPs) == 0 {
+		return "", fmt.Errorf("no suitable private network interface found")
 	}
 
-	// Use discovery with circuit breaker pattern
-	// We use NodeType_PRODUCER but it doesn't matter - leader responds to any JOIN
-	response, err := DiscoverClusterWithRetry(tempID, NodeType_PRODUCER, localIP+":0", config)
-	if err != nil {
-		return "", fmt.Errorf("cluster discovery failed: %w", err)
+	// Calculate broadcast addresses for all interfaces
+	var broadcastAddrs []string
+	for _, ip := range allIPs {
+		bcastAddr, err := calculateBroadcastAddress(ip+":0", config.Port)
+		if err == nil {
+			broadcastAddrs = append(broadcastAddrs, bcastAddr)
+		}
+	}
+	if len(broadcastAddrs) == 0 {
+		broadcastAddrs = append(broadcastAddrs, fmt.Sprintf("255.255.255.255:%d", config.Port))
 	}
 
-	return response.LeaderAddress, nil
+	// Deduplicate broadcast addresses
+	seen := make(map[string]bool)
+	var uniqueBcastAddrs []string
+	for _, addr := range broadcastAddrs {
+		if !seen[addr] {
+			seen[addr] = true
+			uniqueBcastAddrs = append(uniqueBcastAddrs, addr)
+		}
+	}
+
+	fmt.Printf("[Discovery] Broadcasting to %d subnet(s): %v\n", len(uniqueBcastAddrs), uniqueBcastAddrs)
+
+	// Create broadcast sender
+	sender, err := CreateBroadcastSender()
+	if err != nil {
+		return "", fmt.Errorf("failed to create broadcast sender: %w", err)
+	}
+	defer sender.Close()
+
+	// Use the first IP as the "source" address in the JOIN message
+	sourceAddr := allIPs[0] + ":0"
+
+	// Circuit breaker: track current delay for exponential backoff
+	currentDelay := config.RetryDelay
+	consecutiveFailures := 0
+
+	for attempt := 0; attempt < config.MaxRetries; attempt++ {
+		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
+
+		// Send JOIN broadcast to ALL subnets
+		for _, bcastAddr := range uniqueBcastAddrs {
+			if err := sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, bcastAddr); err != nil {
+				fmt.Printf("[Discovery] Broadcast to %s failed: %v\n", bcastAddr, err)
+			}
+		}
+
+		// Collect ALL responses within a collection window (for split-brain detection)
+		responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
+
+		if len(responses) == 0 {
+			consecutiveFailures++
+			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
+
+			if attempt < config.MaxRetries-1 {
+				time.Sleep(currentDelay)
+				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+				if currentDelay > config.MaxRetryDelay {
+					currentDelay = config.MaxRetryDelay
+				}
+				continue
+			}
+			return "", fmt.Errorf("cluster discovery failed: no response after %d attempts", config.MaxRetries)
+		}
+
+		consecutiveFailures = 0
+
+		// Check for split-brain
+		uniqueLeaders := getUniqueLeaders(responses)
+		if len(uniqueLeaders) > 1 {
+			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
+			if attempt < config.MaxRetries-1 {
+				time.Sleep(config.SplitBrainDelay)
+				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+				if currentDelay > config.MaxRetryDelay {
+					currentDelay = config.MaxRetryDelay
+				}
+				continue
+			}
+			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
+		}
+
+		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
+		return responses[0].LeaderAddress, nil
+	}
+
+	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
 }
 
-// getLocalPrivateIP finds the first private IPv4 address on a non-loopback interface
-func getLocalPrivateIP() (string, error) {
+// getAllPrivateIPs returns ALL private IPv4 addresses across all non-loopback interfaces.
+// Unlike getLocalPrivateIP which returns only the first, this returns all of them
+// so clients can broadcast to every subnet they're connected to.
+func getAllPrivateIPs() []string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		return nil
 	}
 
+	var ips []string
 	for _, iface := range interfaces {
-		// Skip down or loopback interfaces
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
@@ -486,17 +573,15 @@ func getLocalPrivateIP() (string, error) {
 				continue
 			}
 
-			// Check for IPv4
 			if ip4 := ip.To4(); ip4 != nil {
-				// Check if it's a private IP
 				if isPrivateIP(ip4) {
-					return ip4.String(), nil
+					ips = append(ips, ip4.String())
 				}
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no suitable private network interface found")
+	return ips
 }
 
 // isPrivateIP checks if an IP is in a private range (RFC 1918)

@@ -70,6 +70,10 @@ type Node struct {
 	replicateAcks  map[int64]map[string]bool
 	replicateAckMu sync.Mutex
 
+	// Rate limiting for JOIN rejections to prevent flooding
+	joinRejections   map[string]time.Time // nodeID -> last rejection time
+	joinRejectionsMu sync.Mutex
+
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 }
@@ -105,6 +109,7 @@ func NewNode(cfg *config.Config) *Node {
 		viewState:             state.NewViewState(),
 		recoveryManager:       state.NewViewRecoveryManager(),
 		frozenQueue:           make([]frozenMessage, 0),
+		joinRejections:        make(map[string]time.Time),
 	}
 
 	node.holdbackQueue = state.NewRegistryHoldbackQueue(node.applyRegistryUpdate)

@@ -416,6 +416,39 @@ func (n *Node) listenForBroadcastJoins() {
 				continue // Don't register the duplicate leader
 			}
 
+			// Rate limit JOIN rejections to prevent flooding
+			// If we recently rejected this node, skip processing entirely
+			n.joinRejectionsMu.Lock()
+			lastRejection, wasRejected := n.joinRejections[senderID]
+			n.joinRejectionsMu.Unlock()
+
+			if wasRejected && time.Since(lastRejection) < 30*time.Second {
+				// Silently ignore - we already rejected this node recently
+				continue
+			}
+
+			// CRITICAL: Verify TCP connectivity BEFORE registering the node
+			// UDP broadcast may work even when TCP doesn't (different networks, NAT, firewall)
+			// Without this check, we register nodes we can't actually communicate with via TCP
+			if !n.verifyTCPConnectivity(joinMsg.Address, senderID) {
+				fmt.Printf("[Leader %s] REJECTING JOIN from %s: TCP connectivity verification failed to %s\n",
+					n.id[:8], senderID[:8], joinMsg.Address)
+				fmt.Printf("[Leader %s] UDP broadcast works but TCP doesn't - nodes may be on different networks\n", n.id[:8])
+
+				// Record rejection to rate-limit future attempts
+				n.joinRejectionsMu.Lock()
+				n.joinRejections[senderID] = time.Now()
+				n.joinRejectionsMu.Unlock()
+				continue
+			}
+
+			// Clear any previous rejection record since TCP now works
+			n.joinRejectionsMu.Lock()
+			delete(n.joinRejections, senderID)
+			n.joinRejectionsMu.Unlock()
+
+			fmt.Printf("[Leader %s] TCP connectivity verified to %s at %s\n", n.id[:8], senderID[:8], joinMsg.Address)
+
 			// Register new node in state.Registry
 			newNodeID := senderID
 
@@ -473,6 +506,39 @@ func (n *Node) startBroadcastListener() {
 	} else {
 		fmt.Printf("[Node %s] [becomeLeader] Broadcast listener already exists\n", n.id[:8])
 	}
+}
+
+// verifyTCPConnectivity tests if we can establish a TCP connection to a node
+// This is critical because UDP broadcast may work even when TCP doesn't
+// (e.g., different networks, NAT, firewall rules)
+func (n *Node) verifyTCPConnectivity(address, nodeID string) bool {
+	fmt.Printf("[Leader %s] [TCP-Verify] Testing TCP connectivity to %s at %s...\n",
+		n.id[:8], nodeID[:8], address)
+
+	// Try to establish TCP connection with short timeout
+	conn, err := net.DialTimeout("tcp", address, 3*time.Second)
+	if err != nil {
+		fmt.Printf("[Leader %s] [TCP-Verify] FAILED to connect to %s: %v\n",
+			n.id[:8], nodeID[:8], err)
+		return false
+	}
+	defer conn.Close()
+
+	// Set a deadline for the verification handshake
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Send a heartbeat as a connectivity test
+	// The node should accept the connection and we can verify it's responsive
+	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, n.viewState.GetViewNumber())
+	if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
+		fmt.Printf("[Leader %s] [TCP-Verify] FAILED to write to %s: %v\n",
+			n.id[:8], nodeID[:8], err)
+		return false
+	}
+
+	fmt.Printf("[Leader %s] [TCP-Verify] SUCCESS - TCP connection to %s verified\n",
+		n.id[:8], nodeID[:8])
+	return true
 }
 
 // ============== Stream Failover ==============
