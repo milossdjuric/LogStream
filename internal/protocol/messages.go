@@ -192,6 +192,17 @@ func (m *ViewInstallAckMsg) Unmarshal(data []byte) error {
 	return proto.Unmarshal(data, m.ViewInstallAckMessage)
 }
 
+// TCP unicast from Leader to Producer/Consumer for broker reassignment
+type ReassignBrokerMsg struct {
+	*ReassignBrokerMessage
+}
+
+func (m *ReassignBrokerMsg) GetHeader() *MessageHeader { return m.Header }
+func (m *ReassignBrokerMsg) Marshal() ([]byte, error)  { return proto.Marshal(m.ReassignBrokerMessage) }
+func (m *ReassignBrokerMsg) Unmarshal(data []byte) error {
+	return proto.Unmarshal(data, m.ReassignBrokerMessage)
+}
+
 func GetMessageType(msg Message) MessageType {
 	return msg.GetHeader().Type
 }

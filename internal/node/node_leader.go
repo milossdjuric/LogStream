@@ -531,11 +531,79 @@ func (n *Node) handleBrokerFailure(failedBrokerID string) {
 		fmt.Printf("[Leader %s] [Failover] Reassigned topic %s: %s -> %s @ %s\n",
 			n.id[:8], stream.Topic, failedBrokerID[:8], newBrokerID[:8], newBrokerAddr)
 
-		// Note: Producers and consumers will need to reconnect
-		// They will detect connection failure and reconnect to leader to get new broker assignment
+		// Notify producer of new broker assignment
+		if stream.ProducerId != "" {
+			go n.notifyClientOfReassignment(stream.ProducerId, protocol.NodeType_PRODUCER, stream.Topic, newBrokerAddr, newBrokerID)
+		}
+
+		// Notify consumer of new broker assignment
+		if stream.ConsumerId != "" {
+			go n.notifyClientOfReassignment(stream.ConsumerId, protocol.NodeType_CONSUMER, stream.Topic, newBrokerAddr, newBrokerID)
+		}
 	}
 
 	fmt.Printf("[Leader %s] [Failover] Completed stream failover for broker %s\n", n.id[:8], failedBrokerID[:8])
+}
+
+// notifyClientOfReassignment sends a REASSIGN_BROKER message to a client
+// This notifies producers and consumers when their assigned broker changes
+func (n *Node) notifyClientOfReassignment(clientID string, clientType protocol.NodeType, topic, newBrokerAddr, newBrokerID string) {
+	if !n.IsLeader() {
+		return
+	}
+
+	// Get client address
+	var clientAddr string
+	switch clientType {
+	case protocol.NodeType_PRODUCER:
+		producer, ok := n.clusterState.GetProducer(clientID)
+		if !ok {
+			log.Printf("[Leader %s] [Reassign] Producer %s not found in registry\n", n.id[:8], clientID[:8])
+			return
+		}
+		clientAddr = producer.Address
+	case protocol.NodeType_CONSUMER:
+		consumer, ok := n.clusterState.GetConsumer(clientID)
+		if !ok {
+			log.Printf("[Leader %s] [Reassign] Consumer %s not found in registry\n", n.id[:8], clientID[:8])
+			return
+		}
+		clientAddr = consumer.Address
+	default:
+		log.Printf("[Leader %s] [Reassign] Unknown client type: %v\n", n.id[:8], clientType)
+		return
+	}
+
+	clientTypeName := "producer"
+	if clientType == protocol.NodeType_CONSUMER {
+		clientTypeName = "consumer"
+	}
+
+	fmt.Printf("[Leader %s] [Reassign] Notifying %s %s of new broker %s @ %s for topic %s\n",
+		n.id[:8], clientTypeName, clientID[:8], newBrokerID[:8], newBrokerAddr, topic)
+
+	// Connect to client
+	conn, err := net.DialTimeout("tcp", clientAddr, 5*time.Second)
+	if err != nil {
+		log.Printf("[Leader %s] [Reassign] Failed to connect to %s %s: %v\n",
+			n.id[:8], clientTypeName, clientID[:8], err)
+		return
+	}
+	defer conn.Close()
+
+	// Set deadline
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	// Create and send REASSIGN_BROKER message
+	msg := protocol.NewReassignBrokerMsg(n.id, clientID, clientType, topic, newBrokerAddr, newBrokerID)
+	if err := protocol.WriteTCPMessage(conn, msg); err != nil {
+		log.Printf("[Leader %s] [Reassign] Failed to send REASSIGN_BROKER to %s %s: %v\n",
+			n.id[:8], clientTypeName, clientID[:8], err)
+		return
+	}
+
+	fmt.Printf("[Leader %s] -> REASSIGN_BROKER to %s %s (topic: %s, broker: %s)\n",
+		n.id[:8], clientTypeName, clientID[:8], topic, newBrokerAddr)
 }
 
 // ============== Client Cleanup ==============

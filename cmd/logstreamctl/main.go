@@ -126,6 +126,10 @@ func printUsage() {
 	fmt.Println("  # Start a broker with explicit address")
 	fmt.Println("  logstreamctl start broker --name node1 --address 192.168.1.10:8001")
 	fmt.Println()
+	fmt.Println("  # Start a follower broker with explicit leader (bypasses broadcast)")
+	fmt.Println("  # Use this when WiFi AP isolation blocks broadcast discovery")
+	fmt.Println("  logstreamctl start broker --name node2 --address 192.168.1.11:8001 --leader 192.168.1.10:8001")
+	fmt.Println()
 	fmt.Println("  # Start a producer (auto-discover cluster)")
 	fmt.Println("  logstreamctl start producer --name prod1 --topic logs --rate 5")
 	fmt.Println()
@@ -173,6 +177,7 @@ func startBroker(args []string) {
 	address := ""
 	multicast := "239.0.0.1:9999"
 	broadcastPort := "8888"
+	leaderAddress := "" // Optional: bypass broadcast discovery
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -197,6 +202,11 @@ func startBroker(args []string) {
 				broadcastPort = args[i+1]
 				i++
 			}
+		case "--leader", "-l":
+			if i+1 < len(args) {
+				leaderAddress = args[i+1]
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -211,6 +221,8 @@ func startBroker(args []string) {
 			fmt.Println("                       Can also specify just port: --address 8002")
 			fmt.Println("  --multicast, -m      Multicast group (default: 239.0.0.1:9999)")
 			fmt.Println("  --broadcast-port, -b Broadcast port (default: 8888)")
+			fmt.Println("  --leader, -l         Explicit leader address (bypasses broadcast discovery)")
+			fmt.Println("                       Use when broadcast doesn't work (e.g., WiFi AP isolation)")
 			fmt.Println("  --background, -bg    Run in background (default: foreground)")
 			os.Exit(0)
 		}
@@ -283,6 +295,10 @@ func startBroker(args []string) {
 	env = append(env, fmt.Sprintf("NODE_ADDRESS=%s", address))
 	env = append(env, fmt.Sprintf("MULTICAST_GROUP=%s", multicast))
 	env = append(env, fmt.Sprintf("BROADCAST_PORT=%s", broadcastPort))
+	if leaderAddress != "" {
+		env = append(env, fmt.Sprintf("LEADER_ADDRESS=%s", leaderAddress))
+		fmt.Printf("Using explicit leader: %s (broadcast discovery bypassed)\n", leaderAddress)
+	}
 
 	if background {
 		// Run in background

@@ -16,9 +16,12 @@ type Producer struct {
 	topic         string
 	leaderAddr    string
 	brokerAddr    string
+	brokerAddrMu  sync.RWMutex   // Protects brokerAddr and udpRemoteAddr
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
+	tcpListener   net.Listener   // TCP listener for incoming messages from leader
 	stopHeartbeat chan struct{}
+	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
 	wg            sync.WaitGroup // Synchronize goroutine lifecycle
 }
@@ -36,6 +39,7 @@ func NewProducer(topic, leaderAddr string) *Producer {
 		topic:         topic,
 		leaderAddr:    leaderAddr,
 		stopHeartbeat: make(chan struct{}),
+		stopListener:  make(chan struct{}),
 		seqNum:        1, // Start at 1 (0 means unset)
 	}
 }
@@ -140,6 +144,30 @@ func (p *Producer) Connect() error {
 		return fmt.Errorf("failed to resolve broker address: %w", err)
 	}
 
+	// Start TCP listener for incoming messages (like REASSIGN_BROKER)
+	// Use the same local address that was used for registration
+	localTCPAddr, err := net.ResolveTCPAddr("tcp", localAddr)
+	if err != nil {
+		p.udpConn.Close()
+		return fmt.Errorf("failed to resolve local TCP address: %w", err)
+	}
+
+	p.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
+	if err != nil {
+		// Try with any available port if the original port is in use
+		p.tcpListener, err = net.Listen("tcp", ":0")
+		if err != nil {
+			p.udpConn.Close()
+			return fmt.Errorf("failed to start TCP listener: %w", err)
+		}
+	}
+
+	fmt.Printf("[Producer %s] TCP listener started on %s\n", p.id[:8], p.tcpListener.Addr().String())
+
+	// Start listener routine for incoming messages
+	p.wg.Add(1)
+	go p.listenForMessages()
+
 	// Start heartbeat routine to send periodic heartbeats
 	p.wg.Add(1) // Register goroutine before starting
 	go p.sendHeartbeats()
@@ -161,8 +189,13 @@ func (p *Producer) SendData(data []byte) error {
 	// Create DATA message with sequence number for FIFO ordering
 	dataMsg := protocol.NewDataMsg(p.id, p.topic, data, currentSeq)
 
+	// Get current broker address (protected by mutex for concurrent access)
+	p.brokerAddrMu.RLock()
+	remoteAddr := p.udpRemoteAddr
+	p.brokerAddrMu.RUnlock()
+
 	// Send DATA message
-	if err := protocol.WriteUDPMessage(p.udpConn, dataMsg, p.udpRemoteAddr); err != nil {
+	if err := protocol.WriteUDPMessage(p.udpConn, dataMsg, remoteAddr); err != nil {
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 
@@ -193,13 +226,13 @@ func (p *Producer) sendHeartbeats() {
 				continue
 			}
 
-		// Create heartbeat message (producers don't have view numbers, use 0)
-		heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0)
+			// Create heartbeat message (producers don't have view numbers, use 0)
+			heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0)
 
-		// Send heartbeat message
-		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-			log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
-		}
+			// Send heartbeat message
+			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
+				log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
+			}
 
 			conn.Close()
 
@@ -209,13 +242,121 @@ func (p *Producer) sendHeartbeats() {
 	}
 }
 
+// listenForMessages listens for incoming TCP messages from the leader
+// Handles REASSIGN_BROKER messages for broker failover
+func (p *Producer) listenForMessages() {
+	defer p.wg.Done()
+
+	for {
+		select {
+		case <-p.stopListener:
+			return
+		default:
+			if p.tcpListener == nil {
+				return
+			}
+
+			// Set accept timeout to allow checking stop signal
+			if tcpListener, ok := p.tcpListener.(*net.TCPListener); ok {
+				tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			}
+
+			conn, err := p.tcpListener.Accept()
+			if err != nil {
+				// Check if it's a timeout (expected) or actual error
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				// Check if listener was closed
+				select {
+				case <-p.stopListener:
+					return
+				default:
+					log.Printf("[Producer %s] Accept error: %v", p.id[:8], err)
+					continue
+				}
+			}
+
+			// Handle the connection in a goroutine
+			go p.handleIncomingConnection(conn)
+		}
+	}
+}
+
+// handleIncomingConnection handles an incoming TCP connection
+func (p *Producer) handleIncomingConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Set read deadline
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	msg, err := protocol.ReadTCPMessage(conn)
+	if err != nil {
+		log.Printf("[Producer %s] Failed to read incoming message: %v", p.id[:8], err)
+		return
+	}
+
+	switch m := msg.(type) {
+	case *protocol.ReassignBrokerMsg:
+		fmt.Printf("[Producer %s] <- REASSIGN_BROKER (topic: %s, new broker: %s)\n",
+			p.id[:8], m.Topic, m.NewBrokerAddress)
+
+		// Update broker address
+		if err := p.UpdateBrokerAddress(m.NewBrokerAddress); err != nil {
+			log.Printf("[Producer %s] Failed to update broker address: %v", p.id[:8], err)
+		} else {
+			fmt.Printf("[Producer %s] Successfully updated broker to %s\n", p.id[:8], m.NewBrokerAddress)
+		}
+
+	case *protocol.HeartbeatMsg:
+		// Heartbeat from leader - just acknowledge
+		fmt.Printf("[Producer %s] <- HEARTBEAT from leader\n", p.id[:8])
+
+	default:
+		log.Printf("[Producer %s] Received unexpected message type: %T", p.id[:8], msg)
+	}
+}
+
+// UpdateBrokerAddress updates the broker address for sending data
+// Called when receiving REASSIGN_BROKER from leader
+func (p *Producer) UpdateBrokerAddress(newAddr string) error {
+	p.brokerAddrMu.Lock()
+	defer p.brokerAddrMu.Unlock()
+
+	// Resolve new broker address
+	newRemoteAddr, err := net.ResolveUDPAddr("udp", newAddr)
+	if err != nil {
+		return fmt.Errorf("failed to resolve new broker address: %w", err)
+	}
+
+	oldAddr := p.brokerAddr
+	p.brokerAddr = newAddr
+	p.udpRemoteAddr = newRemoteAddr
+
+	fmt.Printf("[Producer %s] Broker address updated: %s -> %s\n", p.id[:8], oldAddr, newAddr)
+	return nil
+}
+
+// GetBrokerAddress returns the current broker address
+func (p *Producer) GetBrokerAddress() string {
+	p.brokerAddrMu.RLock()
+	defer p.brokerAddrMu.RUnlock()
+	return p.brokerAddr
+}
+
 // Close shuts down the producer
 func (p *Producer) Close() {
 	close(p.stopHeartbeat)
-	
-	// Wait for goroutine to actually exit (proper synchronization)
+	close(p.stopListener)
+
+	// Close TCP listener to unblock Accept()
+	if p.tcpListener != nil {
+		p.tcpListener.Close()
+	}
+
+	// Wait for goroutines to actually exit (proper synchronization)
 	p.wg.Wait()
-	
+
 	if p.udpConn != nil {
 		p.udpConn.Close()
 	}

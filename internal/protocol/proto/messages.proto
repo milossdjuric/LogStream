@@ -22,6 +22,8 @@ enum MessageType {
   SUBSCRIBE = 14;               // Consumer subscribes to broker for results
   // Replication acknowledgement (passive replication - backups send ACK)
   REPLICATE_ACK = 15;           // Follower acknowledges REPLICATE message
+  // Client broker reassignment notification
+  REASSIGN_BROKER = 16;         // Leader notifies client of broker reassignment
 }
 
 enum NodeType {
@@ -262,4 +264,17 @@ message ViewInfo {
   repeated string member_ids = 3;     // All active member IDs
   int64 agreed_seq = 4;               // Last majority-agreed sequence number
   int64 created_at = 5;               // Timestamp when view was created
+}
+
+// ============== Client Broker Reassignment Message ==============
+
+// TCP unicast from Leader to Producer/Consumer when broker assignment changes
+// Sent after broker failure or during rebalancing
+message ReassignBrokerMessage {
+  MessageHeader header = 1;
+  string client_id = 2;               // Producer or Consumer ID
+  NodeType client_type = 3;           // PRODUCER or CONSUMER
+  string topic = 4;                   // Topic being reassigned
+  string new_broker_address = 5;      // New broker IP:PORT
+  string new_broker_id = 6;           // New broker ID
 }

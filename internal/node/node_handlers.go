@@ -54,6 +54,9 @@ func (n *Node) handleTCPConnection(conn net.Conn) {
 	case *protocol.ReplicateAckMsg:
 		n.handleReplicateAck(m, conn)
 
+	case *protocol.JoinMsg:
+		n.handleTCPJoin(m, conn)
+
 	default:
 		log.Printf("[Node %s] Unknown TCP message type: %T\n", n.id[:8], m)
 	}
@@ -534,4 +537,54 @@ func safeIDStr(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+// handleTCPJoin handles JOIN messages received via TCP (for explicit leader mode)
+// This allows nodes to join when broadcast discovery doesn't work (e.g., WiFi AP isolation)
+func (n *Node) handleTCPJoin(msg *protocol.JoinMsg, conn net.Conn) {
+	senderID := protocol.GetSenderID(msg)
+	fmt.Printf("[Node %s] <- JOIN (TCP) from %s (addr=%s)\n", n.id[:8], senderID[:8], msg.Address)
+
+	// Only leader should handle JOIN requests
+	if !n.IsLeader() {
+		fmt.Printf("[Node %s] REJECTING TCP JOIN from %s - not leader\n", n.id[:8], senderID[:8])
+		// Send error response
+		errorResp := protocol.NewJoinResponseMsg(n.id, "", "", nil)
+		protocol.WriteTCPMessage(conn, errorResp)
+		return
+	}
+
+	// Ignore JOIN from self
+	if senderID == n.id {
+		fmt.Printf("[Leader %s] IGNORING TCP JOIN from self\n", n.id[:8])
+		return
+	}
+
+	// Register new broker via view change
+	newNodeID := senderID
+	n.performLightweightViewChange(newNodeID, msg.Address)
+
+	// Send JOIN_RESPONSE
+	brokers := n.clusterState.ListBrokers()
+	var brokerAddrs []string
+	for _, bid := range brokers {
+		if b, ok := n.clusterState.GetBroker(bid); ok {
+			brokerAddrs = append(brokerAddrs, b.Address)
+		}
+	}
+
+	response := protocol.NewJoinResponseMsg(
+		n.id,
+		n.address,
+		n.config.MulticastGroup,
+		brokerAddrs,
+	)
+
+	if err := protocol.WriteTCPMessage(conn, response); err != nil {
+		log.Printf("[Leader %s] Failed to send JOIN_RESPONSE (TCP): %v\n", n.id[:8], err)
+		return
+	}
+
+	fmt.Printf("[Leader %s] -> JOIN_RESPONSE (TCP) to %s (multicast: %s)\n",
+		n.id[:8], senderID[:8], n.config.MulticastGroup)
 }

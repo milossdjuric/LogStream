@@ -402,12 +402,20 @@ func (n *Node) listenMulticast() {
 }
 
 // discoverCluster attempts to discover an existing cluster
+// If LEADER_ADDRESS is configured, joins directly via TCP (bypasses broadcast)
+// Otherwise, uses broadcast discovery
 func (n *Node) discoverCluster() error {
-	fmt.Printf("[Node %s] Discovering cluster...\n", n.id[:8])
+	// Check if explicit leader address is configured (for environments where broadcast doesn't work)
+	if n.config.HasExplicitLeader() {
+		return n.joinClusterDirectly(n.config.LeaderAddress)
+	}
+
+	// Use broadcast discovery
+	fmt.Printf("[Node %s] Discovering cluster via broadcast...\n", n.id[:8])
 
 	config := protocol.DefaultBroadcastConfig()
-	config.MaxRetries = 2                    // Reduced from 3 to 2 for faster startup
-	config.Timeout = 2 * time.Second         // Reduced from 3s to 2s per attempt
+	config.MaxRetries = 2                      // Reduced from 3 to 2 for faster startup
+	config.Timeout = 2 * time.Second           // Reduced from 3s to 2s per attempt
 	config.RetryDelay = 500 * time.Millisecond // Reduced from 1s to 500ms
 
 	response, err := protocol.DiscoverClusterWithRetry(
@@ -427,6 +435,47 @@ func (n *Node) discoverCluster() error {
 	// Store leader address immediately so we can send heartbeats before registry sync
 	n.leaderAddress = response.LeaderAddress
 	fmt.Printf("[Node %s] Stored leader address for immediate heartbeats: %s\n", n.id[:8], n.leaderAddress)
+
+	return nil
+}
+
+// joinClusterDirectly connects to the leader via TCP to join the cluster
+// This bypasses broadcast discovery for environments with AP isolation
+func (n *Node) joinClusterDirectly(leaderAddress string) error {
+	fmt.Printf("[Node %s] Joining cluster directly via TCP to leader at %s\n", n.id[:8], leaderAddress)
+	fmt.Printf("[Node %s] (Broadcast discovery bypassed - LEADER_ADDRESS configured)\n", n.id[:8])
+
+	// Connect to leader via TCP
+	conn, err := net.DialTimeout("tcp", leaderAddress, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader at %s: %w", leaderAddress, err)
+	}
+	defer conn.Close()
+
+	// Send JOIN message via TCP
+	joinMsg := protocol.NewJoinMsg(n.id, protocol.NodeType_BROKER, n.address)
+	if err := protocol.WriteTCPMessage(conn, joinMsg); err != nil {
+		return fmt.Errorf("failed to send JOIN to leader: %w", err)
+	}
+
+	// Wait for JOIN_RESPONSE
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	response, err := protocol.ReadTCPMessage(conn)
+	if err != nil {
+		return fmt.Errorf("failed to receive JOIN_RESPONSE from leader: %w", err)
+	}
+
+	joinResponse, ok := response.(*protocol.JoinResponseMsg)
+	if !ok {
+		return fmt.Errorf("unexpected response type: %T (expected JoinResponseMsg)", response)
+	}
+
+	fmt.Printf("[Node %s] Joined cluster! Leader: %s, Multicast: %s\n",
+		n.id[:8], joinResponse.LeaderAddress, joinResponse.MulticastGroup)
+
+	// Store cluster configuration
+	n.leaderAddress = joinResponse.LeaderAddress
+	n.config.MulticastGroup = joinResponse.MulticastGroup
 
 	return nil
 }

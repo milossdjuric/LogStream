@@ -219,3 +219,17 @@ func NewViewInstallAckMsg(senderID string, viewNumber int64, success bool, error
 		},
 	}
 }
+
+// TCP unicast from Leader to Producer/Consumer for broker reassignment
+func NewReassignBrokerMsg(senderID, clientID string, clientType NodeType, topic, newBrokerAddr, newBrokerID string) *ReassignBrokerMsg {
+	return &ReassignBrokerMsg{
+		ReassignBrokerMessage: &ReassignBrokerMessage{
+			Header:           newHeader(MessageType_REASSIGN_BROKER, senderID, NodeType_LEADER, 0),
+			ClientId:         clientID,
+			ClientType:       clientType,
+			Topic:            topic,
+			NewBrokerAddress: newBrokerAddr,
+			NewBrokerId:      newBrokerID,
+		},
+	}
+}

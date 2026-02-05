@@ -17,11 +17,17 @@ type Consumer struct {
 	topic            string
 	leaderAddr       string
 	brokerAddr       string   // Assigned broker address (from CONSUME_ACK)
+	brokerAddrMu     sync.RWMutex
 	tcpConn          net.Conn // Connection to the assigned broker
+	tcpConnMu        sync.Mutex
+	tcpListener      net.Listener // TCP listener for incoming messages from leader
+	localAddr        string       // Local address used for registration
 	results          chan *protocol.ResultMessage
 	errors           chan error
 	stopSignal       chan struct{}
-	enableProcessing bool // Whether to request data processing from broker
+	stopListener     chan struct{}
+	reconnectSignal  chan string // Signal to reconnect to a new broker
+	enableProcessing bool        // Whether to request data processing from broker
 	wg               sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
@@ -40,6 +46,8 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 		results:          make(chan *protocol.ResultMessage, 100),
 		errors:           make(chan error, 10),
 		stopSignal:       make(chan struct{}),
+		stopListener:     make(chan struct{}),
+		reconnectSignal:  make(chan string, 1),
 		enableProcessing: true, // Enable data processing by default
 	}
 }
@@ -212,6 +220,28 @@ func (c *Consumer) Connect() error {
 
 	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (subscribed to broker for topic: %s)\n", c.id[:8], subAck.Topic)
 
+	// Save local address for potential reconnection
+	c.localAddr = localAddr
+
+	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
+	localTCPAddr, err := net.ResolveTCPAddr("tcp", c.localAddr)
+	if err == nil {
+		c.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
+		if err != nil {
+			// Try with any available port if the original port is in use
+			c.tcpListener, err = net.Listen("tcp", ":0")
+		}
+		if err == nil {
+			fmt.Printf("[Consumer %s] TCP listener started on %s\n", c.id[:8], c.tcpListener.Addr().String())
+			c.wg.Add(1)
+			go c.listenForMessages()
+		}
+	}
+
+	// Start reconnection handler
+	c.wg.Add(1)
+	go c.handleReconnections()
+
 	// Start receiving results from broker in background goroutine
 	c.wg.Add(1) // Register goroutine before starting
 	go c.receiveResults()
@@ -221,11 +251,6 @@ func (c *Consumer) Connect() error {
 
 func (c *Consumer) receiveResults() {
 	defer c.wg.Done() // Signal completion when goroutine exits
-	defer func() {
-		if c.tcpConn != nil {
-			c.tcpConn.Close()
-		}
-	}()
 
 	for {
 		select {
@@ -233,15 +258,17 @@ func (c *Consumer) receiveResults() {
 			return
 
 		default:
-			if c.tcpConn == nil {
-				select {
-				case c.errors <- fmt.Errorf("connection closed"):
-				default:
-				}
-				return
+			c.tcpConnMu.Lock()
+			conn := c.tcpConn
+			c.tcpConnMu.Unlock()
+
+			if conn == nil {
+				// Wait a bit and check again - connection might be in process of reconnecting
+				time.Sleep(100 * time.Millisecond)
+				continue
 			}
 
-			msg, err := protocol.ReadTCPMessage(c.tcpConn)
+			msg, err := protocol.ReadTCPMessage(conn)
 			if err != nil {
 				errStr := err.Error()
 
@@ -313,17 +340,221 @@ func (c *Consumer) Errors() <-chan error {
 	return c.errors
 }
 
-// Close shuts down the consumer
-func (c *Consumer) Close() {
-	close(c.stopSignal)
-	
-	// Wait for goroutine to actually exit (proper synchronization)
-	c.wg.Wait()
-	
+// listenForMessages listens for incoming TCP messages from the leader
+// Handles REASSIGN_BROKER messages for broker failover
+func (c *Consumer) listenForMessages() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.stopListener:
+			return
+		default:
+			if c.tcpListener == nil {
+				return
+			}
+
+			// Set accept timeout to allow checking stop signal
+			if tcpListener, ok := c.tcpListener.(*net.TCPListener); ok {
+				tcpListener.SetDeadline(time.Now().Add(1 * time.Second))
+			}
+
+			conn, err := c.tcpListener.Accept()
+			if err != nil {
+				// Check if it's a timeout (expected) or actual error
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				// Check if listener was closed
+				select {
+				case <-c.stopListener:
+					return
+				default:
+					continue
+				}
+			}
+
+			// Handle the connection in a goroutine
+			go c.handleIncomingConnection(conn)
+		}
+	}
+}
+
+// handleIncomingConnection handles an incoming TCP connection from the leader
+func (c *Consumer) handleIncomingConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Set read deadline
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+	msg, err := protocol.ReadTCPMessage(conn)
+	if err != nil {
+		return
+	}
+
+	switch m := msg.(type) {
+	case *protocol.ReassignBrokerMsg:
+		fmt.Printf("[Consumer %s] <- REASSIGN_BROKER (topic: %s, new broker: %s)\n",
+			c.id[:8], m.Topic, m.NewBrokerAddress)
+
+		// Signal reconnection to new broker
+		select {
+		case c.reconnectSignal <- m.NewBrokerAddress:
+		default:
+			// Channel full, skip
+		}
+
+	case *protocol.HeartbeatMsg:
+		// Heartbeat from leader - just acknowledge
+		fmt.Printf("[Consumer %s] <- HEARTBEAT from leader\n", c.id[:8])
+
+	default:
+		// Unknown message type
+	}
+}
+
+// handleReconnections handles broker reconnection requests
+func (c *Consumer) handleReconnections() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.stopSignal:
+			return
+		case newBrokerAddr := <-c.reconnectSignal:
+			fmt.Printf("[Consumer %s] Reconnecting to new broker: %s\n", c.id[:8], newBrokerAddr)
+			if err := c.Reconnect(newBrokerAddr); err != nil {
+				select {
+				case c.errors <- fmt.Errorf("reconnection failed: %w", err):
+				default:
+				}
+			}
+		}
+	}
+}
+
+// Reconnect reconnects to a new broker after receiving REASSIGN_BROKER
+func (c *Consumer) Reconnect(newBrokerAddr string) error {
+	// Close existing broker connection
+	c.tcpConnMu.Lock()
 	if c.tcpConn != nil {
 		c.tcpConn.Close()
 		c.tcpConn = nil
 	}
+	c.tcpConnMu.Unlock()
+
+	// Update broker address
+	c.brokerAddrMu.Lock()
+	c.brokerAddr = newBrokerAddr
+	c.brokerAddrMu.Unlock()
+
+	// Connect to new broker
+	const maxAttempts = 5
+	const retryDelay = 1 * time.Second
+
+	var brokerConn net.Conn
+	var err error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		brokerConn, err = net.DialTimeout("tcp", newBrokerAddr, 5*time.Second)
+		if err == nil {
+			break
+		}
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to connect to new broker after %d attempts: %w", maxAttempts, err)
+	}
+
+	c.tcpConnMu.Lock()
+	c.tcpConn = brokerConn
+	c.tcpConnMu.Unlock()
+
+	// Get local address for subscription
+	localAddr := brokerConn.LocalAddr().String()
+
+	// Send SUBSCRIBE request to new broker
+	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing)
+
+	fmt.Printf("[Consumer %s] -> SUBSCRIBE to new broker (topic: %s)\n", c.id[:8], c.topic)
+	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
+		c.tcpConnMu.Lock()
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+			c.tcpConn = nil
+		}
+		c.tcpConnMu.Unlock()
+		return fmt.Errorf("failed to send SUBSCRIBE: %w", err)
+	}
+
+	// Read SUBSCRIBE_ACK response
+	msg, err := protocol.ReadTCPMessage(brokerConn)
+	if err != nil {
+		c.tcpConnMu.Lock()
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+			c.tcpConn = nil
+		}
+		c.tcpConnMu.Unlock()
+		return fmt.Errorf("failed to read SUBSCRIBE_ACK: %w", err)
+	}
+
+	subAck, ok := msg.(*protocol.SubscribeMsg)
+	if !ok {
+		c.tcpConnMu.Lock()
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+			c.tcpConn = nil
+		}
+		c.tcpConnMu.Unlock()
+		return fmt.Errorf("unexpected response type: %T", msg)
+	}
+
+	if subAck.Topic == "" {
+		c.tcpConnMu.Lock()
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+			c.tcpConn = nil
+		}
+		c.tcpConnMu.Unlock()
+		return fmt.Errorf("broker subscription failed")
+	}
+
+	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (reconnected to broker for topic: %s)\n", c.id[:8], subAck.Topic)
+	return nil
+}
+
+// GetBrokerAddress returns the current broker address
+func (c *Consumer) GetBrokerAddress() string {
+	c.brokerAddrMu.RLock()
+	defer c.brokerAddrMu.RUnlock()
+	return c.brokerAddr
+}
+
+// Close shuts down the consumer
+func (c *Consumer) Close() {
+	close(c.stopSignal)
+	close(c.stopListener)
+
+	// Close TCP listener to unblock Accept()
+	if c.tcpListener != nil {
+		c.tcpListener.Close()
+	}
+
+	// Close broker connection
+	c.tcpConnMu.Lock()
+	if c.tcpConn != nil {
+		c.tcpConn.Close()
+		c.tcpConn = nil
+	}
+	c.tcpConnMu.Unlock()
+
+	// Wait for goroutines to actually exit (proper synchronization)
+	c.wg.Wait()
+
 	close(c.results)
 	close(c.errors)
 }

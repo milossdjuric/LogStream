@@ -14,6 +14,10 @@ type Config struct {
 	BroadcastPort    int
 	NetworkInterface string
 
+	// Optional: Explicit leader address to bypass broadcast discovery
+	// Use this when broadcast doesn't work (e.g., WiFi AP isolation)
+	LeaderAddress string
+
 	// Analytics configuration
 	AnalyticsWindowSeconds int // Window size in seconds for CountInWindow analytics (default: 60)
 }
@@ -23,6 +27,7 @@ func LoadConfig() (*Config, error) {
 		NodeAddress:            getEnv("NODE_ADDRESS", ""),
 		MulticastGroup:         getEnv("MULTICAST_GROUP", "239.0.0.1:9999"),
 		BroadcastPort:          getEnvInt("BROADCAST_PORT", 8888),
+		LeaderAddress:          getEnv("LEADER_ADDRESS", ""), // Optional: bypass broadcast discovery
 		AnalyticsWindowSeconds: getEnvInt("ANALYTICS_WINDOW_SECONDS", 60),
 	}
 
@@ -145,6 +150,16 @@ func (c *Config) Print() {
 	fmt.Printf("Multicast Group:     %s\n", c.MulticastGroup)
 	fmt.Printf("Broadcast Port:      %d\n", c.BroadcastPort)
 	fmt.Printf("Network Interface:   %s\n", c.NetworkInterface)
+	if c.LeaderAddress != "" {
+		fmt.Printf("Leader Address:      %s (explicit - bypass broadcast)\n", c.LeaderAddress)
+	} else {
+		fmt.Printf("Leader Address:      (auto-discover via broadcast)\n")
+	}
 	fmt.Printf("Analytics Window:    %ds\n", c.AnalyticsWindowSeconds)
 	fmt.Println("================================")
+}
+
+// HasExplicitLeader returns true if an explicit leader address was configured
+func (c *Config) HasExplicitLeader() bool {
+	return c.LeaderAddress != ""
 }

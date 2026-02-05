@@ -66,6 +66,7 @@ var messageRegistry = map[MessageType]MessageFactory{
 	MessageType_STATE_EXCHANGE_RESPONSE: func() proto.Message { return &StateExchangeResponseMessage{} },
 	MessageType_VIEW_INSTALL:            func() proto.Message { return &ViewInstallMessage{} },
 	MessageType_VIEW_INSTALL_ACK:        func() proto.Message { return &ViewInstallAckMessage{} },
+	MessageType_REASSIGN_BROKER:         func() proto.Message { return &ReassignBrokerMessage{} },
 }
 
 func unmarshalMessage(data []byte) (Message, error) {
@@ -125,6 +126,8 @@ func wrapProtoMessage(pm proto.Message) (Message, error) {
 		return &ViewInstallMsg{ViewInstallMessage: m}, nil
 	case *ViewInstallAckMessage:
 		return &ViewInstallAckMsg{ViewInstallAckMessage: m}, nil
+	case *ReassignBrokerMessage:
+		return &ReassignBrokerMsg{ReassignBrokerMessage: m}, nil
 	default:
 		return nil, fmt.Errorf("unknown proto message type: %T", pm)
 	}
