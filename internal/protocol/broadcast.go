@@ -607,13 +607,6 @@ func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error
 	}, nil
 }
 
-		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
-		return responses[0].LeaderAddress, nil
-	}
-
-	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
-}
-
 // getAllPrivateIPs returns ALL private IPv4 addresses across all non-loopback interfaces.
 // Unlike getLocalPrivateIP which returns only the first, this returns all of them
 // so clients can broadcast to every subnet they're connected to.
