@@ -380,10 +380,14 @@ func (n *Node) listenForBroadcastJoins() {
 			// Client discovery: producers/consumers only need the leader address.
 			// They are NOT broker nodes - skip network checks, TCP verification, and view changes.
 			if senderType == protocol.NodeType_PRODUCER || senderType == protocol.NodeType_CONSUMER {
-				fmt.Printf("[Leader %s] Client discovery from %s (type=%s)\n",
-					n.id[:8], senderID[:8], senderType)
+				fmt.Printf("[Leader %s] Client discovery from %s (type=%s, addr=%s)\n",
+					n.id[:8], senderID[:8], senderType, joinMsg.Address)
 
-				responseAddr := fmt.Sprintf("%s", sender)
+				// CRITICAL: Use the address from the JOIN message, NOT the UDP source address.
+				// DiscoverLeader() creates a separate response listener socket on a known port
+				// and puts that address in joinMsg.Address. The UDP source (sender) is the
+				// broadcast sender socket on a DIFFERENT port - responses sent there are lost.
+				responseAddr := joinMsg.Address
 				err := n.broadcastListener.SendJoinResponse(
 					n.id,
 					n.address,

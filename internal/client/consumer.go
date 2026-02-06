@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -312,7 +313,28 @@ func (c *Consumer) receiveResults() {
 					case c.errors <- fmt.Errorf("connection closed by server"):
 					default:
 					}
-					return
+
+					// Attempt cluster re-discovery instead of giving up
+					fmt.Printf("[Consumer %s] Connection lost, waiting for cluster to stabilize...\n", c.id[:8])
+
+					// Wait for cluster to elect new leader (election takes ~10-15s)
+					select {
+					case <-time.After(5 * time.Second):
+					case <-c.stopSignal:
+						return
+					}
+
+					fmt.Printf("[Consumer %s] Attempting cluster reconnection...\n", c.id[:8])
+					if err := c.reconnectToCluster(); err != nil {
+						select {
+						case c.errors <- fmt.Errorf("cluster reconnection failed: %w", err):
+						default:
+						}
+						return // Give up after all retries exhausted
+					}
+
+					fmt.Printf("[Consumer %s] Successfully reconnected, resuming message reception\n", c.id[:8])
+					continue // Resume receiving on new connection
 				}
 
 				var netErr net.Error
@@ -347,6 +369,146 @@ func (c *Consumer) receiveResults() {
 			}
 		}
 	}
+}
+
+// reconnectToCluster re-discovers the cluster leader and re-registers the consumer.
+// Called when the broker connection is lost (leader or broker died).
+func (c *Consumer) reconnectToCluster() error {
+	const maxAttempts = 5
+	const attemptDelay = 5 * time.Second
+
+	// Close existing broker connection
+	c.tcpConnMu.Lock()
+	if c.tcpConn != nil {
+		c.tcpConn.Close()
+		c.tcpConn = nil
+	}
+	c.tcpConnMu.Unlock()
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		fmt.Printf("[Consumer %s] Reconnection attempt %d/%d...\n", c.id[:8], attempt, maxAttempts)
+
+		// Check if we should stop
+		select {
+		case <-c.stopSignal:
+			return fmt.Errorf("consumer stopped during reconnection")
+		default:
+		}
+
+		// Wait before retrying to give cluster time to elect new leader
+		if attempt > 1 {
+			select {
+			case <-time.After(attemptDelay):
+			case <-c.stopSignal:
+				return fmt.Errorf("consumer stopped during reconnection")
+			}
+		}
+
+		// Discover new leader via broadcast
+		leaderAddr, err := protocol.DiscoverLeader(nil)
+		if err != nil {
+			log.Printf("[Consumer %s] Discovery failed: %v", c.id[:8], err)
+			continue
+		}
+
+		fmt.Printf("[Consumer %s] Discovered leader at %s\n", c.id[:8], leaderAddr)
+
+		// Register with new leader (CONSUME)
+		leaderConn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
+		if err != nil {
+			log.Printf("[Consumer %s] Failed to connect to leader: %v", c.id[:8], err)
+			continue
+		}
+
+		localAddr := leaderConn.LocalAddr().String()
+		consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
+
+		fmt.Printf("[Consumer %s] -> CONSUME to new leader (topic: %s)\n", c.id[:8], c.topic)
+		if err := protocol.WriteTCPMessage(leaderConn, consumeMsg); err != nil {
+			leaderConn.Close()
+			log.Printf("[Consumer %s] Failed to send CONSUME: %v", c.id[:8], err)
+			continue
+		}
+
+		msg, err := protocol.ReadTCPMessage(leaderConn)
+		leaderConn.Close()
+		if err != nil {
+			log.Printf("[Consumer %s] Failed to read CONSUME_ACK: %v", c.id[:8], err)
+			continue
+		}
+
+		ack, ok := msg.(*protocol.ConsumeMsg)
+		if !ok {
+			log.Printf("[Consumer %s] Unexpected response type: %T", c.id[:8], msg)
+			continue
+		}
+
+		if ack.Topic == "" {
+			log.Printf("[Consumer %s] Subscription failed - topic may not have a producer yet", c.id[:8])
+			continue
+		}
+
+		newBrokerAddr := ack.ConsumerAddress
+		fmt.Printf("[Consumer %s] <- CONSUME_ACK (new broker: %s)\n", c.id[:8], newBrokerAddr)
+
+		// Update broker address
+		c.brokerAddrMu.Lock()
+		c.brokerAddr = newBrokerAddr
+		c.brokerAddrMu.Unlock()
+
+		// Connect to new broker
+		brokerConn, err := net.DialTimeout("tcp", newBrokerAddr, 5*time.Second)
+		if err != nil {
+			log.Printf("[Consumer %s] Failed to connect to broker: %v", c.id[:8], err)
+			continue
+		}
+
+		// Subscribe to new broker
+		brokerLocalAddr := brokerConn.LocalAddr().String()
+		subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, brokerLocalAddr, c.enableProcessing, c.analyticsWindowSeconds, c.analyticsIntervalMs)
+
+		fmt.Printf("[Consumer %s] -> SUBSCRIBE to new broker (topic: %s)\n", c.id[:8], c.topic)
+		if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
+			brokerConn.Close()
+			log.Printf("[Consumer %s] Failed to send SUBSCRIBE: %v", c.id[:8], err)
+			continue
+		}
+
+		// Read SUBSCRIBE_ACK
+		msg, err = protocol.ReadTCPMessage(brokerConn)
+		if err != nil {
+			brokerConn.Close()
+			log.Printf("[Consumer %s] Failed to read SUBSCRIBE_ACK: %v", c.id[:8], err)
+			continue
+		}
+
+		subAck, ok := msg.(*protocol.SubscribeMsg)
+		if !ok {
+			brokerConn.Close()
+			log.Printf("[Consumer %s] Unexpected response: %T", c.id[:8], msg)
+			continue
+		}
+
+		if subAck.Topic == "" {
+			brokerConn.Close()
+			log.Printf("[Consumer %s] Broker subscription failed", c.id[:8])
+			continue
+		}
+
+		// Update connection atomically
+		c.tcpConnMu.Lock()
+		c.tcpConn = brokerConn
+		c.tcpConnMu.Unlock()
+
+		// Update leader address
+		c.leaderAddr = leaderAddr
+
+		fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (reconnected to broker for topic: %s)\n", c.id[:8], subAck.Topic)
+		fmt.Printf("[Consumer %s] Reconnected: leader=%s, broker=%s\n", c.id[:8], leaderAddr, newBrokerAddr)
+		return nil
+	}
+
+	return fmt.Errorf("failed to reconnect after %d attempts", maxAttempts)
 }
 
 // Results returns the channel for receiving result messages

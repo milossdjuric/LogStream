@@ -16,7 +16,7 @@ type Producer struct {
 	topic         string
 	leaderAddr    string
 	brokerAddr    string
-	brokerAddrMu  sync.RWMutex   // Protects brokerAddr and udpRemoteAddr
+	brokerAddrMu  sync.RWMutex   // Protects brokerAddr, udpRemoteAddr, and udpConn
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
 	tcpListener   net.Listener   // TCP listener for incoming messages from leader
@@ -178,7 +178,13 @@ func (p *Producer) Connect() error {
 // SendData sends data to the assigned broker via UDP
 // Uses monotonically increasing sequence numbers for FIFO ordering
 func (p *Producer) SendData(data []byte) error {
-	if p.udpConn == nil {
+	// Get current broker connection (protected by mutex for concurrent access)
+	p.brokerAddrMu.RLock()
+	conn := p.udpConn
+	remoteAddr := p.udpRemoteAddr
+	p.brokerAddrMu.RUnlock()
+
+	if conn == nil {
 		return fmt.Errorf("not connected")
 	}
 
@@ -189,13 +195,8 @@ func (p *Producer) SendData(data []byte) error {
 	// Create DATA message with sequence number for FIFO ordering
 	dataMsg := protocol.NewDataMsg(p.id, p.topic, data, currentSeq)
 
-	// Get current broker address (protected by mutex for concurrent access)
-	p.brokerAddrMu.RLock()
-	remoteAddr := p.udpRemoteAddr
-	p.brokerAddrMu.RUnlock()
-
 	// Send DATA message
-	if err := protocol.WriteUDPMessage(p.udpConn, dataMsg, remoteAddr); err != nil {
+	if err := protocol.WriteUDPMessage(conn, dataMsg, remoteAddr); err != nil {
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 
@@ -211,10 +212,13 @@ func (p *Producer) GetSequenceNum() int64 {
 }
 
 // sendHeartbeats sends periodic heartbeats to leader
+// Detects leader death via consecutive failures and triggers cluster re-discovery
 func (p *Producer) sendHeartbeats() {
 	defer p.wg.Done() // Signal completion when goroutine exits
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+
+	consecutiveFailures := 0
 
 	for {
 		select {
@@ -222,7 +226,19 @@ func (p *Producer) sendHeartbeats() {
 			// Send heartbeat via TCP to leader
 			conn, err := net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
 			if err != nil {
-				log.Printf("[Producer %s] Failed to send heartbeat: %v", p.id[:8], err)
+				consecutiveFailures++
+				log.Printf("[Producer %s] Heartbeat failed (%d consecutive): %v", p.id[:8], consecutiveFailures, err)
+
+				if consecutiveFailures >= 3 {
+					fmt.Printf("[Producer %s] Leader appears down after %d heartbeat failures, attempting re-discovery...\n",
+						p.id[:8], consecutiveFailures)
+					if err := p.reconnectToCluster(); err != nil {
+						log.Printf("[Producer %s] Cluster re-discovery failed: %v", p.id[:8], err)
+					} else {
+						consecutiveFailures = 0
+						fmt.Printf("[Producer %s] Successfully reconnected to cluster\n", p.id[:8])
+					}
+				}
 				continue
 			}
 
@@ -232,6 +248,8 @@ func (p *Producer) sendHeartbeats() {
 			// Send heartbeat message
 			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
 				log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
+			} else {
+				consecutiveFailures = 0
 			}
 
 			conn.Close()
@@ -240,6 +258,104 @@ func (p *Producer) sendHeartbeats() {
 			return
 		}
 	}
+}
+
+// reconnectToCluster re-discovers the cluster leader and re-registers the producer.
+// Called when the leader appears to be down (consecutive heartbeat failures).
+func (p *Producer) reconnectToCluster() error {
+	const maxAttempts = 5
+	const attemptDelay = 5 * time.Second
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		fmt.Printf("[Producer %s] Reconnection attempt %d/%d...\n", p.id[:8], attempt, maxAttempts)
+
+		// Wait before retrying to give cluster time to elect new leader
+		if attempt > 1 {
+			time.Sleep(attemptDelay)
+		}
+
+		// Try broadcast discovery first
+		leaderAddr, err := protocol.DiscoverLeader(nil)
+		if err != nil {
+			log.Printf("[Producer %s] Discovery failed: %v", p.id[:8], err)
+			continue
+		}
+
+		fmt.Printf("[Producer %s] Discovered new leader at %s\n", p.id[:8], leaderAddr)
+
+		// Register with new leader
+		conn, err := net.DialTimeout("tcp", leaderAddr, 5*time.Second)
+		if err != nil {
+			log.Printf("[Producer %s] Failed to connect to new leader: %v", p.id[:8], err)
+			continue
+		}
+
+		localAddr := conn.LocalAddr().String()
+		produceMsg := protocol.NewProduceMsg(p.id, p.topic, localAddr, 0)
+
+		fmt.Printf("[Producer %s] -> PRODUCE to new leader (topic: %s)\n", p.id[:8], p.topic)
+		if err := protocol.WriteTCPMessage(conn, produceMsg); err != nil {
+			conn.Close()
+			log.Printf("[Producer %s] Failed to send PRODUCE: %v", p.id[:8], err)
+			continue
+		}
+
+		msg, err := protocol.ReadTCPMessage(conn)
+		conn.Close()
+		if err != nil {
+			log.Printf("[Producer %s] Failed to read PRODUCE_ACK: %v", p.id[:8], err)
+			continue
+		}
+
+		ack, ok := msg.(*protocol.ProduceMsg)
+		if !ok {
+			log.Printf("[Producer %s] Unexpected response type: %T", p.id[:8], msg)
+			continue
+		}
+
+		newBrokerAddr := ack.ProducerAddress
+		if newBrokerAddr == "" {
+			log.Printf("[Producer %s] No broker assigned by new leader", p.id[:8])
+			continue
+		}
+
+		fmt.Printf("[Producer %s] <- PRODUCE_ACK (new broker: %s)\n", p.id[:8], newBrokerAddr)
+
+		// Create new UDP connection before swapping
+		newUDPConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			log.Printf("[Producer %s] Failed to create new UDP socket: %v", p.id[:8], err)
+			continue
+		}
+
+		newRemoteAddr, err := net.ResolveUDPAddr("udp", newBrokerAddr)
+		if err != nil {
+			newUDPConn.Close()
+			log.Printf("[Producer %s] Failed to resolve new broker address: %v", p.id[:8], err)
+			continue
+		}
+
+		// Atomically swap connection state
+		p.brokerAddrMu.Lock()
+		oldConn := p.udpConn
+		p.udpConn = newUDPConn
+		p.udpRemoteAddr = newRemoteAddr
+		p.brokerAddr = newBrokerAddr
+		p.brokerAddrMu.Unlock()
+
+		// Update leader address
+		p.leaderAddr = leaderAddr
+
+		// Close old UDP connection
+		if oldConn != nil {
+			oldConn.Close()
+		}
+
+		fmt.Printf("[Producer %s] Reconnected: leader=%s, broker=%s\n", p.id[:8], leaderAddr, newBrokerAddr)
+		return nil
+	}
+
+	return fmt.Errorf("failed to reconnect after %d attempts", maxAttempts)
 }
 
 // listenForMessages listens for incoming TCP messages from the leader
@@ -357,7 +473,9 @@ func (p *Producer) Close() {
 	// Wait for goroutines to actually exit (proper synchronization)
 	p.wg.Wait()
 
+	p.brokerAddrMu.Lock()
 	if p.udpConn != nil {
 		p.udpConn.Close()
 	}
+	p.brokerAddrMu.Unlock()
 }
