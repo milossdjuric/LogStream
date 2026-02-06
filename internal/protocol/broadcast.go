@@ -571,13 +571,6 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
 }
 
-		fmt.Printf("[Discovery] Found cluster with leader at %s\n", allResponses[0].LeaderAddress)
-		return allResponses[0].LeaderAddress, nil
-	}
-
-	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
-}
-
 // createBoundBroadcastSender creates a broadcast sender socket bound to a specific interface IP
 // This ensures that broadcast packets are sent from the correct interface and responses are received there
 func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error) {
