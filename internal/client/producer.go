@@ -20,6 +20,7 @@ type Producer struct {
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
 	tcpListener   net.Listener   // TCP listener for incoming messages from leader
+	clientPort    int            // Fixed TCP listener port (0 = OS picks)
 	stopHeartbeat chan struct{}
 	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
@@ -42,6 +43,14 @@ func NewProducer(topic, leaderAddr string) *Producer {
 		stopListener:  make(chan struct{}),
 		seqNum:        1, // Start at 1 (0 means unset)
 	}
+}
+
+// NewProducerWithPort creates a new producer with a fixed TCP listener port.
+// If port is 0, the OS picks an ephemeral port (same as NewProducer).
+func NewProducerWithPort(topic, leaderAddr string, port int) *Producer {
+	p := NewProducer(topic, leaderAddr)
+	p.clientPort = port
+	return p
 }
 
 // Connect registers with the leader via TCP
@@ -100,14 +109,23 @@ func (p *Producer) Connect() error {
 
 	defer conn.Close()
 
-	// Get local address for registration
-	localAddr := conn.LocalAddr().String()
+	// Determine local address for registration
+	var localAddr string
+	localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
+
+	if p.clientPort > 0 {
+		// Use fixed port: create TCP listener first, then register with that address
+		localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
+	} else {
+		// Use ephemeral port from the leader connection
+		localAddr = conn.LocalAddr().String()
+	}
 
 	// Make PRODUCE message
 	produceMsg := protocol.NewProduceMsg(p.id, p.topic, localAddr, 0)
 
 	// Send PRODUCE request
-	fmt.Printf("[Producer %s] -> PRODUCE (topic: %s)\n", p.id[:8], p.topic)
+	fmt.Printf("[Producer %s] -> PRODUCE (topic: %s, addr: %s)\n", p.id[:8], p.topic, localAddr)
 	if err := protocol.WriteTCPMessage(conn, produceMsg); err != nil {
 		return fmt.Errorf("failed to send PRODUCE: %w", err)
 	}
@@ -145,20 +163,28 @@ func (p *Producer) Connect() error {
 	}
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER)
-	// Use the same local address that was used for registration
-	localTCPAddr, err := net.ResolveTCPAddr("tcp", localAddr)
-	if err != nil {
-		p.udpConn.Close()
-		return fmt.Errorf("failed to resolve local TCP address: %w", err)
-	}
-
-	p.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
-	if err != nil {
-		// Try with any available port if the original port is in use
-		p.tcpListener, err = net.Listen("tcp", ":0")
+	if p.clientPort > 0 {
+		// Use fixed port for the listener
+		p.tcpListener, err = net.Listen("tcp", localAddr)
 		if err != nil {
 			p.udpConn.Close()
-			return fmt.Errorf("failed to start TCP listener: %w", err)
+			return fmt.Errorf("failed to start TCP listener on %s: %w", localAddr, err)
+		}
+	} else {
+		// Use the ephemeral port from registration connection
+		localTCPAddr, err := net.ResolveTCPAddr("tcp", localAddr)
+		if err != nil {
+			p.udpConn.Close()
+			return fmt.Errorf("failed to resolve local TCP address: %w", err)
+		}
+		p.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
+		if err != nil {
+			// Try with any available port if the original port is in use
+			p.tcpListener, err = net.Listen("tcp", ":0")
+			if err != nil {
+				p.udpConn.Close()
+				return fmt.Errorf("failed to start TCP listener: %w", err)
+			}
 		}
 	}
 
@@ -290,7 +316,13 @@ func (p *Producer) reconnectToCluster() error {
 			continue
 		}
 
-		localAddr := conn.LocalAddr().String()
+		var localAddr string
+		if p.clientPort > 0 {
+			localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
+			localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
+		} else {
+			localAddr = conn.LocalAddr().String()
+		}
 		produceMsg := protocol.NewProduceMsg(p.id, p.topic, localAddr, 0)
 
 		fmt.Printf("[Producer %s] -> PRODUCE to new leader (topic: %s)\n", p.id[:8], p.topic)

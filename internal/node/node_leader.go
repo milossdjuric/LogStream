@@ -383,11 +383,10 @@ func (n *Node) listenForBroadcastJoins() {
 				fmt.Printf("[Leader %s] Client discovery from %s (type=%s, addr=%s)\n",
 					n.id[:8], senderID[:8], senderType, joinMsg.Address)
 
-				// CRITICAL: Use the address from the JOIN message, NOT the UDP source address.
-				// DiscoverLeader() creates a separate response listener socket on a known port
-				// and puts that address in joinMsg.Address. The UDP source (sender) is the
-				// broadcast sender socket on a DIFFERENT port - responses sent there are lost.
-				responseAddr := joinMsg.Address
+				// Send JOIN_RESPONSE to the UDP source address (sender).
+				// The client uses the SAME socket for sending broadcasts and receiving responses,
+				// matching the proven broker-to-broker discovery pattern.
+				responseAddr := fmt.Sprintf("%s", sender)
 				err := n.broadcastListener.SendJoinResponse(
 					n.id,
 					n.address,
@@ -398,7 +397,7 @@ func (n *Node) listenForBroadcastJoins() {
 				if err != nil {
 					log.Printf("[Leader %s] Failed to send JOIN_RESPONSE to client: %v\n", n.id[:8], err)
 				} else {
-					fmt.Printf("[Leader %s] -> JOIN_RESPONSE to client %s at %s\n", n.id[:8], senderID[:8], sender)
+					fmt.Printf("[Leader %s] -> JOIN_RESPONSE to client %s at %s\n", n.id[:8], senderID[:8], responseAddr)
 				}
 				continue
 			}

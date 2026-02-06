@@ -430,8 +430,10 @@ func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
 
 // DiscoverLeader discovers the cluster leader via broadcast.
 // This is a simplified wrapper for clients (producers/consumers) that only need the leader address.
-// Broadcasts to ALL private network interfaces (not just the first one), matching how nodes discover.
-// This ensures cross-subnet discovery works (e.g., WSL2 to LAN, multi-NIC machines).
+// Uses the same single-socket pattern as broker discovery (DiscoverClusterWithRetry):
+// one socket per interface handles both sending the broadcast AND receiving the response.
+// The leader sends JOIN_RESPONSE to the UDP source address, which is the sender socket.
+// Tries each private network interface sequentially.
 // Returns the leader address on success, or error if discovery fails.
 func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	if config == nil {
@@ -447,128 +449,88 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		return "", fmt.Errorf("no suitable private network interface found")
 	}
 
-	// CRITICAL FIX: Create a listener socket on a DYNAMIC PORT for responses
-	// The OS assigns the port, and we include it in the JOIN message
-	// This ensures the leader knows exactly where to send the response
-	responseListener, err := createResponseListener(0) // Port 0 = let OS assign
-	if err != nil {
-		return "", fmt.Errorf("failed to create response listener: %w", err)
-	}
-	defer responseListener.Close()
+	fmt.Printf("[Discovery] Found %d private interface(s)\n", len(allIPs))
 
-	// Get the actual address the listener is bound to
-	localAddr := responseListener.GetLocalAddr().(*net.UDPAddr)
-	if localAddr == nil {
-		return "", fmt.Errorf("failed to get response listener address")
-	}
-	responseAddr := fmt.Sprintf("%s:%d", allIPs[0], localAddr.Port)
-
-	fmt.Printf("[Discovery] Response listener on %s\n", responseAddr)
-
-	// For each interface IP, calculate its broadcast address and create a sender socket
-	type InterfaceSender struct {
-		ip        string
-		bcastAddr string
-		sender    *BroadcastConnection
-	}
-
-	var interfaceSenders []InterfaceSender
-
+	// Try discovery on each interface sequentially
+	// For each interface: create a single socket, broadcast, and read response from the SAME socket
 	for _, ip := range allIPs {
 		bcastAddr, err := calculateBroadcastAddress(ip+":0", config.Port)
 		if err != nil {
-			fmt.Printf("[Discovery] Failed to calculate broadcast address for %s: %v\n", ip, err)
+			fmt.Printf("[Discovery] Failed to calculate broadcast for %s: %v\n", ip, err)
 			continue
 		}
 
-		// Create a sender socket bound to this specific interface IP
+		// Create a single socket bound to this interface for both sending AND receiving
+		// This matches the proven broker discovery pattern (DiscoverClusterWithRetry)
 		sender, err := createBoundBroadcastSender(ip)
 		if err != nil {
-			fmt.Printf("[Discovery] Failed to create sender for interface %s: %v\n", ip, err)
+			fmt.Printf("[Discovery] Failed to create socket for %s: %v\n", ip, err)
 			continue
 		}
 
-		interfaceSenders = append(interfaceSenders, InterfaceSender{
-			ip:        ip,
-			bcastAddr: bcastAddr,
-			sender:    sender,
-		})
-	}
+		sourceAddr := sender.GetLocalAddr().String()
+		fmt.Printf("[Discovery] Trying %s -> %s (socket: %s)\n", ip, bcastAddr, sourceAddr)
 
-	if len(interfaceSenders) == 0 {
-		return "", fmt.Errorf("failed to create broadcast senders for any interface")
-	}
+		// Circuit breaker: exponential backoff
+		currentDelay := config.RetryDelay
+		consecutiveFailures := 0
 
-	// Log what we're doing
-	fmt.Printf("[Discovery] Broadcasting from %d interface(s):\n", len(interfaceSenders))
-	for _, is := range interfaceSenders {
-		fmt.Printf("[Discovery]   - %s -> %s\n", is.ip, is.bcastAddr)
-	}
+		for attempt := 0; attempt < config.MaxRetries; attempt++ {
+			fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
 
-	// Close all senders when done
-	defer func() {
-		for _, is := range interfaceSenders {
-			is.sender.Close()
-		}
-	}()
-
-	// Use the first IP with the KNOWN response port
-	sourceAddr := responseAddr
-
-	// Circuit breaker: track current delay for exponential backoff
-	currentDelay := config.RetryDelay
-	consecutiveFailures := 0
-
-	for attempt := 0; attempt < config.MaxRetries; attempt++ {
-		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
-
-		// Send JOIN broadcast from each interface, including the response port
-		for _, is := range interfaceSenders {
-			if err := is.sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, is.bcastAddr); err != nil {
-				fmt.Printf("[Discovery] Broadcast from %s to %s failed: %v\n", is.ip, is.bcastAddr, err)
+			// Send JOIN broadcast
+			if err := sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, bcastAddr); err != nil {
+				fmt.Printf("[Discovery] Broadcast failed: %v\n", err)
+				continue
 			}
-		}
 
-		// Collect responses from the DEDICATED response listener
-		responses := collectJoinResponses(responseListener, config.Timeout, config.ResponseCollectTime)
+			// Collect responses from the SAME socket we sent from
+			// The leader sends JOIN_RESPONSE to the UDP source address (this socket)
+			responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
 
-		if len(responses) == 0 {
-			consecutiveFailures++
-			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
+			if len(responses) == 0 {
+				consecutiveFailures++
+				fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
 
-			if attempt < config.MaxRetries-1 {
-				time.Sleep(currentDelay)
-				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
-				if currentDelay > config.MaxRetryDelay {
-					currentDelay = config.MaxRetryDelay
+				if attempt < config.MaxRetries-1 {
+					time.Sleep(currentDelay)
+					currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+					if currentDelay > config.MaxRetryDelay {
+						currentDelay = config.MaxRetryDelay
+					}
 				}
 				continue
 			}
-			return "", fmt.Errorf("cluster discovery failed: no response after %d attempts", config.MaxRetries)
-		}
 
-		consecutiveFailures = 0
+			consecutiveFailures = 0
 
-		// Check for split-brain
-		uniqueLeaders := getUniqueLeaders(responses)
-		if len(uniqueLeaders) > 1 {
-			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
-			if attempt < config.MaxRetries-1 {
-				time.Sleep(config.SplitBrainDelay)
-				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
-				if currentDelay > config.MaxRetryDelay {
-					currentDelay = config.MaxRetryDelay
+			// Check for split-brain
+			uniqueLeaders := getUniqueLeaders(responses)
+			if len(uniqueLeaders) > 1 {
+				fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
+				if attempt < config.MaxRetries-1 {
+					time.Sleep(config.SplitBrainDelay)
+					currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+					if currentDelay > config.MaxRetryDelay {
+						currentDelay = config.MaxRetryDelay
+					}
+					continue
 				}
-				continue
+				sender.Close()
+				return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
 			}
-			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
+
+			// Success
+			sender.Close()
+			fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
+			return responses[0].LeaderAddress, nil
 		}
 
-		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
-		return responses[0].LeaderAddress, nil
+		sender.Close()
+		fmt.Printf("[Discovery] No response on interface %s, trying next...\n", ip)
 	}
 
-	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
+	return "", fmt.Errorf("cluster discovery failed: no response after trying all interfaces")
 }
 
 // createBoundBroadcastSender creates a broadcast sender socket bound to a specific interface IP

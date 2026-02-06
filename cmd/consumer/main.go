@@ -15,6 +15,7 @@ func main() {
 	// CLI flags with env var fallback
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to consume from")
+	port := flag.Int("port", 8003, "Client TCP listener port (default: 8003)")
 	analytics := flag.Bool("analytics", true, "Request analytics/processing from broker")
 	windowSeconds := flag.Int("window", 0, "Analytics window in seconds (0 = broker default, typically 60)")
 	intervalMs := flag.Int("interval", 0, "Analytics update interval in ms (0 = broker default, typically 1000)")
@@ -36,6 +37,9 @@ func main() {
 		fmt.Println()
 		fmt.Println("  -topic string")
 		fmt.Println("        Topic name (default: logs)")
+		fmt.Println()
+		fmt.Println("  -port int")
+		fmt.Println("        Client TCP listener port (default: 8003)")
 		fmt.Println()
 		fmt.Println("  -analytics bool")
 		fmt.Println("        Request analytics/processing from broker (default: true)")
@@ -66,6 +70,7 @@ func main() {
 		EnableProcessing:       *analytics,
 		AnalyticsWindowSeconds: int32(*windowSeconds),
 		AnalyticsIntervalMs:    int32(*intervalMs),
+		ClientPort:             *port,
 	})
 
 	// Consumer ID prefix for all logs
@@ -82,6 +87,7 @@ func main() {
 		fmt.Println("Leader:    (auto-discover via broadcast)")
 	}
 	fmt.Printf("Topic:     %s\n", *topic)
+	fmt.Printf("Port:      %d\n", *port)
 	fmt.Printf("Analytics: %v\n", *analytics)
 	if *windowSeconds > 0 {
 		fmt.Printf("Window:    %ds\n", *windowSeconds)

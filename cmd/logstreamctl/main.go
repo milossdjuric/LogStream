@@ -405,6 +405,7 @@ func startProducer(args []string) {
 	name := ""
 	leader := ""
 	topic := "logs"
+	port := 0
 	rate := 0
 	interval := 0
 	count := 0
@@ -426,6 +427,11 @@ func startProducer(args []string) {
 		case "--topic", "-t":
 			if i+1 < len(args) {
 				topic = args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(args) {
+				port, _ = strconv.Atoi(args[i+1])
 				i++
 			}
 		case "--rate", "-r":
@@ -460,6 +466,7 @@ func startProducer(args []string) {
 			fmt.Println("  --name, -n        Process name (required)")
 			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
+			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
 			fmt.Println("  --rate, -r        Messages per second (default: 0 = interactive)")
 			fmt.Println("  --interval, -i    Interval between messages in ms (overrides --rate)")
 			fmt.Println("                    Example: --interval 2000 = 1 message every 2 seconds")
@@ -473,6 +480,17 @@ func startProducer(args []string) {
 	if name == "" {
 		fmt.Println("Error: --name is required")
 		os.Exit(1)
+	}
+
+	// Auto-assign port if not specified
+	if port == 0 {
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Warning: could not auto-detect IP for port assignment: %v\n", err)
+			detectedIP = "0.0.0.0"
+		}
+		port = findAvailablePort(detectedIP, 8001)
+		fmt.Printf("Auto-assigned port: %d\n", port)
 	}
 
 	// Check if name already exists
@@ -496,6 +514,7 @@ func startProducer(args []string) {
 	// Build command args
 	cmdArgs := []string{
 		"-topic", topic,
+		"-port", strconv.Itoa(port),
 	}
 	if leader != "" {
 		cmdArgs = append(cmdArgs, "-leader", leader)
@@ -555,6 +574,7 @@ func startProducer(args []string) {
 			Name:      name,
 			Type:      "producer",
 			PID:       cmd.Process.Pid,
+			Address:   fmt.Sprintf("port:%d", port),
 			Leader:    leader,
 			Topic:     topic,
 			StartedAt: time.Now(),
@@ -565,6 +585,7 @@ func startProducer(args []string) {
 		writePidFile(name, cmd.Process.Pid)
 
 		fmt.Printf("Started producer '%s' (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Printf("  Port:   %d\n", port)
 		fmt.Printf("  Leader: %s\n", leaderDisplay)
 		fmt.Printf("  Topic:  %s\n", topic)
 		fmt.Printf("  Rate:   %d msg/sec\n", rate)
@@ -580,6 +601,7 @@ func startProducer(args []string) {
 			Name:      name,
 			Type:      "producer",
 			PID:       0,
+			Address:   fmt.Sprintf("port:%d", port),
 			Leader:    leader,
 			Topic:     topic,
 			StartedAt: time.Now(),
@@ -587,6 +609,7 @@ func startProducer(args []string) {
 		}
 
 		fmt.Printf("Starting producer '%s' -> %s\n", name, leaderDisplay)
+		fmt.Printf("  Port:  %d\n", port)
 		fmt.Printf("  Topic: %s\n", topic)
 		fmt.Println("Press Ctrl+C to stop")
 		fmt.Println()
@@ -614,6 +637,7 @@ func startConsumer(args []string) {
 	name := ""
 	leader := ""
 	topic := "logs"
+	port := 0
 	analytics := true
 	windowSeconds := 0
 	intervalMs := 0
@@ -634,6 +658,11 @@ func startConsumer(args []string) {
 		case "--topic", "-t":
 			if i+1 < len(args) {
 				topic = args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(args) {
+				port, _ = strconv.Atoi(args[i+1])
 				i++
 			}
 		case "--analytics":
@@ -665,6 +694,7 @@ func startConsumer(args []string) {
 			fmt.Println("  --name, -n        Process name (required)")
 			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
+			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
 			fmt.Println("  --no-analytics    Disable analytics processing")
 			fmt.Println("  --window, -w      Analytics window in seconds (0 = broker default, typically 60)")
 			fmt.Println("  --interval        Analytics update interval in ms (0 = broker default, typically 1000)")
@@ -676,6 +706,17 @@ func startConsumer(args []string) {
 	if name == "" {
 		fmt.Println("Error: --name is required")
 		os.Exit(1)
+	}
+
+	// Auto-assign port if not specified
+	if port == 0 {
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Warning: could not auto-detect IP for port assignment: %v\n", err)
+			detectedIP = "0.0.0.0"
+		}
+		port = findAvailablePort(detectedIP, 8001)
+		fmt.Printf("Auto-assigned port: %d\n", port)
 	}
 
 	// Check if name already exists
@@ -699,6 +740,7 @@ func startConsumer(args []string) {
 	// Build command args
 	cmdArgs := []string{
 		"-topic", topic,
+		"-port", strconv.Itoa(port),
 	}
 	if leader != "" {
 		cmdArgs = append(cmdArgs, "-leader", leader)
@@ -748,6 +790,7 @@ func startConsumer(args []string) {
 			Name:      name,
 			Type:      "consumer",
 			PID:       cmd.Process.Pid,
+			Address:   fmt.Sprintf("port:%d", port),
 			Leader:    leader,
 			Topic:     topic,
 			StartedAt: time.Now(),
@@ -758,6 +801,7 @@ func startConsumer(args []string) {
 		writePidFile(name, cmd.Process.Pid)
 
 		fmt.Printf("Started consumer '%s' (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Printf("  Port:      %d\n", port)
 		fmt.Printf("  Leader:    %s\n", leaderDisplay)
 		fmt.Printf("  Topic:     %s\n", topic)
 		fmt.Printf("  Analytics: %v\n", analytics)
@@ -773,6 +817,7 @@ func startConsumer(args []string) {
 			Name:      name,
 			Type:      "consumer",
 			PID:       0,
+			Address:   fmt.Sprintf("port:%d", port),
 			Leader:    leader,
 			Topic:     topic,
 			StartedAt: time.Now(),
@@ -780,6 +825,7 @@ func startConsumer(args []string) {
 		}
 
 		fmt.Printf("Starting consumer '%s' -> %s\n", name, leaderDisplay)
+		fmt.Printf("  Port:      %d\n", port)
 		fmt.Printf("  Topic:     %s\n", topic)
 		fmt.Printf("  Analytics: %v\n", analytics)
 		fmt.Println("Press Ctrl+C to stop")

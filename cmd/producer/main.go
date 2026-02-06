@@ -18,6 +18,7 @@ func main() {
 	// Simple CLI flags with env var fallback
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to produce to")
+	port := flag.Int("port", 8002, "Client TCP listener port (default: 8002)")
 	rate := flag.Int("rate", 0, "Messages per second (0 = interactive mode)")
 	interval := flag.Int("interval", 0, "Interval between messages in milliseconds (overrides -rate)")
 	count := flag.Int("count", 0, "Number of messages to send (0 = unlimited)")
@@ -40,6 +41,9 @@ func main() {
 		fmt.Println()
 		fmt.Println("  -topic string")
 		fmt.Println("        Topic name (default: logs)")
+		fmt.Println()
+		fmt.Println("  -port int")
+		fmt.Println("        Client TCP listener port (default: 8002)")
 		fmt.Println()
 		fmt.Println("  -rate int")
 		fmt.Println("        Messages per second, 0 for interactive (default: 0)")
@@ -85,10 +89,11 @@ func main() {
 		fmt.Println("Leader:  (auto-discover via broadcast)")
 	}
 	fmt.Printf("Topic:   %s\n", *topic)
+	fmt.Printf("Port:    %d\n", *port)
 	fmt.Println()
 
 	// Create producer
-	producer := client.NewProducer(*topic, *leader)
+	producer := client.NewProducerWithPort(*topic, *leader, *port)
 
 	// Connect to cluster
 	fmt.Println("Connecting to cluster...")

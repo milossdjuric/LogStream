@@ -31,6 +31,7 @@ type Consumer struct {
 	enableProcessing       bool  // Whether to request data processing from broker
 	analyticsWindowSeconds int32 // 0 = use broker default
 	analyticsIntervalMs    int32 // 0 = use broker default
+	clientPort             int   // Fixed TCP listener port (0 = OS picks)
 	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
@@ -60,6 +61,7 @@ type ConsumerOptions struct {
 	EnableProcessing       bool
 	AnalyticsWindowSeconds int32 // 0 = use broker default
 	AnalyticsIntervalMs    int32 // 0 = use broker default
+	ClientPort             int   // Fixed TCP listener port (0 = OS picks)
 }
 
 // NewConsumerWithOptions creates a new consumer with options
@@ -77,6 +79,7 @@ func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) 
 	c.enableProcessing = opts.EnableProcessing
 	c.analyticsWindowSeconds = opts.AnalyticsWindowSeconds
 	c.analyticsIntervalMs = opts.AnalyticsIntervalMs
+	c.clientPort = opts.ClientPort
 	return c
 }
 
@@ -137,8 +140,15 @@ func (c *Consumer) Connect() error {
 		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
 	}
 
-	// Get local address for registration
-	localAddr := leaderConn.LocalAddr().String()
+	// Determine local address for registration
+	var localAddr string
+	localIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
+
+	if c.clientPort > 0 {
+		localAddr = fmt.Sprintf("%s:%d", localIP, c.clientPort)
+	} else {
+		localAddr = leaderConn.LocalAddr().String()
+	}
 
 	consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
 
@@ -244,18 +254,27 @@ func (c *Consumer) Connect() error {
 	c.localAddr = localAddr
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
-	localTCPAddr, err := net.ResolveTCPAddr("tcp", c.localAddr)
-	if err == nil {
-		c.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
+	if c.clientPort > 0 {
+		// Use fixed port for the listener
+		listenerAddr := fmt.Sprintf("%s:%d", localIP, c.clientPort)
+		c.tcpListener, err = net.Listen("tcp", listenerAddr)
 		if err != nil {
-			// Try with any available port if the original port is in use
-			c.tcpListener, err = net.Listen("tcp", ":0")
+			fmt.Printf("[Consumer %s] Warning: failed to start TCP listener on %s: %v\n", c.id[:8], listenerAddr, err)
 		}
+	} else {
+		localTCPAddr, err := net.ResolveTCPAddr("tcp", c.localAddr)
 		if err == nil {
-			fmt.Printf("[Consumer %s] TCP listener started on %s\n", c.id[:8], c.tcpListener.Addr().String())
-			c.wg.Add(1)
-			go c.listenForMessages()
+			c.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
+			if err != nil {
+				// Try with any available port if the original port is in use
+				c.tcpListener, err = net.Listen("tcp", ":0")
+			}
 		}
+	}
+	if c.tcpListener != nil {
+		fmt.Printf("[Consumer %s] TCP listener started on %s\n", c.id[:8], c.tcpListener.Addr().String())
+		c.wg.Add(1)
+		go c.listenForMessages()
 	}
 
 	// Start reconnection handler
@@ -420,7 +439,13 @@ func (c *Consumer) reconnectToCluster() error {
 			continue
 		}
 
-		localAddr := leaderConn.LocalAddr().String()
+		var localAddr string
+		if c.clientPort > 0 {
+			reconnLocalIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
+			localAddr = fmt.Sprintf("%s:%d", reconnLocalIP, c.clientPort)
+		} else {
+			localAddr = leaderConn.LocalAddr().String()
+		}
 		consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
 
 		fmt.Printf("[Consumer %s] -> CONSUME to new leader (topic: %s)\n", c.id[:8], c.topic)
