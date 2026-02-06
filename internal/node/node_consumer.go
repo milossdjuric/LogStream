@@ -37,8 +37,8 @@ func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 	analyticsWindowSeconds := msg.AnalyticsWindowSeconds
 	analyticsIntervalMs := msg.AnalyticsIntervalMs
 
-	fmt.Printf("[Broker %s] <- SUBSCRIBE from %s (topic: %s, processing: %v, window: %ds, interval: %dms)\n",
-		n.id[:8], consumerID[:8], topic, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
+	fmt.Printf("[Broker %s] <- SUBSCRIBE from consumer %s @ %s (topic: %s, processing: %v, window: %ds, interval: %dms)\n",
+		n.id[:8], consumerID[:8], address, topic, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
 
 	// Check if we're the assigned broker for this topic
 	stream, exists := n.clusterState.GetStreamAssignment(topic)
@@ -123,7 +123,7 @@ func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 		return
 	}
 
-	fmt.Printf("[Broker %s] -> SUBSCRIBE_ACK to %s (topic: %s)\n", n.id[:8], consumerID[:8], topic)
+	fmt.Printf("[Broker %s] -> SUBSCRIBE_ACK to consumer %s @ %s (topic: %s)\n", n.id[:8], consumerID[:8], address, topic)
 
 	// Start streaming results with optional processing
 	go n.streamResultsToConsumerWithProcessing(consumerID, topic, conn, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
@@ -435,12 +435,13 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 	if enableProcessing {
 		processingStr = "processed"
 	}
-	fmt.Printf("[Broker %s] Started %s result stream to consumer %s (topic: %s)\n",
-		n.id[:8], processingStr, consumerID[:8], topic)
+	consumerAddr := conn.RemoteAddr().String()
+	fmt.Printf("[Broker %s] Started %s result stream to consumer %s @ %s (topic: %s)\n",
+		n.id[:8], processingStr, consumerID[:8], consumerAddr, topic)
 
 	defer func() {
 		conn.Close()
-		fmt.Printf("[Broker %s] Closed connection to consumer %s\n", n.id[:8], consumerID[:8])
+		fmt.Printf("[Broker %s] Closed connection to consumer %s @ %s\n", n.id[:8], consumerID[:8], consumerAddr)
 	}()
 
 	// Apply defaults for zero values with minimums

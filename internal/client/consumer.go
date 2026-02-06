@@ -546,6 +546,11 @@ func (c *Consumer) Reconnect(newBrokerAddr string) error {
 	return nil
 }
 
+// ID returns the consumer's unique identifier
+func (c *Consumer) ID() string {
+	return c.id
+}
+
 // GetBrokerAddress returns the current broker address
 func (c *Consumer) GetBrokerAddress() string {
 	c.brokerAddrMu.RLock()

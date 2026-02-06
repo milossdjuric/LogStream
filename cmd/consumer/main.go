@@ -61,10 +61,21 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Create consumer
+	consumer := client.NewConsumerWithFullOptions(*topic, *leader, client.ConsumerOptions{
+		EnableProcessing:       *analytics,
+		AnalyticsWindowSeconds: int32(*windowSeconds),
+		AnalyticsIntervalMs:    int32(*intervalMs),
+	})
+
+	// Consumer ID prefix for all logs
+	cid := consumer.ID()[:8]
+
 	fmt.Println("===========================================")
 	fmt.Println("       LogStream Consumer")
 	fmt.Println("===========================================")
 	fmt.Println()
+	fmt.Printf("ID:        %s\n", cid)
 	if *leader != "" {
 		fmt.Printf("Leader:    %s\n", *leader)
 	} else {
@@ -80,21 +91,14 @@ func main() {
 	}
 	fmt.Println()
 
-	// Create consumer
-	consumer := client.NewConsumerWithFullOptions(*topic, *leader, client.ConsumerOptions{
-		EnableProcessing:       *analytics,
-		AnalyticsWindowSeconds: int32(*windowSeconds),
-		AnalyticsIntervalMs:    int32(*intervalMs),
-	})
-
 	// Connect to cluster
-	fmt.Println("Connecting to cluster...")
+	fmt.Printf("[Consumer %s] Connecting to cluster...\n", cid)
 	if err := consumer.Connect(); err != nil {
-		log.Fatalf("Failed to connect: %v\n", err)
+		log.Fatalf("[Consumer %s] Failed to connect: %v\n", cid, err)
 	}
-	fmt.Println("[OK] Connected successfully")
+	fmt.Printf("[Consumer %s] Connected successfully\n", cid)
 	fmt.Println()
-	fmt.Println("Receiving messages (Press Ctrl+C to stop)...")
+	fmt.Printf("[Consumer %s] Receiving messages (Press Ctrl+C to stop)...\n", cid)
 	fmt.Println()
 
 	// Setup signal handling
@@ -108,22 +112,22 @@ func main() {
 		case result := <-consumer.Results():
 			received++
 			fmt.Printf("-----------------------------------------\n")
-			fmt.Printf("Message #%d\n", received)
-			fmt.Printf("Topic:  %s\n", result.Topic)
-			fmt.Printf("Offset: %d\n", result.Offset)
-			
+			fmt.Printf("[Consumer %s] Message #%d\n", cid, received)
+			fmt.Printf("  Topic:  %s\n", result.Topic)
+			fmt.Printf("  Offset: %d\n", result.Offset)
+
 			if len(result.Data) > 0 {
-				fmt.Printf("Data:   %s\n", string(result.Data))
+				fmt.Printf("  Data:   %s\n", string(result.Data))
 			}
 
 		case err := <-consumer.Errors():
-			log.Printf("Error: %v\n", err)
+			log.Printf("[Consumer %s] Error: %v\n", cid, err)
 
 		case <-sigChan:
-			fmt.Printf("\n\n[OK] Received %d messages total\n", received)
-			fmt.Println("\nDisconnecting...")
+			fmt.Printf("\n\n[Consumer %s] Received %d messages total\n", cid, received)
+			fmt.Printf("[Consumer %s] Disconnecting...\n", cid)
 			consumer.Close()
-			fmt.Println("[OK] Disconnected")
+			fmt.Printf("[Consumer %s] Disconnected\n", cid)
 			return
 		}
 	}
