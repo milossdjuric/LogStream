@@ -447,11 +447,29 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		return "", fmt.Errorf("no suitable private network interface found")
 	}
 
-	// For each interface IP, calculate its broadcast address and create a sender socket bound to that IP
+	// CRITICAL FIX: Create a listener socket on a DYNAMIC PORT for responses
+	// The OS assigns the port, and we include it in the JOIN message
+	// This ensures the leader knows exactly where to send the response
+	responseListener, err := createResponseListener(0) // Port 0 = let OS assign
+	if err != nil {
+		return "", fmt.Errorf("failed to create response listener: %w", err)
+	}
+	defer responseListener.Close()
+
+	// Get the actual address the listener is bound to
+	localAddr := responseListener.GetLocalAddr().(*net.UDPAddr)
+	if localAddr == nil {
+		return "", fmt.Errorf("failed to get response listener address")
+	}
+	responseAddr := fmt.Sprintf("%s:%d", allIPs[0], localAddr.Port)
+
+	fmt.Printf("[Discovery] Response listener on %s\n", responseAddr)
+
+	// For each interface IP, calculate its broadcast address and create a sender socket
 	type InterfaceSender struct {
-		ip          string
-		bcastAddr   string
-		sender      *BroadcastConnection
+		ip        string
+		bcastAddr string
+		sender    *BroadcastConnection
 	}
 
 	var interfaceSenders []InterfaceSender
@@ -464,7 +482,6 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		}
 
 		// Create a sender socket bound to this specific interface IP
-		// This ensures responses on this subnet come back to a socket listening on this IP
 		sender, err := createBoundBroadcastSender(ip)
 		if err != nil {
 			fmt.Printf("[Discovery] Failed to create sender for interface %s: %v\n", ip, err)
@@ -483,7 +500,7 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	}
 
 	// Log what we're doing
-	fmt.Printf("[Discovery] Broadcasting to %d interface(s):\n", len(interfaceSenders))
+	fmt.Printf("[Discovery] Broadcasting from %d interface(s):\n", len(interfaceSenders))
 	for _, is := range interfaceSenders {
 		fmt.Printf("[Discovery]   - %s -> %s\n", is.ip, is.bcastAddr)
 	}
@@ -495,8 +512,8 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		}
 	}()
 
-	// Use the first IP as the "source" address in the JOIN message
-	sourceAddr := allIPs[0] + ":0"
+	// Use the first IP with the KNOWN response port
+	sourceAddr := responseAddr
 
 	// Circuit breaker: track current delay for exponential backoff
 	currentDelay := config.RetryDelay
@@ -505,22 +522,17 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
 		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
 
-		// Send JOIN broadcast from each interface
+		// Send JOIN broadcast from each interface, including the response port
 		for _, is := range interfaceSenders {
 			if err := is.sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, is.bcastAddr); err != nil {
 				fmt.Printf("[Discovery] Broadcast from %s to %s failed: %v\n", is.ip, is.bcastAddr, err)
 			}
 		}
 
-		// Collect responses from ALL senders
-		// We need to collect from all senders and merge the responses
-		var allResponses []*JoinResponseMsg
-		for _, is := range interfaceSenders {
-			responses := collectJoinResponses(is.sender, config.Timeout, config.ResponseCollectTime)
-			allResponses = append(allResponses, responses...)
-		}
+		// Collect responses from the DEDICATED response listener
+		responses := collectJoinResponses(responseListener, config.Timeout, config.ResponseCollectTime)
 
-		if len(allResponses) == 0 {
+		if len(responses) == 0 {
 			consecutiveFailures++
 			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
 
@@ -538,7 +550,7 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		consecutiveFailures = 0
 
 		// Check for split-brain
-		uniqueLeaders := getUniqueLeaders(allResponses)
+		uniqueLeaders := getUniqueLeaders(responses)
 		if len(uniqueLeaders) > 1 {
 			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
 			if attempt < config.MaxRetries-1 {
@@ -551,6 +563,13 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			}
 			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
 		}
+
+		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
+		return responses[0].LeaderAddress, nil
+	}
+
+	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
+}
 
 		fmt.Printf("[Discovery] Found cluster with leader at %s\n", allResponses[0].LeaderAddress)
 		return allResponses[0].LeaderAddress, nil
@@ -597,6 +616,51 @@ func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error
 		conn.Close()
 		return nil, fmt.Errorf("failed to set write buffer: %w", err)
 	}
+	if err := conn.SetReadBuffer(2048 * 1024); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set read buffer: %w", err)
+	}
+
+	return &BroadcastConnection{
+		conn: conn,
+	}, nil
+}
+
+// createResponseListener creates a UDP listener on a KNOWN port for receiving JOIN_RESPONSE messages
+// This ensures the producer has a predictable address to include in the JOIN message
+func createResponseListener(port int) (*BroadcastConnection, error) {
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				// Enable SO_REUSEADDR for immediate port reuse
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Listen on all interfaces on the specified port
+	listenAddr := &net.UDPAddr{
+		IP:   net.IPv4zero,
+		Port: port,
+	}
+
+	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on port %d: %w", port, err)
+	}
+
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("failed to convert to UDPConn")
+	}
+
+	// Setup read buffer for receiving responses
 	if err := conn.SetReadBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set read buffer: %w", err)
