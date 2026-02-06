@@ -224,7 +224,7 @@ func TestProtocol_ReplicateMessage(t *testing.T) {
 }
 
 func TestProtocol_SubscribeMessage(t *testing.T) {
-	msg := protocol.NewSubscribeMsg("consumer-444", "test-topic", "consumer-444", "192.168.1.30:9002", true)
+	msg := protocol.NewSubscribeMsg("consumer-444", "test-topic", "consumer-444", "192.168.1.30:9002", true, 30, 2000)
 
 	// Verify header
 	header := msg.GetHeader()
@@ -242,11 +242,45 @@ func TestProtocol_SubscribeMessage(t *testing.T) {
 	if !msg.EnableProcessing {
 		t.Error("Expected EnableProcessing to be true")
 	}
+	if msg.AnalyticsWindowSeconds != 30 {
+		t.Errorf("Expected AnalyticsWindowSeconds 30, got %d", msg.AnalyticsWindowSeconds)
+	}
+	if msg.AnalyticsIntervalMs != 2000 {
+		t.Errorf("Expected AnalyticsIntervalMs 2000, got %d", msg.AnalyticsIntervalMs)
+	}
 
-	// Test with processing disabled
-	msg2 := protocol.NewSubscribeMsg("consumer-555", "topic2", "consumer-555", "192.168.1.31:9002", false)
+	// Test with processing disabled and zero analytics (broker defaults)
+	msg2 := protocol.NewSubscribeMsg("consumer-555", "topic2", "consumer-555", "192.168.1.31:9002", false, 0, 0)
 	if msg2.EnableProcessing {
 		t.Error("Expected EnableProcessing to be false")
+	}
+	if msg2.AnalyticsWindowSeconds != 0 {
+		t.Errorf("Expected AnalyticsWindowSeconds 0, got %d", msg2.AnalyticsWindowSeconds)
+	}
+	if msg2.AnalyticsIntervalMs != 0 {
+		t.Errorf("Expected AnalyticsIntervalMs 0, got %d", msg2.AnalyticsIntervalMs)
+	}
+
+	// Test serialization roundtrip preserves analytics fields
+	data, err := msg.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	msg3 := &protocol.SubscribeMsg{SubscribeMessage: &protocol.SubscribeMessage{}}
+	err = msg3.Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if msg3.AnalyticsWindowSeconds != 30 {
+		t.Errorf("AnalyticsWindowSeconds mismatch after roundtrip: got %d", msg3.AnalyticsWindowSeconds)
+	}
+	if msg3.AnalyticsIntervalMs != 2000 {
+		t.Errorf("AnalyticsIntervalMs mismatch after roundtrip: got %d", msg3.AnalyticsIntervalMs)
+	}
+	if msg3.Topic != "test-topic" {
+		t.Errorf("Topic mismatch after roundtrip: got %s", msg3.Topic)
 	}
 }
 

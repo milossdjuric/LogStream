@@ -27,8 +27,10 @@ type Consumer struct {
 	stopSignal       chan struct{}
 	stopListener     chan struct{}
 	reconnectSignal  chan string // Signal to reconnect to a new broker
-	enableProcessing bool        // Whether to request data processing from broker
-	wg               sync.WaitGroup // Synchronize goroutine lifecycle
+	enableProcessing       bool  // Whether to request data processing from broker
+	analyticsWindowSeconds int32 // 0 = use broker default
+	analyticsIntervalMs    int32 // 0 = use broker default
+	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
 // NewConsumer creates a new consumer
@@ -52,11 +54,28 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 	}
 }
 
+// ConsumerOptions holds all configurable consumer options
+type ConsumerOptions struct {
+	EnableProcessing       bool
+	AnalyticsWindowSeconds int32 // 0 = use broker default
+	AnalyticsIntervalMs    int32 // 0 = use broker default
+}
+
 // NewConsumerWithOptions creates a new consumer with options
 // If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewConsumerWithOptions(topic, leaderAddr string, enableProcessing bool) *Consumer {
+	return NewConsumerWithFullOptions(topic, leaderAddr, ConsumerOptions{
+		EnableProcessing: enableProcessing,
+	})
+}
+
+// NewConsumerWithFullOptions creates a new consumer with full options
+// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
+func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) *Consumer {
 	c := NewConsumer(topic, leaderAddr)
-	c.enableProcessing = enableProcessing
+	c.enableProcessing = opts.EnableProcessing
+	c.analyticsWindowSeconds = opts.AnalyticsWindowSeconds
+	c.analyticsIntervalMs = opts.AnalyticsIntervalMs
 	return c
 }
 
@@ -192,7 +211,7 @@ func (c *Consumer) Connect() error {
 	localAddr = brokerConn.LocalAddr().String()
 
 	// Send SUBSCRIBE request to broker
-	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing)
+	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing, c.analyticsWindowSeconds, c.analyticsIntervalMs)
 
 	fmt.Printf("[Consumer %s] -> SUBSCRIBE (topic: %s, processing: %v)\n", c.id[:8], c.topic, c.enableProcessing)
 	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
@@ -477,7 +496,7 @@ func (c *Consumer) Reconnect(newBrokerAddr string) error {
 	localAddr := brokerConn.LocalAddr().String()
 
 	// Send SUBSCRIBE request to new broker
-	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing)
+	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing, c.analyticsWindowSeconds, c.analyticsIntervalMs)
 
 	fmt.Printf("[Consumer %s] -> SUBSCRIBE to new broker (topic: %s)\n", c.id[:8], c.topic)
 	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {

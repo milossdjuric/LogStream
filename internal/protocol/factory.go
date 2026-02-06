@@ -48,14 +48,16 @@ func NewConsumeMsg(senderID string, topic string, consumerAddr string, seqNum in
 }
 
 // TCP unicast from Consumer to assigned Broker (for stream subscription after registration)
-func NewSubscribeMsg(senderID, topic, consumerID, consumerAddr string, enableProcessing bool) *SubscribeMsg {
+func NewSubscribeMsg(senderID, topic, consumerID, consumerAddr string, enableProcessing bool, analyticsWindowSeconds, analyticsIntervalMs int32) *SubscribeMsg {
 	return &SubscribeMsg{
 		SubscribeMessage: &SubscribeMessage{
-			Header:           newHeader(MessageType_SUBSCRIBE, senderID, NodeType_CONSUMER, 0),
-			Topic:            topic,
-			ConsumerId:       consumerID,
-			ConsumerAddress:  consumerAddr,
-			EnableProcessing: enableProcessing,
+			Header:                 newHeader(MessageType_SUBSCRIBE, senderID, NodeType_CONSUMER, 0),
+			Topic:                  topic,
+			ConsumerId:             consumerID,
+			ConsumerAddress:        consumerAddr,
+			EnableProcessing:       enableProcessing,
+			AnalyticsWindowSeconds: analyticsWindowSeconds,
+			AnalyticsIntervalMs:    analyticsIntervalMs,
 		},
 	}
 }

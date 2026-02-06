@@ -196,6 +196,14 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 	fmt.Printf("[%s] Stored data seq=%d at offset=%d for topic: %s (FIFO delivered)\n",
 		n.id[:8], seqNum, offset, topic)
 
+	// Compact log if max records configured
+	if n.config.MaxRecordsPerTopic > 0 {
+		if removed := topicLog.Compact(n.config.MaxRecordsPerTopic); removed > 0 {
+			fmt.Printf("[%s] Compacted topic %s: removed %d old records (keeping %d)\n",
+				n.id[:8], topic, removed, n.config.MaxRecordsPerTopic)
+		}
+	}
+
 	// Check subscriber count for logging
 	subscribers := n.clusterState.GetConsumerSubscribers(topic)
 	if len(subscribers) == 0 {

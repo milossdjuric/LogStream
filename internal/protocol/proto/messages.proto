@@ -78,6 +78,8 @@ message SubscribeMessage {
   string consumer_id = 3;          // Consumer ID (registered with leader)
   string consumer_address = 4;     // Consumer address for verification
   bool enable_processing = 5;      // Whether to apply data processing (aggregation, etc.)
+  int32 analytics_window_seconds = 6;  // 0 = use broker default (60s)
+  int32 analytics_interval_ms = 7;     // 0 = use broker default (1000ms)
 }
 
 // TCP unicast for Leader to Producer/Consumer

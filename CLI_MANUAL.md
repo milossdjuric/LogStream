@@ -347,6 +347,8 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 | Auto-discover | (default) | Discovers cluster leader via UDP broadcast |
 | With analytics | (default) | Receive processed data with stats |
 | Raw data | `--no-analytics` | Receive raw data only |
+| Custom window | `--window N` | Analytics window in seconds (0 = broker default) |
+| Custom interval | `--interval N` | Analytics update interval in ms (0 = broker default) |
 | Background | `--background` | Run as daemon |
 
 ### Consumer Examples (Copy-Paste Ready)
@@ -371,16 +373,21 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 ./logstreamctl start consumer --name cons1 --topic logs --background
 ```
 
+**Custom analytics window (30s) and update interval (2s):**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs --window 30 --interval 2000
+```
+
 **Background without analytics:**
 ```bash
 ./logstreamctl start consumer --name cons1 --topic logs --no-analytics --background
 ```
 
-**Different topics:**
+**Different topics with different analytics settings:**
 ```bash
-./logstreamctl start consumer --name cons1 --topic sensors
-./logstreamctl start consumer --name cons2 --topic metrics
-./logstreamctl start consumer --name cons3 --topic events
+./logstreamctl start consumer --name cons-sensors --topic sensors --window 30 --interval 500
+./logstreamctl start consumer --name cons-metrics --topic metrics --window 120 --interval 5000
+./logstreamctl start consumer --name cons-events --topic events
 ```
 
 ### Consumer Options Reference
@@ -391,6 +398,8 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 | `--leader` | `-l` | UDP broadcast | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
 | `--topic` | `-t` | logs | Topic name |
 | `--no-analytics` | | false | Disable analytics processing |
+| `--window` | `-w` | 0 (broker default) | Analytics window in seconds |
+| `--interval` | | 0 (broker default) | Analytics update interval in ms |
 | `--background` | `-bg` | false | Run as daemon |
 
 ---
@@ -517,8 +526,9 @@ cons1   consumer  running  12347   172.28.226.255:8001  logs    5m25s
 ./logstreamctl start producer --name prod-metrics --topic metrics --rate 10
 ./logstreamctl start producer --name prod-events --topic events --rate 2
 
-./logstreamctl start consumer --name cons-sensors --topic sensors
-./logstreamctl start consumer --name cons-metrics --topic metrics
+# Each consumer can have its own analytics window and update interval
+./logstreamctl start consumer --name cons-sensors --topic sensors --window 30 --interval 500
+./logstreamctl start consumer --name cons-metrics --topic metrics --window 120 --interval 5000
 ./logstreamctl start consumer --name cons-events --topic events
 ```
 
@@ -596,6 +606,9 @@ LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./producer
 
 ```bash
 LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./consumer
+
+# With custom analytics window and interval
+./consumer -topic logs -window 30 -interval 2000
 ```
 
 ---

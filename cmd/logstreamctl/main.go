@@ -178,6 +178,7 @@ func startBroker(args []string) {
 	multicast := "239.0.0.1:9999"
 	broadcastPort := "8888"
 	leaderAddress := "" // Optional: bypass broadcast discovery
+	maxRecords := 0
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -207,6 +208,11 @@ func startBroker(args []string) {
 				leaderAddress = args[i+1]
 				i++
 			}
+		case "--max-records":
+			if i+1 < len(args) {
+				maxRecords, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -223,6 +229,7 @@ func startBroker(args []string) {
 			fmt.Println("  --broadcast-port, -b Broadcast port (default: 8888)")
 			fmt.Println("  --leader, -l         Explicit leader address (bypasses broadcast discovery)")
 			fmt.Println("                       Use when broadcast doesn't work (e.g., WiFi AP isolation)")
+			fmt.Println("  --max-records        Max records per topic log (default: 10000, 0 = unlimited)")
 			fmt.Println("  --background, -bg    Run in background (default: foreground)")
 			os.Exit(0)
 		}
@@ -298,6 +305,9 @@ func startBroker(args []string) {
 	if leaderAddress != "" {
 		env = append(env, fmt.Sprintf("LEADER_ADDRESS=%s", leaderAddress))
 		fmt.Printf("Using explicit leader: %s (broadcast discovery bypassed)\n", leaderAddress)
+	}
+	if maxRecords > 0 {
+		env = append(env, fmt.Sprintf("MAX_RECORDS_PER_TOPIC=%d", maxRecords))
 	}
 
 	if background {
@@ -605,6 +615,8 @@ func startConsumer(args []string) {
 	leader := ""
 	topic := "logs"
 	analytics := true
+	windowSeconds := 0
+	intervalMs := 0
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -631,6 +643,16 @@ func startConsumer(args []string) {
 			}
 		case "--no-analytics":
 			analytics = false
+		case "--window", "-w":
+			if i+1 < len(args) {
+				windowSeconds, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--interval":
+			if i+1 < len(args) {
+				intervalMs, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -644,6 +666,8 @@ func startConsumer(args []string) {
 			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
 			fmt.Println("  --no-analytics    Disable analytics processing")
+			fmt.Println("  --window, -w      Analytics window in seconds (0 = broker default, typically 60)")
+			fmt.Println("  --interval        Analytics update interval in ms (0 = broker default, typically 1000)")
 			fmt.Println("  --background, -bg Run in background")
 			os.Exit(0)
 		}
@@ -681,6 +705,12 @@ func startConsumer(args []string) {
 	}
 	if !analytics {
 		cmdArgs = append(cmdArgs, "-analytics=false")
+	}
+	if windowSeconds > 0 {
+		cmdArgs = append(cmdArgs, "-window", strconv.Itoa(windowSeconds))
+	}
+	if intervalMs > 0 {
+		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(intervalMs))
 	}
 
 	// Display leader info

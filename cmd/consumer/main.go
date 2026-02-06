@@ -16,6 +16,8 @@ func main() {
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to consume from")
 	analytics := flag.Bool("analytics", true, "Request analytics/processing from broker")
+	windowSeconds := flag.Int("window", 0, "Analytics window in seconds (0 = broker default, typically 60)")
+	intervalMs := flag.Int("interval", 0, "Analytics update interval in ms (0 = broker default, typically 1000)")
 	help := flag.Bool("help", false, "Show help")
 
 	flag.Parse()
@@ -38,6 +40,12 @@ func main() {
 		fmt.Println("  -analytics bool")
 		fmt.Println("        Request analytics/processing from broker (default: true)")
 		fmt.Println()
+		fmt.Println("  -window int")
+		fmt.Println("        Analytics window in seconds (0 = broker default, typically 60)")
+		fmt.Println()
+		fmt.Println("  -interval int")
+		fmt.Println("        Analytics update interval in ms (0 = broker default, typically 1000)")
+		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  # Auto-discover cluster, consume with analytics")
 		fmt.Println("  ./consumer -topic logs")
@@ -47,6 +55,9 @@ func main() {
 		fmt.Println()
 		fmt.Println("  # Consume raw data only (no analytics)")
 		fmt.Println("  ./consumer -topic logs -analytics=false")
+		fmt.Println()
+		fmt.Println("  # Custom analytics window (30s) and update interval (2s)")
+		fmt.Println("  ./consumer -topic logs -window 30 -interval 2000")
 		os.Exit(0)
 	}
 
@@ -61,10 +72,20 @@ func main() {
 	}
 	fmt.Printf("Topic:     %s\n", *topic)
 	fmt.Printf("Analytics: %v\n", *analytics)
+	if *windowSeconds > 0 {
+		fmt.Printf("Window:    %ds\n", *windowSeconds)
+	}
+	if *intervalMs > 0 {
+		fmt.Printf("Interval:  %dms\n", *intervalMs)
+	}
 	fmt.Println()
 
 	// Create consumer
-	consumer := client.NewConsumerWithOptions(*topic, *leader, *analytics)
+	consumer := client.NewConsumerWithFullOptions(*topic, *leader, client.ConsumerOptions{
+		EnableProcessing:       *analytics,
+		AnalyticsWindowSeconds: int32(*windowSeconds),
+		AnalyticsIntervalMs:    int32(*intervalMs),
+	})
 
 	// Connect to cluster
 	fmt.Println("Connecting to cluster...")

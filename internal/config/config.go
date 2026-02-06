@@ -20,6 +20,9 @@ type Config struct {
 
 	// Analytics configuration
 	AnalyticsWindowSeconds int // Window size in seconds for CountInWindow analytics (default: 60)
+
+	// Storage configuration
+	MaxRecordsPerTopic int // Max records to keep per topic log (0 = unlimited, default: 10000)
 }
 
 func LoadConfig() (*Config, error) {
@@ -29,6 +32,7 @@ func LoadConfig() (*Config, error) {
 		BroadcastPort:          getEnvInt("BROADCAST_PORT", 8888),
 		LeaderAddress:          getEnv("LEADER_ADDRESS", ""), // Optional: bypass broadcast discovery
 		AnalyticsWindowSeconds: getEnvInt("ANALYTICS_WINDOW_SECONDS", 60),
+		MaxRecordsPerTopic:    getEnvInt("MAX_RECORDS_PER_TOPIC", 10000),
 	}
 
 	if cfg.NodeAddress == "" {
@@ -141,6 +145,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ANALYTICS_WINDOW_SECONDS must be positive (got %d)", c.AnalyticsWindowSeconds)
 	}
 
+	if c.MaxRecordsPerTopic < 0 {
+		return fmt.Errorf("MAX_RECORDS_PER_TOPIC must be non-negative (got %d)", c.MaxRecordsPerTopic)
+	}
+
 	return nil
 }
 
@@ -156,6 +164,11 @@ func (c *Config) Print() {
 		fmt.Printf("Leader Address:      (auto-discover via broadcast)\n")
 	}
 	fmt.Printf("Analytics Window:    %ds\n", c.AnalyticsWindowSeconds)
+	if c.MaxRecordsPerTopic > 0 {
+		fmt.Printf("Max Records/Topic:   %d\n", c.MaxRecordsPerTopic)
+	} else {
+		fmt.Printf("Max Records/Topic:   unlimited\n")
+	}
 	fmt.Println("================================")
 }
 

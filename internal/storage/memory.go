@@ -201,6 +201,26 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 	return nil
 }
 
+// Compact removes the oldest records if the log exceeds maxRecords.
+// Returns the number of records removed.
+func (m *MemoryLog) Compact(maxRecords int) int {
+	if maxRecords <= 0 {
+		return 0
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.records) <= maxRecords {
+		return 0
+	}
+
+	removeCount := len(m.records) - maxRecords
+	m.records = m.records[removeCount:]
+	m.baseOffset += uint64(removeCount)
+	return removeCount
+}
+
 // CleanupOldLogs removes records older than the retention duration.
 func (m *MemoryLog) CleanupOldLogs(retention time.Duration) error {
 	m.mu.Lock()

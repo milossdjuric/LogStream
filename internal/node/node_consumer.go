@@ -34,9 +34,11 @@ func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 	topic := msg.Topic
 	address := msg.ConsumerAddress
 	enableProcessing := msg.EnableProcessing
+	analyticsWindowSeconds := msg.AnalyticsWindowSeconds
+	analyticsIntervalMs := msg.AnalyticsIntervalMs
 
-	fmt.Printf("[Broker %s] <- SUBSCRIBE from %s (topic: %s, processing: %v)\n",
-		n.id[:8], consumerID[:8], topic, enableProcessing)
+	fmt.Printf("[Broker %s] <- SUBSCRIBE from %s (topic: %s, processing: %v, window: %ds, interval: %dms)\n",
+		n.id[:8], consumerID[:8], topic, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
 
 	// Check if we're the assigned broker for this topic
 	stream, exists := n.clusterState.GetStreamAssignment(topic)
@@ -124,7 +126,7 @@ func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 	fmt.Printf("[Broker %s] -> SUBSCRIBE_ACK to %s (topic: %s)\n", n.id[:8], consumerID[:8], topic)
 
 	// Start streaming results with optional processing
-	go n.streamResultsToConsumerWithProcessing(consumerID, topic, conn, enableProcessing)
+	go n.streamResultsToConsumerWithProcessing(consumerID, topic, conn, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
 }
 
 // safeIDStr safely formats a node ID string for logging (defined in node_handlers.go)
@@ -428,7 +430,7 @@ type ProcessedResult struct {
 }
 
 // streamResultsToConsumerWithProcessing streams data with optional processing
-func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, conn net.Conn, enableProcessing bool) {
+func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, conn net.Conn, enableProcessing bool, analyticsWindowSeconds, analyticsIntervalMs int32) {
 	processingStr := "raw"
 	if enableProcessing {
 		processingStr = "processed"
@@ -441,6 +443,23 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 		fmt.Printf("[Broker %s] Closed connection to consumer %s\n", n.id[:8], consumerID[:8])
 	}()
 
+	// Apply defaults for zero values with minimums
+	effectiveIntervalMs := int(analyticsIntervalMs)
+	if effectiveIntervalMs <= 0 {
+		effectiveIntervalMs = 1000 // default 1000ms
+	} else if effectiveIntervalMs < 100 {
+		effectiveIntervalMs = 100 // minimum 100ms
+	}
+
+	effectiveWindowSeconds := int(analyticsWindowSeconds)
+	if effectiveWindowSeconds <= 0 {
+		effectiveWindowSeconds = n.config.AnalyticsWindowSeconds // broker default
+	} else if effectiveWindowSeconds < 1 {
+		effectiveWindowSeconds = 1 // minimum 1s
+	}
+
+	effectiveWindow := time.Duration(effectiveWindowSeconds) * time.Second
+
 	// First, send any existing data (catch-up)
 	if enableProcessing {
 		n.sendCatchUpDataProcessed(consumerID, topic, conn)
@@ -452,7 +471,7 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 	pollTicker := time.NewTicker(100 * time.Millisecond) // Poll for new data
 	heartbeatTicker := time.NewTicker(30 * time.Second)
 	// For processed mode, also send periodic analytics updates
-	analyticsTicker := time.NewTicker(1 * time.Second)
+	analyticsTicker := time.NewTicker(time.Duration(effectiveIntervalMs) * time.Millisecond)
 	defer pollTicker.Stop()
 	defer heartbeatTicker.Stop()
 	defer analyticsTicker.Stop()
@@ -470,7 +489,7 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 		case <-analyticsTicker.C:
 			// Send periodic analytics update if processing is enabled
 			if enableProcessing {
-				if err := n.sendAnalyticsUpdate(consumerID, topic, conn); err != nil {
+				if err := n.sendAnalyticsUpdate(consumerID, topic, conn, effectiveWindow); err != nil {
 					fmt.Printf("[Broker %s] Error sending analytics to consumer %s: %v\n",
 						n.id[:8], consumerID[:8], err)
 					return
@@ -481,7 +500,7 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 			// Check for new data and send it
 			var err error
 			if enableProcessing {
-				err = n.sendNewDataToConsumerProcessed(consumerID, topic, conn)
+				err = n.sendNewDataToConsumerProcessed(consumerID, topic, conn, effectiveWindow)
 			} else {
 				err = n.sendNewDataToConsumer(consumerID, topic, conn)
 			}
@@ -568,7 +587,7 @@ func (n *Node) sendCatchUpDataProcessed(consumerID, topic string, conn net.Conn)
 }
 
 // sendNewDataToConsumerProcessed sends new data with processing to consumer
-func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net.Conn) error {
+func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net.Conn, windowDuration time.Duration) error {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
 		return nil
@@ -602,15 +621,14 @@ func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net
 			LatestOffset:  offset,
 			Timestamp:     timestamp,
 			RawData:       data,
-			WindowSeconds: n.config.AnalyticsWindowSeconds,
+			WindowSeconds: int(windowDuration.Seconds()),
 		}
 
-		// Add running analytics using configured window
+		// Add running analytics using per-consumer window
 		agg := analytics.NewLogAggregator(topicLog)
 		processed.TotalCount = agg.TotalCount()
-		window := n.getAnalyticsWindow()
-		processed.WindowCount = agg.CountInWindow(time.Now().Add(-window), time.Now())
-		processed.WindowRate = agg.GetRate(window)
+		processed.WindowCount = agg.CountInWindow(time.Now().Add(-windowDuration), time.Now())
+		processed.WindowRate = agg.GetRate(windowDuration)
 
 		// Serialize processed result
 		processedJSON, err := json.Marshal(processed)
@@ -637,14 +655,14 @@ func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net
 }
 
 // sendAnalyticsUpdate sends periodic analytics update to consumer
-func (n *Node) sendAnalyticsUpdate(consumerID, topic string, conn net.Conn) error {
+func (n *Node) sendAnalyticsUpdate(consumerID, topic string, conn net.Conn, windowDuration time.Duration) error {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
 		return nil // No data yet, skip analytics
 	}
 
-	// Compute analytics using configured window
-	topicAnalytics := analytics.ComputeTopicAnalytics(topic, topicLog, n.getAnalyticsWindow())
+	// Compute analytics using per-consumer window
+	topicAnalytics := analytics.ComputeTopicAnalytics(topic, topicLog, windowDuration)
 
 	highestOffset, err := topicLog.HighestOffset()
 	if err != nil {
@@ -655,7 +673,7 @@ func (n *Node) sendAnalyticsUpdate(consumerID, topic string, conn net.Conn) erro
 	analyticsResult := &ProcessedResult{
 		Topic:         topic,
 		TotalCount:    topicAnalytics.TotalCount,
-		WindowSeconds: n.config.AnalyticsWindowSeconds,
+		WindowSeconds: int(windowDuration.Seconds()),
 		WindowCount:   topicAnalytics.WindowCount,
 		WindowRate:    topicAnalytics.WindowRate,
 		LatestOffset:  highestOffset,
@@ -668,12 +686,11 @@ func (n *Node) sendAnalyticsUpdate(consumerID, topic string, conn net.Conn) erro
 		return err
 	}
 
-	// Send as RESULT message with special offset -1 to indicate analytics update
 	resultMsg := protocol.NewResultMsg(
 		n.id,
 		topic,
 		analyticsJSON,
-		-1, // Special offset indicating analytics update
+		int64(highestOffset),
 		time.Now().UnixNano(),
 	)
 

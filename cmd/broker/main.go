@@ -17,6 +17,7 @@ func main() {
 	addr := flag.String("addr", "", "Node address (IP:PORT, e.g. 192.168.1.10:8001)")
 	multicast := flag.String("multicast", "239.0.0.1:9999", "Multicast group address")
 	broadcast := flag.Int("broadcast", 8888, "Broadcast port for discovery")
+	maxRecords := flag.Int("max-records", 0, "Max records per topic log (0 = use default 10000)")
 	help := flag.Bool("help", false, "Show help")
 	
 	flag.Parse()
@@ -38,6 +39,9 @@ func main() {
 		fmt.Println()
 		fmt.Println("  -broadcast int")
 		fmt.Println("        Broadcast port for discovery (default: 8888)")
+		fmt.Println()
+		fmt.Println("  -max-records int")
+		fmt.Println("        Max records per topic log (default: 10000, 0 = unlimited)")
 		fmt.Println()
 		fmt.Println("Examples:")
 		fmt.Println("  # Start with auto-detected IP")
@@ -65,6 +69,9 @@ func main() {
 	}
 	if *broadcast != 0 {
 		os.Setenv("BROADCAST_PORT", fmt.Sprintf("%d", *broadcast))
+	}
+	if *maxRecords > 0 {
+		os.Setenv("MAX_RECORDS_PER_TOPIC", fmt.Sprintf("%d", *maxRecords))
 	}
 
 	fmt.Println("===========================================")

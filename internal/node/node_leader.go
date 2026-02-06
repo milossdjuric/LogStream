@@ -359,8 +359,9 @@ func (n *Node) listenForBroadcastJoins() {
 
 		if joinMsg, ok := msg.(*protocol.JoinMsg); ok {
 			senderID := protocol.GetSenderID(msg)
-			fmt.Printf("[Node %s] <- JOIN from %s (addr=%s)\n",
-				n.id[:8], senderID[:8], joinMsg.Address)
+			senderType := protocol.GetSenderType(msg)
+			fmt.Printf("[Node %s] <- JOIN from %s (addr=%s, type=%s)\n",
+				n.id[:8], senderID[:8], joinMsg.Address, senderType)
 
 			// CRITICAL FIX: Ignore JOIN messages from ourselves!
 			// This prevents self-discovery where a node discovers itself and becomes a follower
@@ -370,18 +371,35 @@ func (n *Node) listenForBroadcastJoins() {
 			}
 
 			// CRITICAL FIX: Only leader should respond to JOIN messages
-			// This prevents race condition where:
-			// 1. Node A starts, becomes "pending leader", starts broadcast listener
-			// 2. Node A does extended retry discovery (sleeps 500-1000ms)
-			// 3. Node B starts during sleep, also starts broadcast listener
-			// 4. Node A wakes, sends JOIN, Node B (follower!) responds
-			// 5. Node A thinks Node B is leader, becomes follower
-			// Result: Both are followers, no leader exists, registry never populates
 			if !n.IsLeader() {
-				fmt.Printf("[Node %s] IGNORING JOIN from %s - not leader (current role: follower)\n", 
+				fmt.Printf("[Node %s] IGNORING JOIN from %s - not leader (current role: follower)\n",
 					n.id[:8], senderID[:8])
 				continue
 			}
+
+			// Client discovery: producers/consumers only need the leader address.
+			// They are NOT broker nodes - skip network checks, TCP verification, and view changes.
+			if senderType == protocol.NodeType_PRODUCER || senderType == protocol.NodeType_CONSUMER {
+				fmt.Printf("[Leader %s] Client discovery from %s (type=%s)\n",
+					n.id[:8], senderID[:8], senderType)
+
+				responseAddr := fmt.Sprintf("%s", sender)
+				err := n.broadcastListener.SendJoinResponse(
+					n.id,
+					n.address,
+					n.config.MulticastGroup,
+					[]string{n.address},
+					responseAddr,
+				)
+				if err != nil {
+					log.Printf("[Leader %s] Failed to send JOIN_RESPONSE to client: %v\n", n.id[:8], err)
+				} else {
+					fmt.Printf("[Leader %s] -> JOIN_RESPONSE to client %s at %s\n", n.id[:8], senderID[:8], sender)
+				}
+				continue
+			}
+
+			// --- Broker JOIN handling below ---
 
 			// Filter out JOIN messages from wrong network interfaces (e.g., Vagrant NAT 192.168.121.x)
 			// Only accept JOINs from the same network as the leader (192.168.100.x)
