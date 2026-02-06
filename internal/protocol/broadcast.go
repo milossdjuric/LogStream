@@ -16,23 +16,23 @@ type BroadcastConfig struct {
 	MaxRetries int           // Number of broadcast retries
 
 	// Circuit breaker settings
-	RetryDelay           time.Duration // Initial delay between retries
-	MaxRetryDelay        time.Duration // Maximum delay (cap for exponential backoff)
-	BackoffMultiplier    float64       // Multiplier for exponential backoff
-	SplitBrainDelay      time.Duration // Extra delay when split-brain detected
-	ResponseCollectTime  time.Duration // Time to collect multiple responses (for split-brain detection)
+	RetryDelay          time.Duration // Initial delay between retries
+	MaxRetryDelay       time.Duration // Maximum delay (cap for exponential backoff)
+	BackoffMultiplier   float64       // Multiplier for exponential backoff
+	SplitBrainDelay     time.Duration // Extra delay when split-brain detected
+	ResponseCollectTime time.Duration // Time to collect multiple responses (for split-brain detection)
 }
 
 func DefaultBroadcastConfig() *BroadcastConfig {
 	return &BroadcastConfig{
-		Port:                 8888,
-		Timeout:              5 * time.Second,
-		MaxRetries:           5,                    // Increased from 3 for circuit breaker
-		RetryDelay:           1 * time.Second,      // Initial delay
-		MaxRetryDelay:        10 * time.Second,     // Cap exponential backoff at 10s
-		BackoffMultiplier:    1.5,                  // Exponential backoff multiplier
-		SplitBrainDelay:      5 * time.Second,      // Extra delay when split-brain detected
-		ResponseCollectTime:  500 * time.Millisecond, // Time to collect multiple responses
+		Port:                8888,
+		Timeout:             5 * time.Second,
+		MaxRetries:          5,                      // Increased from 3 for circuit breaker
+		RetryDelay:          1 * time.Second,        // Initial delay
+		MaxRetryDelay:       10 * time.Second,       // Cap exponential backoff at 10s
+		BackoffMultiplier:   1.5,                    // Exponential backoff multiplier
+		SplitBrainDelay:     5 * time.Second,        // Extra delay when split-brain detected
+		ResponseCollectTime: 500 * time.Millisecond, // Time to collect multiple responses
 	}
 }
 
@@ -442,44 +442,58 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	tempID := fmt.Sprintf("discovery-%d", time.Now().UnixNano())
 
 	// Get ALL private IPs across all interfaces
-	// Nodes pass their explicit address to DiscoverClusterWithRetry, which computes
-	// the broadcast address for that subnet. Clients don't have an explicit address,
-	// so we broadcast to ALL private subnets to maximize discovery reach.
 	allIPs := getAllPrivateIPs()
 	if len(allIPs) == 0 {
 		return "", fmt.Errorf("no suitable private network interface found")
 	}
 
-	// Calculate broadcast addresses for all interfaces
-	var broadcastAddrs []string
+	// For each interface IP, calculate its broadcast address and create a sender socket bound to that IP
+	type InterfaceSender struct {
+		ip          string
+		bcastAddr   string
+		sender      *BroadcastConnection
+	}
+
+	var interfaceSenders []InterfaceSender
+
 	for _, ip := range allIPs {
 		bcastAddr, err := calculateBroadcastAddress(ip+":0", config.Port)
-		if err == nil {
-			broadcastAddrs = append(broadcastAddrs, bcastAddr)
+		if err != nil {
+			fmt.Printf("[Discovery] Failed to calculate broadcast address for %s: %v\n", ip, err)
+			continue
 		}
-	}
-	if len(broadcastAddrs) == 0 {
-		broadcastAddrs = append(broadcastAddrs, fmt.Sprintf("255.255.255.255:%d", config.Port))
-	}
 
-	// Deduplicate broadcast addresses
-	seen := make(map[string]bool)
-	var uniqueBcastAddrs []string
-	for _, addr := range broadcastAddrs {
-		if !seen[addr] {
-			seen[addr] = true
-			uniqueBcastAddrs = append(uniqueBcastAddrs, addr)
+		// Create a sender socket bound to this specific interface IP
+		// This ensures responses on this subnet come back to a socket listening on this IP
+		sender, err := createBoundBroadcastSender(ip)
+		if err != nil {
+			fmt.Printf("[Discovery] Failed to create sender for interface %s: %v\n", ip, err)
+			continue
 		}
+
+		interfaceSenders = append(interfaceSenders, InterfaceSender{
+			ip:        ip,
+			bcastAddr: bcastAddr,
+			sender:    sender,
+		})
 	}
 
-	fmt.Printf("[Discovery] Broadcasting to %d subnet(s): %v\n", len(uniqueBcastAddrs), uniqueBcastAddrs)
-
-	// Create broadcast sender
-	sender, err := CreateBroadcastSender()
-	if err != nil {
-		return "", fmt.Errorf("failed to create broadcast sender: %w", err)
+	if len(interfaceSenders) == 0 {
+		return "", fmt.Errorf("failed to create broadcast senders for any interface")
 	}
-	defer sender.Close()
+
+	// Log what we're doing
+	fmt.Printf("[Discovery] Broadcasting to %d interface(s):\n", len(interfaceSenders))
+	for _, is := range interfaceSenders {
+		fmt.Printf("[Discovery]   - %s -> %s\n", is.ip, is.bcastAddr)
+	}
+
+	// Close all senders when done
+	defer func() {
+		for _, is := range interfaceSenders {
+			is.sender.Close()
+		}
+	}()
 
 	// Use the first IP as the "source" address in the JOIN message
 	sourceAddr := allIPs[0] + ":0"
@@ -491,17 +505,22 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
 		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
 
-		// Send JOIN broadcast to ALL subnets
-		for _, bcastAddr := range uniqueBcastAddrs {
-			if err := sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, bcastAddr); err != nil {
-				fmt.Printf("[Discovery] Broadcast to %s failed: %v\n", bcastAddr, err)
+		// Send JOIN broadcast from each interface
+		for _, is := range interfaceSenders {
+			if err := is.sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, is.bcastAddr); err != nil {
+				fmt.Printf("[Discovery] Broadcast from %s to %s failed: %v\n", is.ip, is.bcastAddr, err)
 			}
 		}
 
-		// Collect ALL responses within a collection window (for split-brain detection)
-		responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
+		// Collect responses from ALL senders
+		// We need to collect from all senders and merge the responses
+		var allResponses []*JoinResponseMsg
+		for _, is := range interfaceSenders {
+			responses := collectJoinResponses(is.sender, config.Timeout, config.ResponseCollectTime)
+			allResponses = append(allResponses, responses...)
+		}
 
-		if len(responses) == 0 {
+		if len(allResponses) == 0 {
 			consecutiveFailures++
 			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
 
@@ -519,7 +538,7 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		consecutiveFailures = 0
 
 		// Check for split-brain
-		uniqueLeaders := getUniqueLeaders(responses)
+		uniqueLeaders := getUniqueLeaders(allResponses)
 		if len(uniqueLeaders) > 1 {
 			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
 			if attempt < config.MaxRetries-1 {
@@ -532,6 +551,61 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			}
 			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
 		}
+
+		fmt.Printf("[Discovery] Found cluster with leader at %s\n", allResponses[0].LeaderAddress)
+		return allResponses[0].LeaderAddress, nil
+	}
+
+	return "", fmt.Errorf("cluster discovery failed after %d attempts", config.MaxRetries)
+}
+
+// createBoundBroadcastSender creates a broadcast sender socket bound to a specific interface IP
+// This ensures that broadcast packets are sent from the correct interface and responses are received there
+func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error) {
+	lc := &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+
+	// Bind to the specific interface IP and let the OS assign a port
+	listenAddr := &net.UDPAddr{
+		IP:   net.ParseIP(interfaceIP),
+		Port: 0,
+	}
+
+	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bound broadcast socket for %s: %w", interfaceIP, err)
+	}
+
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return nil, fmt.Errorf("failed to convert to UDPConn for interface %s", interfaceIP)
+	}
+
+	// Setup buffers
+	if err := conn.SetWriteBuffer(2048 * 1024); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set write buffer: %w", err)
+	}
+	if err := conn.SetReadBuffer(2048 * 1024); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to set read buffer: %w", err)
+	}
+
+	return &BroadcastConnection{
+		conn: conn,
+	}, nil
+}
 
 		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
 		return responses[0].LeaderAddress, nil
