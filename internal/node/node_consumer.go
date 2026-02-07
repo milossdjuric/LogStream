@@ -233,6 +233,19 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 	// Subscribe consumer to topic (legacy - for backwards compatibility)
 	if err := n.clusterState.SubscribeConsumer(consumerID, topic); err != nil {
 		log.Printf("[Leader %s] Failed to subscribe consumer: %v\n", n.id[:8], err)
+		// Send failure response so client doesn't get EOF
+		ack := &protocol.ConsumeMessage{
+			Header: &protocol.MessageHeader{
+				Type:        protocol.MessageType_CONSUME,
+				Timestamp:   time.Now().UnixNano(),
+				SenderId:    n.id,
+				SequenceNum: 0,
+				SenderType:  protocol.NodeType_LEADER,
+			},
+			Topic:           "",
+			ConsumerAddress: "",
+		}
+		protocol.WriteTCPMessage(conn, &protocol.ConsumeMsg{ConsumeMessage: ack})
 		return
 	}
 

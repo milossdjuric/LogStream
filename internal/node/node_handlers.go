@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/milossdjuric/logstream/internal/protocol"
@@ -13,6 +14,11 @@ import (
 func (n *Node) handleTCPConnection(conn net.Conn) {
 	keepConnectionOpen := false
 	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 4096)
+			stackLen := runtime.Stack(buf, false)
+			log.Printf("[Node %s] PANIC in TCP handler: %v\n%s\n", n.id[:8], r, buf[:stackLen])
+		}
 		if !keepConnectionOpen {
 			conn.Close()
 		}
