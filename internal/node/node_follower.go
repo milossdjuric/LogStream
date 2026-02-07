@@ -189,7 +189,7 @@ func (n *Node) sendFollowerHeartbeat() error {
 
 	// Create heartbeat message with current view number
 	viewNumber := n.viewState.GetViewNumber()
-	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_BROKER, 0, viewNumber)
+	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_BROKER, 0, viewNumber, n.address)
 
 	// Send heartbeat
 	if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {

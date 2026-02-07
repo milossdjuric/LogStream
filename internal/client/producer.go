@@ -284,7 +284,7 @@ func (p *Producer) sendHeartbeats() {
 			}
 
 			// Create heartbeat message (producers don't have view numbers, use 0)
-			heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0)
+			heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0, "")
 
 			// Send heartbeat message
 			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {

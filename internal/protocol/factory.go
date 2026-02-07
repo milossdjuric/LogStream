@@ -77,11 +77,12 @@ func NewResultMsg(senderID string, topic string, data []byte, offset, seqNum int
 // TCP unicast for Leader to Producer/Consumer
 // TCP unicast for Broker to Leader
 // UDP multicast for Leader to Brokers
-func NewHeartbeatMsg(senderID string, senderType NodeType, seqNum int64, viewNumber int64) *HeartbeatMsg {
+func NewHeartbeatMsg(senderID string, senderType NodeType, seqNum int64, viewNumber int64, senderAddress string) *HeartbeatMsg {
 	return &HeartbeatMsg{
 		HeartbeatMessage: &HeartbeatMessage{
-			Header:     newHeader(MessageType_HEARTBEAT, senderID, senderType, seqNum),
-			ViewNumber: viewNumber,
+			Header:        newHeader(MessageType_HEARTBEAT, senderID, senderType, seqNum),
+			ViewNumber:    viewNumber,
+			SenderAddress: senderAddress,
 		},
 	}
 }

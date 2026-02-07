@@ -86,10 +86,22 @@ func (n *Node) handleHeartbeat(msg protocol.Message, sender *net.UDPAddr) {
 	if n.IsLeader() && senderType == protocol.NodeType_LEADER && senderID != n.id {
 		// Only trigger election if views are equal (genuine split-brain)
 		if senderViewNumber == myViewNumber {
-			fmt.Printf("[Leader %s] SPLIT-BRAIN DETECTED from %s (same view %d)\n", 
-				n.id[:8], senderID[:8], myViewNumber)
-			
-			// Trigger snap election immediately (no registry check needed!)
+			senderAddress := hbMsg.SenderAddress
+
+			fmt.Printf("[Leader %s] SPLIT-BRAIN DETECTED from %s (same view %d, addr=%s)\n",
+				n.id[:8], senderID[:8], myViewNumber, senderAddress)
+
+			// Register the other leader so the election includes both nodes.
+			// Without this, each node only has itself in registry (1 broker)
+			// and the election takes the "sole survivor" path, creating an infinite loop.
+			if senderAddress != "" {
+				if _, exists := n.clusterState.GetBroker(senderID); !exists {
+					fmt.Printf("[Leader %s] Registering other leader %s at %s for election\n",
+						n.id[:8], senderID[:8], senderAddress)
+					n.clusterState.RegisterBroker(senderID, senderAddress, true)
+				}
+			}
+
 			if !n.election.IsInProgress() {
 				go func() {
 					fmt.Printf("[Leader %s] Starting snap election to resolve split-brain\n", n.id[:8])

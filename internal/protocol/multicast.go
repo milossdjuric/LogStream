@@ -323,8 +323,8 @@ func (mc *MulticastConnection) GetLocalAddr() net.Addr {
 
 // SendHeartbeatMulticast sends a heartbeat to the multicast group
 // View-synchronous: includes viewNumber to detect zombie leaders
-func SendHeartbeatMulticast(sender *MulticastConnection, senderID string, senderType NodeType, viewNumber int64, multicastAddr string) error {
-	msg := NewHeartbeatMsg(senderID, senderType, 0, viewNumber)
+func SendHeartbeatMulticast(sender *MulticastConnection, senderID string, senderType NodeType, viewNumber int64, senderAddress string, multicastAddr string) error {
+	msg := NewHeartbeatMsg(senderID, senderType, 0, viewNumber, senderAddress)
 	return sender.SendMessage(msg, multicastAddr)
 }
 

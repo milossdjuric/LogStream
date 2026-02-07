@@ -83,6 +83,7 @@ func (n *Node) sendHeartbeat() error {
 		n.id,
 		protocol.NodeType_LEADER,
 		viewNumber,
+		n.address,
 		n.config.MulticastGroup,
 	)
 
@@ -289,7 +290,7 @@ func (n *Node) sendHeartbeatsToProducers() {
 
 		// Create heartbeat message with current view number
 		viewNumber := n.viewState.GetViewNumber()
-		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber)
+		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
 
 		// Send heartbeat
 		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
@@ -334,7 +335,7 @@ func (n *Node) sendHeartbeatsToConsumers() {
 
 		// Create heartbeat message with current view number
 		viewNumber := n.viewState.GetViewNumber()
-		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber)
+		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
 
 		// Send heartbeat
 		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
@@ -550,7 +551,7 @@ func (n *Node) verifyTCPConnectivity(address, nodeID string) bool {
 
 	// Send a heartbeat as a connectivity test
 	// The node should accept the connection and we can verify it's responsive
-	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, n.viewState.GetViewNumber())
+	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, n.viewState.GetViewNumber(), n.address)
 	if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
 		fmt.Printf("[Leader %s] [TCP-Verify] FAILED to write to %s: %v\n",
 			n.id[:8], nodeID[:8], err)

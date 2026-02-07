@@ -113,7 +113,7 @@ func TestProtocol_ConsumeMessage(t *testing.T) {
 }
 
 func TestProtocol_HeartbeatMessage(t *testing.T) {
-	msg := protocol.NewHeartbeatMsg("broker-789", protocol.NodeType_BROKER, 100, 1)
+	msg := protocol.NewHeartbeatMsg("broker-789", protocol.NodeType_BROKER, 100, 1, "192.168.1.10:8001")
 
 	// Verify header
 	header := msg.GetHeader()
@@ -125,6 +125,11 @@ func TestProtocol_HeartbeatMessage(t *testing.T) {
 	}
 	if header.SequenceNum != 100 {
 		t.Errorf("Expected sequence 100, got %d", header.SequenceNum)
+	}
+
+	// Verify sender address
+	if msg.SenderAddress != "192.168.1.10:8001" {
+		t.Errorf("Expected sender address 192.168.1.10:8001, got %s", msg.SenderAddress)
 	}
 
 	// Test serialization roundtrip
@@ -141,6 +146,9 @@ func TestProtocol_HeartbeatMessage(t *testing.T) {
 
 	if msg2.GetHeader().SenderId != msg.GetHeader().SenderId {
 		t.Error("SenderId mismatch after roundtrip")
+	}
+	if msg2.SenderAddress != "192.168.1.10:8001" {
+		t.Errorf("SenderAddress mismatch after roundtrip: got %s", msg2.SenderAddress)
 	}
 }
 
@@ -404,7 +412,7 @@ func TestProtocol_GetMessageHelpers(t *testing.T) {
 
 func TestProtocol_TimestampIsRecent(t *testing.T) {
 	before := time.Now().UnixNano()
-	msg := protocol.NewHeartbeatMsg("test", protocol.NodeType_BROKER, 0, 0)
+	msg := protocol.NewHeartbeatMsg("test", protocol.NodeType_BROKER, 0, 0, "")
 	after := time.Now().UnixNano()
 
 	timestamp := protocol.GetTimestamp(msg)

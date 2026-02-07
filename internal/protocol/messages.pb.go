@@ -642,7 +642,8 @@ func (x *SubscribeMessage) GetAnalyticsIntervalMs() int32 {
 type HeartbeatMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
-	ViewNumber    int64                  `protobuf:"varint,2,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"` // View number to detect zombie leaders
+	ViewNumber    int64                  `protobuf:"varint,2,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"`         // View number to detect zombie leaders
+	SenderAddress string                 `protobuf:"bytes,3,opt,name=sender_address,json=senderAddress,proto3" json:"sender_address,omitempty"` // TCP address for split-brain resolution
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -689,6 +690,13 @@ func (x *HeartbeatMessage) GetViewNumber() int64 {
 		return x.ViewNumber
 	}
 	return 0
+}
+
+func (x *HeartbeatMessage) GetSenderAddress() string {
+	if x != nil {
+		return x.SenderAddress
+	}
+	return ""
 }
 
 // UDP broadcast from new node to discover cluster
@@ -2186,11 +2194,12 @@ const file_messages_proto_rawDesc = "" +
 	"\x10consumer_address\x18\x04 \x01(\tR\x0fconsumerAddress\x12+\n" +
 	"\x11enable_processing\x18\x05 \x01(\bR\x10enableProcessing\x128\n" +
 	"\x18analytics_window_seconds\x18\x06 \x01(\x05R\x16analyticsWindowSeconds\x122\n" +
-	"\x15analytics_interval_ms\x18\a \x01(\x05R\x13analyticsIntervalMs\"d\n" +
+	"\x15analytics_interval_ms\x18\a \x01(\x05R\x13analyticsIntervalMs\"\x8b\x01\n" +
 	"\x10HeartbeatMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
 	"\vview_number\x18\x02 \x01(\x03R\n" +
-	"viewNumber\"X\n" +
+	"viewNumber\x12%\n" +
+	"\x0esender_address\x18\x03 \x01(\tR\rsenderAddress\"X\n" +
 	"\vJoinMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xdb\x01\n" +
