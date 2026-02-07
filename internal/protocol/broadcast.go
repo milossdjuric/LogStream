@@ -21,6 +21,13 @@ type BroadcastConfig struct {
 	BackoffMultiplier   float64       // Multiplier for exponential backoff
 	SplitBrainDelay     time.Duration // Extra delay when split-brain detected
 	ResponseCollectTime time.Duration // Time to collect multiple responses (for split-brain detection)
+
+	// Client discovery port: when set, the discovery UDP socket binds to this port
+	// instead of a random ephemeral port. This is needed for WSL where Windows firewall
+	// blocks responses on random ports. TCP and UDP don't conflict on the same port,
+	// so this can safely be the same port as the client's TCP listener.
+	// 0 = OS picks a random port (default)
+	DiscoveryPort int
 }
 
 func DefaultBroadcastConfig() *BroadcastConfig {
@@ -467,7 +474,7 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			continue
 		}
 
-		sender, err := createBoundBroadcastSender(ip)
+		sender, err := createBoundBroadcastSender(ip, config.DiscoveryPort)
 		if err != nil {
 			fmt.Printf("[Discovery] Failed to create socket for %s: %v\n", ip, err)
 			continue
@@ -562,13 +569,22 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 }
 
 // createBoundBroadcastSender creates a broadcast sender socket bound to a specific interface IP
-// This ensures that broadcast packets are sent from the correct interface and responses are received there
-func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error) {
+// If port > 0, binds to that fixed port (for WSL firewall compatibility).
+// If port == 0, the OS assigns a random ephemeral port.
+func createBoundBroadcastSender(interfaceIP string, port int) (*BroadcastConnection, error) {
 	lc := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+				if opErr != nil {
+					return
+				}
+				// Enable SO_REUSEADDR when using a fixed port so multiple
+				// interfaces can bind to the same port on different IPs
+				if port > 0 {
+					opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				}
 			})
 			if err != nil {
 				return err
@@ -577,10 +593,10 @@ func createBoundBroadcastSender(interfaceIP string) (*BroadcastConnection, error
 		},
 	}
 
-	// Bind to the specific interface IP and let the OS assign a port
+	// Bind to the specific interface IP with the requested port
 	listenAddr := &net.UDPAddr{
 		IP:   net.ParseIP(interfaceIP),
-		Port: 0,
+		Port: port,
 	}
 
 	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())

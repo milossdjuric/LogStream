@@ -100,7 +100,9 @@ func (c *Consumer) Connect() error {
 	// Auto-discover leader if not provided
 	if c.leaderAddr == "" {
 		fmt.Printf("[Consumer %s] No leader address provided, discovering via broadcast...\n", c.id[:8])
-		leaderAddr, err := protocol.DiscoverLeader(nil)
+		discoveryConfig := protocol.DefaultBroadcastConfig()
+		discoveryConfig.DiscoveryPort = c.clientPort
+		leaderAddr, err := protocol.DiscoverLeader(discoveryConfig)
 		if err != nil {
 			return fmt.Errorf("failed to discover cluster: %w", err)
 		}
@@ -438,7 +440,9 @@ func (c *Consumer) reconnectToCluster() error {
 		}
 
 		// Discover new leader via broadcast
-		leaderAddr, err := protocol.DiscoverLeader(nil)
+		discoveryConfig := protocol.DefaultBroadcastConfig()
+		discoveryConfig.DiscoveryPort = c.clientPort
+		leaderAddr, err := protocol.DiscoverLeader(discoveryConfig)
 		if err != nil {
 			log.Printf("[Consumer %s] Discovery failed: %v", c.id[:8], err)
 			continue
