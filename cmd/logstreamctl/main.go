@@ -406,6 +406,7 @@ func startProducer(args []string) {
 	leader := ""
 	topic := "logs"
 	port := 0
+	address := ""
 	rate := 0
 	interval := 0
 	count := 0
@@ -432,6 +433,11 @@ func startProducer(args []string) {
 		case "--port", "-p":
 			if i+1 < len(args) {
 				port, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--address", "-a":
+			if i+1 < len(args) {
+				address = args[i+1]
 				i++
 			}
 		case "--rate", "-r":
@@ -467,6 +473,7 @@ func startProducer(args []string) {
 			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
 			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
+			fmt.Println("  --address, -a     Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
 			fmt.Println("  --rate, -r        Messages per second (default: 0 = interactive)")
 			fmt.Println("  --interval, -i    Interval between messages in ms (overrides --rate)")
 			fmt.Println("                    Example: --interval 2000 = 1 message every 2 seconds")
@@ -518,6 +525,9 @@ func startProducer(args []string) {
 	}
 	if leader != "" {
 		cmdArgs = append(cmdArgs, "-leader", leader)
+	}
+	if address != "" {
+		cmdArgs = append(cmdArgs, "-address", address)
 	}
 	if interval > 0 {
 		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(interval))
@@ -638,6 +648,7 @@ func startConsumer(args []string) {
 	leader := ""
 	topic := "logs"
 	port := 0
+	address := ""
 	analytics := true
 	windowSeconds := 0
 	intervalMs := 0
@@ -663,6 +674,11 @@ func startConsumer(args []string) {
 		case "--port", "-p":
 			if i+1 < len(args) {
 				port, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--address", "-a":
+			if i+1 < len(args) {
+				address = args[i+1]
 				i++
 			}
 		case "--analytics":
@@ -695,6 +711,7 @@ func startConsumer(args []string) {
 			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
 			fmt.Println("  --topic, -t       Topic name (default: logs)")
 			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
+			fmt.Println("  --address, -a     Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
 			fmt.Println("  --no-analytics    Disable analytics processing")
 			fmt.Println("  --window, -w      Analytics window in seconds (0 = broker default, typically 60)")
 			fmt.Println("  --interval        Analytics update interval in ms (0 = broker default, typically 1000)")
@@ -744,6 +761,9 @@ func startConsumer(args []string) {
 	}
 	if leader != "" {
 		cmdArgs = append(cmdArgs, "-leader", leader)
+	}
+	if address != "" {
+		cmdArgs = append(cmdArgs, "-address", address)
 	}
 	if !analytics {
 		cmdArgs = append(cmdArgs, "-analytics=false")

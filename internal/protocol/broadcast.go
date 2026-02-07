@@ -433,7 +433,8 @@ func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
 // Uses the same single-socket pattern as broker discovery (DiscoverClusterWithRetry):
 // one socket per interface handles both sending the broadcast AND receiving the response.
 // The leader sends JOIN_RESPONSE to the UDP source address, which is the sender socket.
-// Tries each private network interface sequentially.
+// Broadcasts on ALL interfaces simultaneously in each attempt so discovery is fast
+// regardless of which subnet the broker is on.
 // Returns the leader address on success, or error if discovery fails.
 func DiscoverLeader(config *BroadcastConfig) (string, error) {
 	if config == nil {
@@ -451,8 +452,14 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 
 	fmt.Printf("[Discovery] Found %d private interface(s)\n", len(allIPs))
 
-	// Try discovery on each interface sequentially
-	// For each interface: create a single socket, broadcast, and read response from the SAME socket
+	// Create a sender socket per interface (for both sending AND receiving)
+	type ifaceSocket struct {
+		ip        string
+		bcastAddr string
+		sender    *BroadcastConnection
+	}
+	var sockets []ifaceSocket
+
 	for _, ip := range allIPs {
 		bcastAddr, err := calculateBroadcastAddress(ip+":0", config.Port)
 		if err != nil {
@@ -460,77 +467,98 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			continue
 		}
 
-		// Create a single socket bound to this interface for both sending AND receiving
-		// This matches the proven broker discovery pattern (DiscoverClusterWithRetry)
 		sender, err := createBoundBroadcastSender(ip)
 		if err != nil {
 			fmt.Printf("[Discovery] Failed to create socket for %s: %v\n", ip, err)
 			continue
 		}
 
-		sourceAddr := sender.GetLocalAddr().String()
-		fmt.Printf("[Discovery] Trying %s -> %s (socket: %s)\n", ip, bcastAddr, sourceAddr)
-
-		// Circuit breaker: exponential backoff
-		currentDelay := config.RetryDelay
-		consecutiveFailures := 0
-
-		for attempt := 0; attempt < config.MaxRetries; attempt++ {
-			fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
-
-			// Send JOIN broadcast
-			if err := sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, bcastAddr); err != nil {
-				fmt.Printf("[Discovery] Broadcast failed: %v\n", err)
-				continue
-			}
-
-			// Collect responses from the SAME socket we sent from
-			// The leader sends JOIN_RESPONSE to the UDP source address (this socket)
-			responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
-
-			if len(responses) == 0 {
-				consecutiveFailures++
-				fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
-
-				if attempt < config.MaxRetries-1 {
-					time.Sleep(currentDelay)
-					currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
-					if currentDelay > config.MaxRetryDelay {
-						currentDelay = config.MaxRetryDelay
-					}
-				}
-				continue
-			}
-
-			consecutiveFailures = 0
-
-			// Check for split-brain
-			uniqueLeaders := getUniqueLeaders(responses)
-			if len(uniqueLeaders) > 1 {
-				fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
-				if attempt < config.MaxRetries-1 {
-					time.Sleep(config.SplitBrainDelay)
-					currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
-					if currentDelay > config.MaxRetryDelay {
-						currentDelay = config.MaxRetryDelay
-					}
-					continue
-				}
-				sender.Close()
-				return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
-			}
-
-			// Success
-			sender.Close()
-			fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
-			return responses[0].LeaderAddress, nil
-		}
-
-		sender.Close()
-		fmt.Printf("[Discovery] No response on interface %s, trying next...\n", ip)
+		fmt.Printf("[Discovery] Socket ready: %s -> %s (local: %s)\n", ip, bcastAddr, sender.GetLocalAddr().String())
+		sockets = append(sockets, ifaceSocket{ip: ip, bcastAddr: bcastAddr, sender: sender})
 	}
 
-	return "", fmt.Errorf("cluster discovery failed: no response after trying all interfaces")
+	if len(sockets) == 0 {
+		return "", fmt.Errorf("failed to create broadcast sockets on any interface")
+	}
+
+	// Cleanup all sockets on exit
+	defer func() {
+		for _, s := range sockets {
+			s.sender.Close()
+		}
+	}()
+
+	// Circuit breaker: exponential backoff
+	currentDelay := config.RetryDelay
+	consecutiveFailures := 0
+
+	for attempt := 0; attempt < config.MaxRetries; attempt++ {
+		fmt.Printf("[Discovery] Attempt %d/%d\n", attempt+1, config.MaxRetries)
+
+		// Broadcast on ALL interfaces simultaneously
+		for _, s := range sockets {
+			sourceAddr := s.sender.GetLocalAddr().String()
+			if err := s.sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, s.bcastAddr); err != nil {
+				fmt.Printf("[Discovery] Broadcast failed on %s: %v\n", s.ip, err)
+			}
+		}
+
+		// Collect responses from ALL sockets concurrently
+		// Each socket is read in its own goroutine so we don't block on the wrong interface
+		type ifaceResponses struct {
+			responses []*JoinResponseMsg
+		}
+		resultCh := make(chan ifaceResponses, len(sockets))
+		for _, s := range sockets {
+			go func(sock ifaceSocket) {
+				responses := collectJoinResponses(sock.sender, config.Timeout, config.ResponseCollectTime)
+				resultCh <- ifaceResponses{responses: responses}
+			}(s)
+		}
+
+		var allResponses []*JoinResponseMsg
+		for range sockets {
+			result := <-resultCh
+			allResponses = append(allResponses, result.responses...)
+		}
+
+		if len(allResponses) == 0 {
+			consecutiveFailures++
+			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
+
+			if attempt < config.MaxRetries-1 {
+				time.Sleep(currentDelay)
+				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+				if currentDelay > config.MaxRetryDelay {
+					currentDelay = config.MaxRetryDelay
+				}
+			}
+			continue
+		}
+
+		consecutiveFailures = 0
+
+		// Check for split-brain
+		uniqueLeaders := getUniqueLeaders(allResponses)
+		if len(uniqueLeaders) > 1 {
+			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
+			if attempt < config.MaxRetries-1 {
+				time.Sleep(config.SplitBrainDelay)
+				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
+				if currentDelay > config.MaxRetryDelay {
+					currentDelay = config.MaxRetryDelay
+				}
+				continue
+			}
+			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
+		}
+
+		// Success
+		fmt.Printf("[Discovery] Found cluster with leader at %s\n", allResponses[0].LeaderAddress)
+		return allResponses[0].LeaderAddress, nil
+	}
+
+	return "", fmt.Errorf("cluster discovery failed: no response after %d attempts on %d interfaces", config.MaxRetries, len(sockets))
 }
 
 // createBoundBroadcastSender creates a broadcast sender socket bound to a specific interface IP

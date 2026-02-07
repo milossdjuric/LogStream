@@ -31,7 +31,8 @@ type Consumer struct {
 	enableProcessing       bool  // Whether to request data processing from broker
 	analyticsWindowSeconds int32 // 0 = use broker default
 	analyticsIntervalMs    int32 // 0 = use broker default
-	clientPort             int   // Fixed TCP listener port (0 = OS picks)
+	clientPort             int    // Fixed TCP listener port (0 = OS picks)
+	advertiseAddr          string // Override advertised IP (e.g. Windows host IP for WSL)
 	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
 }
 
@@ -59,9 +60,10 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 // ConsumerOptions holds all configurable consumer options
 type ConsumerOptions struct {
 	EnableProcessing       bool
-	AnalyticsWindowSeconds int32 // 0 = use broker default
-	AnalyticsIntervalMs    int32 // 0 = use broker default
-	ClientPort             int   // Fixed TCP listener port (0 = OS picks)
+	AnalyticsWindowSeconds int32  // 0 = use broker default
+	AnalyticsIntervalMs    int32  // 0 = use broker default
+	ClientPort             int    // Fixed TCP listener port (0 = OS picks)
+	AdvertiseAddr          string // Override advertised IP (e.g. Windows host IP for WSL)
 }
 
 // NewConsumerWithOptions creates a new consumer with options
@@ -80,6 +82,7 @@ func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) 
 	c.analyticsWindowSeconds = opts.AnalyticsWindowSeconds
 	c.analyticsIntervalMs = opts.AnalyticsIntervalMs
 	c.clientPort = opts.ClientPort
+	c.advertiseAddr = opts.AdvertiseAddr
 	return c
 }
 
@@ -144,10 +147,20 @@ func (c *Consumer) Connect() error {
 	var localAddr string
 	localIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
 
+	// Override IP with advertised address if set (e.g. Windows host IP for WSL)
+	if c.advertiseAddr != "" {
+		localIP = c.advertiseAddr
+	}
+
 	if c.clientPort > 0 {
 		localAddr = fmt.Sprintf("%s:%d", localIP, c.clientPort)
 	} else {
-		localAddr = leaderConn.LocalAddr().String()
+		if c.advertiseAddr != "" {
+			localPort := leaderConn.LocalAddr().(*net.TCPAddr).Port
+			localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
+		} else {
+			localAddr = leaderConn.LocalAddr().String()
+		}
 	}
 
 	consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
@@ -254,12 +267,13 @@ func (c *Consumer) Connect() error {
 	c.localAddr = localAddr
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
+	// Always bind to 0.0.0.0:port (not the advertised IP which may not be local, e.g. WSL)
 	if c.clientPort > 0 {
 		// Use fixed port for the listener
-		listenerAddr := fmt.Sprintf("%s:%d", localIP, c.clientPort)
-		c.tcpListener, err = net.Listen("tcp", listenerAddr)
+		listenAddr := fmt.Sprintf("0.0.0.0:%d", c.clientPort)
+		c.tcpListener, err = net.Listen("tcp", listenAddr)
 		if err != nil {
-			fmt.Printf("[Consumer %s] Warning: failed to start TCP listener on %s: %v\n", c.id[:8], listenerAddr, err)
+			fmt.Printf("[Consumer %s] Warning: failed to start TCP listener on %s: %v\n", c.id[:8], listenAddr, err)
 		}
 	} else {
 		localTCPAddr, err := net.ResolveTCPAddr("tcp", c.localAddr)
@@ -440,9 +454,12 @@ func (c *Consumer) reconnectToCluster() error {
 		}
 
 		var localAddr string
+		reconnIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
+		if c.advertiseAddr != "" {
+			reconnIP = c.advertiseAddr
+		}
 		if c.clientPort > 0 {
-			reconnLocalIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
-			localAddr = fmt.Sprintf("%s:%d", reconnLocalIP, c.clientPort)
+			localAddr = fmt.Sprintf("%s:%d", reconnIP, c.clientPort)
 		} else {
 			localAddr = leaderConn.LocalAddr().String()
 		}

@@ -21,6 +21,7 @@ type Producer struct {
 	udpRemoteAddr *net.UDPAddr
 	tcpListener   net.Listener   // TCP listener for incoming messages from leader
 	clientPort    int            // Fixed TCP listener port (0 = OS picks)
+	advertiseAddr string         // Override advertised IP (e.g. Windows host IP for WSL)
 	stopHeartbeat chan struct{}
 	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
@@ -47,9 +48,10 @@ func NewProducer(topic, leaderAddr string) *Producer {
 
 // NewProducerWithPort creates a new producer with a fixed TCP listener port.
 // If port is 0, the OS picks an ephemeral port (same as NewProducer).
-func NewProducerWithPort(topic, leaderAddr string, port int) *Producer {
+func NewProducerWithPort(topic, leaderAddr string, port int, advertiseAddr string) *Producer {
 	p := NewProducer(topic, leaderAddr)
 	p.clientPort = port
+	p.advertiseAddr = advertiseAddr
 	return p
 }
 
@@ -113,12 +115,23 @@ func (p *Producer) Connect() error {
 	var localAddr string
 	localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
 
+	// Override IP with advertised address if set (e.g. Windows host IP for WSL)
+	if p.advertiseAddr != "" {
+		localIP = p.advertiseAddr
+	}
+
 	if p.clientPort > 0 {
 		// Use fixed port: create TCP listener first, then register with that address
 		localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
 	} else {
-		// Use ephemeral port from the leader connection
-		localAddr = conn.LocalAddr().String()
+		if p.advertiseAddr != "" {
+			// Advertised IP with ephemeral port
+			localPort := conn.LocalAddr().(*net.TCPAddr).Port
+			localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
+		} else {
+			// Use ephemeral port from the leader connection
+			localAddr = conn.LocalAddr().String()
+		}
 	}
 
 	// Make PRODUCE message
@@ -163,12 +176,14 @@ func (p *Producer) Connect() error {
 	}
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER)
+	// Always bind to 0.0.0.0:port (not the advertised IP which may not be local, e.g. WSL)
 	if p.clientPort > 0 {
 		// Use fixed port for the listener
-		p.tcpListener, err = net.Listen("tcp", localAddr)
+		listenAddr := fmt.Sprintf("0.0.0.0:%d", p.clientPort)
+		p.tcpListener, err = net.Listen("tcp", listenAddr)
 		if err != nil {
 			p.udpConn.Close()
-			return fmt.Errorf("failed to start TCP listener on %s: %w", localAddr, err)
+			return fmt.Errorf("failed to start TCP listener on %s: %w", listenAddr, err)
 		}
 	} else {
 		// Use the ephemeral port from registration connection
@@ -317,9 +332,12 @@ func (p *Producer) reconnectToCluster() error {
 		}
 
 		var localAddr string
+		reconnIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
+		if p.advertiseAddr != "" {
+			reconnIP = p.advertiseAddr
+		}
 		if p.clientPort > 0 {
-			localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
-			localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
+			localAddr = fmt.Sprintf("%s:%d", reconnIP, p.clientPort)
 		} else {
 			localAddr = conn.LocalAddr().String()
 		}

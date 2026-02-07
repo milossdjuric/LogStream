@@ -19,6 +19,7 @@ func main() {
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to produce to")
 	port := flag.Int("port", 8002, "Client TCP listener port (default: 8002)")
+	address := flag.String("address", "", "Advertised IP address (for WSL/NAT, e.g. Windows host LAN IP)")
 	rate := flag.Int("rate", 0, "Messages per second (0 = interactive mode)")
 	interval := flag.Int("interval", 0, "Interval between messages in milliseconds (overrides -rate)")
 	count := flag.Int("count", 0, "Number of messages to send (0 = unlimited)")
@@ -93,7 +94,7 @@ func main() {
 	fmt.Println()
 
 	// Create producer
-	producer := client.NewProducerWithPort(*topic, *leader, *port)
+	producer := client.NewProducerWithPort(*topic, *leader, *port, *address)
 
 	// Connect to cluster
 	fmt.Println("Connecting to cluster...")

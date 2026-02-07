@@ -16,6 +16,7 @@ func main() {
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to consume from")
 	port := flag.Int("port", 8003, "Client TCP listener port (default: 8003)")
+	address := flag.String("address", "", "Advertised IP address (for WSL/NAT, e.g. Windows host LAN IP)")
 	analytics := flag.Bool("analytics", true, "Request analytics/processing from broker")
 	windowSeconds := flag.Int("window", 0, "Analytics window in seconds (0 = broker default, typically 60)")
 	intervalMs := flag.Int("interval", 0, "Analytics update interval in ms (0 = broker default, typically 1000)")
@@ -71,6 +72,7 @@ func main() {
 		AnalyticsWindowSeconds: int32(*windowSeconds),
 		AnalyticsIntervalMs:    int32(*intervalMs),
 		ClientPort:             *port,
+		AdvertiseAddr:          *address,
 	})
 
 	// Consumer ID prefix for all logs
