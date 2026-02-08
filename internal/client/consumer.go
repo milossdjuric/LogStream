@@ -90,11 +90,10 @@ func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) 
 // If no leader address was provided, auto-discovers the cluster via broadcast first
 func (c *Consumer) Connect() error {
 	const (
-		maxAttempts      = 10
-		initialDelay     = 500 * time.Millisecond
-		retryDelay       = 1 * time.Second
-		halfOpenDelay    = 2 * time.Second
-		failureThreshold = 5
+		maxAttempts   = 10
+		initialDelay  = 500 * time.Millisecond
+		retryDelay    = 1 * time.Second
+		halfOpenDelay = 2 * time.Second
 	)
 
 	// Auto-discover leader if not provided
@@ -112,179 +111,74 @@ func (c *Consumer) Connect() error {
 
 	time.Sleep(initialDelay)
 
-	// Connect to leader for registration
-	fmt.Printf("[Consumer %s] Connecting to leader at %s for registration...\n", c.id[:8], c.leaderAddr)
+	// Phase 1: Registration with circuit breaker retry.
+	// Handles transient failures like leader frozen during view change.
+	regDelay := retryDelay
+	var lastErr error
 
-	failureCount := 0
-	var leaderConn net.Conn
-	var err error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		leaderConn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
-
-		if err != nil {
-			failureCount++
-			if failureCount >= failureThreshold {
-				time.Sleep(halfOpenDelay)
-				leaderConn, err = net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
-				if err == nil {
-					break
-				}
-				failureCount++
-			}
-		} else {
+	for regAttempt := 1; regAttempt <= maxAttempts; regAttempt++ {
+		lastErr = c.attemptRegistration()
+		if lastErr == nil {
 			break
 		}
-
-		if attempt < maxAttempts {
-			time.Sleep(retryDelay)
-		}
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
-	}
-
-	// Determine local address for registration
-	var localAddr string
-	localIP := leaderConn.LocalAddr().(*net.TCPAddr).IP.String()
-
-	// Override IP with advertised address if set (e.g. Windows host IP for WSL)
-	if c.advertiseAddr != "" {
-		localIP = c.advertiseAddr
-	}
-
-	if c.clientPort > 0 {
-		localAddr = fmt.Sprintf("%s:%d", localIP, c.clientPort)
-	} else {
-		if c.advertiseAddr != "" {
-			localPort := leaderConn.LocalAddr().(*net.TCPAddr).Port
-			localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
-		} else {
-			localAddr = leaderConn.LocalAddr().String()
-		}
-	}
-
-	consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
-
-	// Send CONSUME request to leader
-	fmt.Printf("[Consumer %s] -> CONSUME (topic: %s)\n", c.id[:8], c.topic)
-	if err := protocol.WriteTCPMessage(leaderConn, consumeMsg); err != nil {
-		leaderConn.Close()
-		return fmt.Errorf("failed to send CONSUME: %w", err)
-	}
-
-	// Read CONSUME_ACK response
-	msg, err := protocol.ReadTCPMessage(leaderConn)
-	if err != nil {
-		leaderConn.Close()
-		return fmt.Errorf("failed to read CONSUME_ACK: %w", err)
-	}
-
-	ack, ok := msg.(*protocol.ConsumeMsg)
-	if !ok {
-		leaderConn.Close()
-		return fmt.Errorf("unexpected response type: %T", msg)
-	}
-
-	if ack.Topic == "" {
-		leaderConn.Close()
-		return fmt.Errorf("subscription failed - topic may not have a producer yet")
-	}
-
-	// Get the assigned broker address from the response
-	c.brokerAddr = ack.ConsumerAddress // This now contains the assigned broker address
-	fmt.Printf("[Consumer %s] <- CONSUME_ACK (topic: %s, assigned broker: %s)\n", c.id[:8], ack.Topic, c.brokerAddr)
-
-	// Close leader connection - we're done with registration
-	leaderConn.Close()
-
-	// Connect to assigned broker for subscription
-	fmt.Printf("[Consumer %s] Connecting to assigned broker at %s...\n", c.id[:8], c.brokerAddr)
-
-	failureCount = 0
-	var brokerConn net.Conn
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		brokerConn, err = net.DialTimeout("tcp", c.brokerAddr, 5*time.Second)
-
-		if err != nil {
-			failureCount++
-			if failureCount >= failureThreshold {
-				time.Sleep(halfOpenDelay)
-				brokerConn, err = net.DialTimeout("tcp", c.brokerAddr, 5*time.Second)
-				if err == nil {
-					break
-				}
-				failureCount++
+		fmt.Printf("[Consumer %s] Registration attempt %d/%d failed: %v\n",
+			c.id[:8], regAttempt, maxAttempts, lastErr)
+		if regAttempt < maxAttempts {
+			fmt.Printf("[Consumer %s] Retrying in %v...\n", c.id[:8], regDelay)
+			time.Sleep(regDelay)
+			regDelay = time.Duration(float64(regDelay) * 1.5)
+			if regDelay > halfOpenDelay {
+				regDelay = halfOpenDelay
 			}
-		} else {
+		}
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("registration failed after %d attempts: %w", maxAttempts, lastErr)
+	}
+
+	fmt.Printf("[Consumer %s] <- CONSUME_ACK (assigned broker: %s)\n", c.id[:8], c.brokerAddr)
+
+	// Phase 2: Broker subscription with circuit breaker retry.
+	// Handles transient failures like broker not yet having stream assignment.
+	subDelay := retryDelay
+
+	for subAttempt := 1; subAttempt <= maxAttempts; subAttempt++ {
+		lastErr = c.attemptSubscription()
+		if lastErr == nil {
 			break
 		}
-
-		if attempt < maxAttempts {
-			time.Sleep(retryDelay)
+		fmt.Printf("[Consumer %s] Subscription attempt %d/%d failed: %v\n",
+			c.id[:8], subAttempt, maxAttempts, lastErr)
+		if subAttempt < maxAttempts {
+			fmt.Printf("[Consumer %s] Retrying in %v...\n", c.id[:8], subDelay)
+			time.Sleep(subDelay)
+			subDelay = time.Duration(float64(subDelay) * 1.5)
+			if subDelay > halfOpenDelay {
+				subDelay = halfOpenDelay
+			}
 		}
 	}
 
-	if err != nil {
-		return fmt.Errorf("failed to connect to broker after %d attempts: %w", maxAttempts, err)
+	if lastErr != nil {
+		return fmt.Errorf("subscription failed after %d attempts: %w", maxAttempts, lastErr)
 	}
 
-	c.tcpConn = brokerConn
-
-	// Get local address for subscription
-	localAddr = brokerConn.LocalAddr().String()
-
-	// Send SUBSCRIBE request to broker
-	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing, c.analyticsWindowSeconds, c.analyticsIntervalMs)
-
-	fmt.Printf("[Consumer %s] -> SUBSCRIBE (topic: %s, processing: %v)\n", c.id[:8], c.topic, c.enableProcessing)
-	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
-		brokerConn.Close()
-		return fmt.Errorf("failed to send SUBSCRIBE: %w", err)
-	}
-
-	// Read SUBSCRIBE_ACK response (broker sends back a SUBSCRIBE message as ACK)
-	msg, err = protocol.ReadTCPMessage(brokerConn)
-	if err != nil {
-		brokerConn.Close()
-		return fmt.Errorf("failed to read SUBSCRIBE_ACK: %w", err)
-	}
-
-	subAck, ok := msg.(*protocol.SubscribeMsg)
-	if !ok {
-		brokerConn.Close()
-		return fmt.Errorf("unexpected response type: %T", msg)
-	}
-
-	if subAck.Topic == "" {
-		brokerConn.Close()
-		return fmt.Errorf("broker subscription failed")
-	}
-
-	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (subscribed to broker for topic: %s)\n", c.id[:8], subAck.Topic)
-
-	// Save local address for potential reconnection
-	c.localAddr = localAddr
+	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (subscribed to broker for topic: %s)\n", c.id[:8], c.topic)
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
 	// Always bind to 0.0.0.0:port (not the advertised IP which may not be local, e.g. WSL)
+	var err error
 	if c.clientPort > 0 {
-		// Use fixed port for the listener
 		listenAddr := fmt.Sprintf("0.0.0.0:%d", c.clientPort)
 		c.tcpListener, err = net.Listen("tcp", listenAddr)
 		if err != nil {
 			fmt.Printf("[Consumer %s] Warning: failed to start TCP listener on %s: %v\n", c.id[:8], listenAddr, err)
 		}
 	} else {
-		localTCPAddr, err := net.ResolveTCPAddr("tcp", c.localAddr)
-		if err == nil {
-			c.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
-			if err != nil {
-				// Try with any available port if the original port is in use
-				c.tcpListener, err = net.Listen("tcp", ":0")
-			}
+		c.tcpListener, err = net.Listen("tcp", ":0")
+		if err != nil {
+			fmt.Printf("[Consumer %s] Warning: failed to start TCP listener: %v\n", c.id[:8], err)
 		}
 	}
 	if c.tcpListener != nil {
@@ -298,8 +192,107 @@ func (c *Consumer) Connect() error {
 	go c.handleReconnections()
 
 	// Start receiving results from broker in background goroutine
-	c.wg.Add(1) // Register goroutine before starting
+	c.wg.Add(1)
 	go c.receiveResults()
+
+	return nil
+}
+
+// attemptRegistration performs a single registration attempt with the leader.
+// Connects via TCP, sends CONSUME, reads CONSUME_ACK, and sets c.brokerAddr on success.
+func (c *Consumer) attemptRegistration() error {
+	conn, err := net.DialTimeout("tcp", c.leaderAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader: %w", err)
+	}
+	defer conn.Close()
+
+	// Determine local address for registration
+	localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
+	if c.advertiseAddr != "" {
+		localIP = c.advertiseAddr
+	}
+
+	var localAddr string
+	if c.clientPort > 0 {
+		localAddr = fmt.Sprintf("%s:%d", localIP, c.clientPort)
+	} else if c.advertiseAddr != "" {
+		localPort := conn.LocalAddr().(*net.TCPAddr).Port
+		localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
+	} else {
+		localAddr = conn.LocalAddr().String()
+	}
+
+	consumeMsg := protocol.NewConsumeMsg(c.id, c.topic, localAddr, 0)
+
+	fmt.Printf("[Consumer %s] -> CONSUME (topic: %s, addr: %s)\n", c.id[:8], c.topic, localAddr)
+	if err := protocol.WriteTCPMessage(conn, consumeMsg); err != nil {
+		return fmt.Errorf("failed to send CONSUME: %w", err)
+	}
+
+	msg, err := protocol.ReadTCPMessage(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read CONSUME_ACK: %w", err)
+	}
+
+	ack, ok := msg.(*protocol.ConsumeMsg)
+	if !ok {
+		return fmt.Errorf("unexpected response type: %T", msg)
+	}
+
+	if ack.Topic == "" {
+		return fmt.Errorf("no broker assigned (leader may be temporarily unavailable)")
+	}
+
+	c.brokerAddrMu.Lock()
+	c.brokerAddr = ack.ConsumerAddress
+	c.brokerAddrMu.Unlock()
+	return nil
+}
+
+// attemptSubscription performs a single subscription attempt with the assigned broker.
+// Connects via TCP, sends SUBSCRIBE, reads SUBSCRIBE_ACK, and sets c.tcpConn on success.
+func (c *Consumer) attemptSubscription() error {
+	c.brokerAddrMu.RLock()
+	brokerAddr := c.brokerAddr
+	c.brokerAddrMu.RUnlock()
+
+	brokerConn, err := net.DialTimeout("tcp", brokerAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to broker: %w", err)
+	}
+
+	localAddr := brokerConn.LocalAddr().String()
+	subscribeMsg := protocol.NewSubscribeMsg(c.id, c.topic, c.id, localAddr, c.enableProcessing, c.analyticsWindowSeconds, c.analyticsIntervalMs)
+
+	fmt.Printf("[Consumer %s] -> SUBSCRIBE (topic: %s, processing: %v)\n", c.id[:8], c.topic, c.enableProcessing)
+	if err := protocol.WriteTCPMessage(brokerConn, subscribeMsg); err != nil {
+		brokerConn.Close()
+		return fmt.Errorf("failed to send SUBSCRIBE: %w", err)
+	}
+
+	msg, err := protocol.ReadTCPMessage(brokerConn)
+	if err != nil {
+		brokerConn.Close()
+		return fmt.Errorf("failed to read SUBSCRIBE_ACK: %w", err)
+	}
+
+	subAck, ok := msg.(*protocol.SubscribeMsg)
+	if !ok {
+		brokerConn.Close()
+		return fmt.Errorf("unexpected response type: %T", msg)
+	}
+
+	if subAck.Topic == "" {
+		brokerConn.Close()
+		return fmt.Errorf("broker subscription failed (broker may not have assignment yet)")
+	}
+
+	// Success - set connection and save local address
+	c.tcpConnMu.Lock()
+	c.tcpConn = brokerConn
+	c.tcpConnMu.Unlock()
+	c.localAddr = localAddr
 
 	return nil
 }

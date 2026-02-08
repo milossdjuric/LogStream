@@ -26,6 +26,21 @@ func (n *Node) IsFrozen() bool {
 	return n.viewState.IsFrozen()
 }
 
+// waitForUnfreeze blocks until operations are unfrozen or timeout expires.
+// Returns true if unfrozen, false if timed out.
+// Used by PRODUCE/CONSUME handlers to keep the TCP connection open during freeze
+// instead of queuing (which would cause the defer to close the conn).
+func (n *Node) waitForUnfreeze(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for n.IsFrozen() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
 // freezeOperations freezes all operations during view change
 func (n *Node) freezeOperations() {
 	fmt.Printf("[Node %s] Freezing operations for view change...\n", n.id[:8])
@@ -55,7 +70,10 @@ func (n *Node) queueFrozenMessage(msgType string, msg protocol.Message, conn net
 		n.id[:8], msgType, len(n.frozenQueue))
 }
 
-// processQueuedMessages processes all messages that were queued during freeze
+// processQueuedMessages processes all messages that were queued during freeze.
+// Only DATA messages are queued now - PRODUCE/CONSUME handlers wait for unfreeze
+// instead of queuing, to avoid the conn-close bug (defer would close the conn
+// while the frozen queue still held a reference to it).
 func (n *Node) processQueuedMessages() {
 	n.frozenQueueMu.Lock()
 	queue := n.frozenQueue
@@ -70,17 +88,9 @@ func (n *Node) processQueuedMessages() {
 
 	for _, fm := range queue {
 		switch fm.msgType {
-		case "PRODUCE":
-			if produceMsg, ok := fm.msg.(*protocol.ProduceMsg); ok {
-				go n.handleProduceRequest(produceMsg, fm.conn)
-			}
-		case "CONSUME":
-			if consumeMsg, ok := fm.msg.(*protocol.ConsumeMsg); ok {
-				go n.handleConsumeRequest(consumeMsg, fm.conn)
-			}
 		case "DATA":
 			if dataMsg, ok := fm.msg.(*protocol.DataMsg); ok {
-				// DATA messages don't have a connection to respond to
+				// DATA messages are UDP - no connection to close
 				go n.handleData(dataMsg, nil)
 			}
 		default:

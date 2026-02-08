@@ -79,92 +79,38 @@ func (p *Producer) Connect() error {
 		fmt.Printf("[Producer %s] Discovered leader at %s\n", p.id[:8], p.leaderAddr)
 	}
 
-	failureCount := 0
-	var conn net.Conn
-	var err error
-
 	time.Sleep(initialDelay)
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		conn, err = net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
+	// Registration with circuit breaker retry.
+	// Handles transient failures like leader frozen during view change.
+	regDelay := retryDelay
+	var lastErr error
 
-		if err != nil {
-			failureCount++
-			if failureCount >= failureThreshold {
-				time.Sleep(halfOpenDelay)
-				conn, err = net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
-				if err == nil {
-					break
-				}
-				failureCount++
-			}
-		} else {
+	for regAttempt := 1; regAttempt <= maxAttempts; regAttempt++ {
+		lastErr = p.attemptRegistration()
+		if lastErr == nil {
 			break
 		}
-
-		if attempt < maxAttempts {
-			time.Sleep(retryDelay)
+		fmt.Printf("[Producer %s] Registration attempt %d/%d failed: %v\n",
+			p.id[:8], regAttempt, maxAttempts, lastErr)
+		if regAttempt < maxAttempts {
+			fmt.Printf("[Producer %s] Retrying in %v...\n", p.id[:8], regDelay)
+			time.Sleep(regDelay)
+			regDelay = time.Duration(float64(regDelay) * 1.5)
+			if regDelay > halfOpenDelay {
+				regDelay = halfOpenDelay
+			}
 		}
 	}
 
-	if err != nil {
-		return fmt.Errorf("failed to connect to leader after %d attempts: %w", maxAttempts, err)
-	}
-
-	defer conn.Close()
-
-	// Determine local address for registration
-	var localAddr string
-	localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
-
-	// Override IP with advertised address if set (e.g. Windows host IP for WSL)
-	if p.advertiseAddr != "" {
-		localIP = p.advertiseAddr
-	}
-
-	if p.clientPort > 0 {
-		// Use fixed port: create TCP listener first, then register with that address
-		localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
-	} else {
-		if p.advertiseAddr != "" {
-			// Advertised IP with ephemeral port
-			localPort := conn.LocalAddr().(*net.TCPAddr).Port
-			localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
-		} else {
-			// Use ephemeral port from the leader connection
-			localAddr = conn.LocalAddr().String()
-		}
-	}
-
-	// Make PRODUCE message
-	produceMsg := protocol.NewProduceMsg(p.id, p.topic, localAddr, 0)
-
-	// Send PRODUCE request
-	fmt.Printf("[Producer %s] -> PRODUCE (topic: %s, addr: %s)\n", p.id[:8], p.topic, localAddr)
-	if err := protocol.WriteTCPMessage(conn, produceMsg); err != nil {
-		return fmt.Errorf("failed to send PRODUCE: %w", err)
-	}
-
-	// Read PRODUCE_ACK response
-	msg, err := protocol.ReadTCPMessage(conn)
-	if err != nil {
-		return fmt.Errorf("failed to read PRODUCE_ACK: %w", err)
-	}
-
-	ack, ok := msg.(*protocol.ProduceMsg)
-	if !ok {
-		return fmt.Errorf("unexpected response type: %T", msg)
-	}
-
-	// Extract assigned broker address
-	p.brokerAddr = ack.ProducerAddress
-	if p.brokerAddr == "" {
-		return fmt.Errorf("no broker assigned")
+	if lastErr != nil {
+		return fmt.Errorf("registration failed after %d attempts: %w", maxAttempts, lastErr)
 	}
 
 	fmt.Printf("[Producer %s] <- PRODUCE_ACK (assigned broker: %s)\n", p.id[:8], p.brokerAddr)
 
 	// Create UDP connection for sending data
+	var err error
 	p.udpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return fmt.Errorf("failed to create UDP socket: %w", err)
@@ -188,20 +134,11 @@ func (p *Producer) Connect() error {
 			return fmt.Errorf("failed to start TCP listener on %s: %w", listenAddr, err)
 		}
 	} else {
-		// Use the ephemeral port from registration connection
-		localTCPAddr, err := net.ResolveTCPAddr("tcp", localAddr)
+		// Use any available port for the listener
+		p.tcpListener, err = net.Listen("tcp", ":0")
 		if err != nil {
 			p.udpConn.Close()
-			return fmt.Errorf("failed to resolve local TCP address: %w", err)
-		}
-		p.tcpListener, err = net.ListenTCP("tcp", localTCPAddr)
-		if err != nil {
-			// Try with any available port if the original port is in use
-			p.tcpListener, err = net.Listen("tcp", ":0")
-			if err != nil {
-				p.udpConn.Close()
-				return fmt.Errorf("failed to start TCP listener: %w", err)
-			}
+			return fmt.Errorf("failed to start TCP listener: %w", err)
 		}
 	}
 
@@ -215,6 +152,58 @@ func (p *Producer) Connect() error {
 	p.wg.Add(1) // Register goroutine before starting
 	go p.sendHeartbeats()
 
+	return nil
+}
+
+// attemptRegistration performs a single registration attempt with the leader.
+// Connects via TCP, sends PRODUCE, reads PRODUCE_ACK, and sets p.brokerAddr on success.
+func (p *Producer) attemptRegistration() error {
+	conn, err := net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to leader: %w", err)
+	}
+	defer conn.Close()
+
+	// Determine local address for registration
+	localIP := conn.LocalAddr().(*net.TCPAddr).IP.String()
+	if p.advertiseAddr != "" {
+		localIP = p.advertiseAddr
+	}
+
+	var localAddr string
+	if p.clientPort > 0 {
+		localAddr = fmt.Sprintf("%s:%d", localIP, p.clientPort)
+	} else if p.advertiseAddr != "" {
+		localPort := conn.LocalAddr().(*net.TCPAddr).Port
+		localAddr = fmt.Sprintf("%s:%d", localIP, localPort)
+	} else {
+		localAddr = conn.LocalAddr().String()
+	}
+
+	produceMsg := protocol.NewProduceMsg(p.id, p.topic, localAddr, 0)
+
+	fmt.Printf("[Producer %s] -> PRODUCE (topic: %s, addr: %s)\n", p.id[:8], p.topic, localAddr)
+	if err := protocol.WriteTCPMessage(conn, produceMsg); err != nil {
+		return fmt.Errorf("failed to send PRODUCE: %w", err)
+	}
+
+	msg, err := protocol.ReadTCPMessage(conn)
+	if err != nil {
+		return fmt.Errorf("failed to read PRODUCE_ACK: %w", err)
+	}
+
+	ack, ok := msg.(*protocol.ProduceMsg)
+	if !ok {
+		return fmt.Errorf("unexpected response type: %T", msg)
+	}
+
+	if ack.ProducerAddress == "" {
+		return fmt.Errorf("no broker assigned (leader may be temporarily unavailable)")
+	}
+
+	p.brokerAddrMu.Lock()
+	p.brokerAddr = ack.ProducerAddress
+	p.brokerAddrMu.Unlock()
 	return nil
 }
 

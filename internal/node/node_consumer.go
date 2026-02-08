@@ -142,12 +142,23 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 	fmt.Printf("[Leader %s] <- CONSUME from %s (topic: %s, addr: %s)\n",
 		n.id[:8], consumerID[:8], topic, address)
 
-	// View-synchronous check: queue message during view change instead of rejecting
-	// This ensures no requests are lost during state exchange
+	// View-synchronous check: send immediate failure during freeze.
+	// Client will retry with backoff (circuit breaker pattern).
 	if n.IsFrozen() {
-		fmt.Printf("[Leader %s] CONSUME from %s queued - operations frozen for view change\n",
+		fmt.Printf("[Leader %s] CONSUME from %s REJECTED - operations frozen for view change (client will retry)\n",
 			n.id[:8], consumerID[:8])
-		n.queueFrozenMessage("CONSUME", msg, conn)
+		ack := &protocol.ConsumeMessage{
+			Header: &protocol.MessageHeader{
+				Type:        protocol.MessageType_CONSUME,
+				Timestamp:   time.Now().UnixNano(),
+				SenderId:    n.id,
+				SequenceNum: 0,
+				SenderType:  protocol.NodeType_LEADER,
+			},
+			Topic:           "",
+			ConsumerAddress: "",
+		}
+		protocol.WriteTCPMessage(conn, &protocol.ConsumeMsg{ConsumeMessage: ack})
 		return
 	}
 

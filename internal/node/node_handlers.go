@@ -310,12 +310,23 @@ func (n *Node) handleProduceRequest(msg *protocol.ProduceMsg, conn net.Conn) {
 	fmt.Printf("[Leader %s] <- PRODUCE from %s (topic: %s, addr: %s)\n",
 		n.id[:8], producerID[:8], topic, address)
 
-	// View-synchronous check: queue message during view change instead of rejecting
-	// This ensures no requests are lost during state exchange
+	// View-synchronous check: send immediate failure during freeze.
+	// Client will retry with backoff (circuit breaker pattern).
 	if n.IsFrozen() {
-		fmt.Printf("[Leader %s] PRODUCE from %s queued - operations frozen for view change\n",
+		fmt.Printf("[Leader %s] PRODUCE from %s REJECTED - operations frozen for view change (client will retry)\n",
 			n.id[:8], producerID[:8])
-		n.queueFrozenMessage("PRODUCE", msg, conn)
+		ack := &protocol.ProduceMessage{
+			Header: &protocol.MessageHeader{
+				Type:        protocol.MessageType_PRODUCE,
+				Timestamp:   time.Now().UnixNano(),
+				SenderId:    n.id,
+				SequenceNum: 0,
+				SenderType:  protocol.NodeType_LEADER,
+			},
+			Topic:           "",
+			ProducerAddress: "",
+		}
+		protocol.WriteTCPMessage(conn, &protocol.ProduceMsg{ProduceMessage: ack})
 		return
 	}
 
