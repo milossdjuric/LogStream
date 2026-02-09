@@ -59,10 +59,10 @@ func NewProducerWithPort(topic, leaderAddr string, port int, advertiseAddr strin
 // If no leader address was provided, auto-discovers the cluster via broadcast first
 func (p *Producer) Connect() error {
 	const (
-		maxAttempts      = 10
+		maxAttempts      = 15
 		initialDelay     = 500 * time.Millisecond
-		retryDelay       = 1 * time.Second
-		halfOpenDelay    = 2 * time.Second
+		retryDelay       = 2 * time.Second
+		halfOpenDelay    = 5 * time.Second
 		failureThreshold = 5
 	)
 
@@ -295,7 +295,7 @@ func (p *Producer) sendHeartbeats() {
 // reconnectToCluster re-discovers the cluster leader and re-registers the producer.
 // Called when the leader appears to be down (consecutive heartbeat failures).
 func (p *Producer) reconnectToCluster() error {
-	const maxAttempts = 5
+	const maxAttempts = 10
 	const attemptDelay = 5 * time.Second
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {

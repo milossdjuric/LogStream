@@ -90,10 +90,10 @@ func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) 
 // If no leader address was provided, auto-discovers the cluster via broadcast first
 func (c *Consumer) Connect() error {
 	const (
-		maxAttempts   = 10
+		maxAttempts   = 15
 		initialDelay  = 500 * time.Millisecond
-		retryDelay    = 1 * time.Second
-		halfOpenDelay = 2 * time.Second
+		retryDelay    = 2 * time.Second
+		halfOpenDelay = 5 * time.Second
 	)
 
 	// Auto-discover leader if not provided
@@ -402,7 +402,7 @@ func (c *Consumer) receiveResults() {
 // reconnectToCluster re-discovers the cluster leader and re-registers the consumer.
 // Called when the broker connection is lost (leader or broker died).
 func (c *Consumer) reconnectToCluster() error {
-	const maxAttempts = 5
+	const maxAttempts = 10
 	const attemptDelay = 5 * time.Second
 
 	// Close existing broker connection
@@ -669,8 +669,8 @@ func (c *Consumer) Reconnect(newBrokerAddr string) error {
 	c.brokerAddrMu.Unlock()
 
 	// Connect to new broker
-	const maxAttempts = 5
-	const retryDelay = 1 * time.Second
+	const maxAttempts = 10
+	const retryDelay = 2 * time.Second
 
 	var brokerConn net.Conn
 	var err error
