@@ -247,6 +247,13 @@ func (n *Node) becomeLeaderInternal(fromElection bool, electionID int64) {
 		if fromElection {
 			if err := n.initiateStateExchange(electionID); err != nil {
 				log.Printf("[Leader %s] State exchange failed: %v\n", n.id[:8], err)
+				// Safety: ensure operations are unfrozen even if state exchange failed
+				// (initiateStateExchange/installNewView should unfreeze on error paths,
+				// but this is a final safety net to prevent permanent freeze)
+				if n.IsFrozen() {
+					log.Printf("[Leader %s] Safety unfreeze after state exchange failure\n", n.id[:8])
+					n.unfreezeOperations()
+				}
 			}
 		} else {
 			if err := n.replicateAllState(); err != nil {

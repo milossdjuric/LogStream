@@ -440,10 +440,10 @@ func (n *Node) listenForBroadcastJoins() {
 			// Register new node in state.Registry
 			newNodeID := senderID
 
-			// View-synchronous: Perform lightweight view change on node join
+			// View-synchronous: Perform view change on node join
 			// This ensures membership changes are delivered atomically with view change
-			// performLightweightViewChange already sends VIEW_INSTALL to all followers via TCP
-			n.performLightweightViewChange(newNodeID, joinMsg.Address)
+			// Uses the same installNewView path as post-election recovery
+			n.performViewChangeForNodeJoin(newNodeID, joinMsg.Address)
 
 			// Send response using protocol.BroadcastConnection
 			responseAddr := fmt.Sprintf("%s", sender)
@@ -461,7 +461,7 @@ func (n *Node) listenForBroadcastJoins() {
 				fmt.Printf("[Leader %s] -> JOIN_RESPONSE to %s\n", n.id[:8], sender)
 			}
 
-			// Note: State replication is handled by performLightweightViewChange via TCP VIEW_INSTALL
+			// Note: State replication is handled by performViewChangeForNodeJoin via TCP VIEW_INSTALL
 			// No additional UDP multicast sync needed
 		}
 	}

@@ -338,9 +338,14 @@ func (n *Node) handleStateExchange(msg *protocol.StateExchangeMsg, conn net.Conn
 	}
 }
 
-// installNewView installs a new view after state exchange
-// mergedLogs contains the UNION of all log entries for view-synchronous consistency
+// installNewView installs a new view after state exchange or node join.
+// This is the SINGLE code path for all view installations (post-election recovery and node joins).
+// mergedLogs contains the UNION of all log entries for view-synchronous consistency (nil for node joins).
+// Uses defer to guarantee unfreeze regardless of error path.
 func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[string]uint64, mergedLogs []*protocol.TopicLogEntries) error {
+	// Guarantee unfreeze on ALL exit paths (success or error)
+	defer n.unfreezeOperations()
+
 	if !n.IsLeader() {
 		return fmt.Errorf("only leader can install new view")
 	}
@@ -443,7 +448,7 @@ collectAcks:
 			n.id[:8], newViewNumber, ackCount, len(memberIDs), requiredAcks)
 	}
 
-	// End recovery
+	// End recovery (no-op if no recovery was in progress, e.g. node join)
 	n.recoveryManager.EndRecovery()
 
 	// Reset replication sequence to agreed sequence
@@ -451,11 +456,7 @@ collectAcks:
 	n.lastReplicatedSeq = agreedSeq
 	fmt.Printf("[Leader %s] Reset lastReplicatedSeq to %d for new view\n", n.id[:8], agreedSeq)
 
-	// Unfreeze operations
-	n.unfreezeOperations()
-
-	// Note: State replication is already done via VIEW_INSTALL messages sent above
-	// No additional replication needed - all followers received state in VIEW_INSTALL
+	// Note: unfreeze happens via defer at the top of this function
 
 	fmt.Printf("[Leader %s] New view %d is now active\n", n.id[:8], newViewNumber)
 	return nil
@@ -642,104 +643,36 @@ func (n *Node) PrintViewStatus() {
 	n.viewState.PrintStatus()
 }
 
-// performLightweightViewChange performs a lightweight view change when a new node joins
-// Unlike full state exchange after leader failure, this only updates membership atomically
-// Steps: Freeze -> Add member -> Install new view -> Unfreeze
-func (n *Node) performLightweightViewChange(newNodeID, newNodeAddr string) {
+// performViewChangeForNodeJoin performs a view change when a new node joins.
+// Uses the same installNewView path as post-election recovery for consistency.
+// Steps: Freeze -> Register broker -> installNewView (which defers unfreeze)
+func (n *Node) performViewChangeForNodeJoin(newNodeID, newNodeAddr string) {
 	if !n.IsLeader() {
 		return
 	}
 
 	fmt.Printf("\n[Leader %s] ========================================\n", n.id[:8])
-	fmt.Printf("[Leader %s] LIGHTWEIGHT VIEW CHANGE - Node Join\n", n.id[:8])
+	fmt.Printf("[Leader %s] VIEW CHANGE - Node Join\n", n.id[:8])
 	fmt.Printf("[Leader %s] New Node: %s (%s)\n", n.id[:8], newNodeID[:8], newNodeAddr)
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
-	// 1. Freeze operations briefly
+	// 1. Freeze operations
 	n.freezeOperations()
 
 	// 2. Register new broker in cluster state
 	n.clusterState.RegisterBroker(newNodeID, newNodeAddr, false)
 
-	// 3. Prepare new view
-	newViewNumber := n.viewState.GetViewNumber() + 1
-
-	// Get updated membership
-	brokers := n.clusterState.ListBrokers()
-	var memberIDs []string
-	var memberAddresses []string
-	for _, brokerID := range brokers {
-		broker, ok := n.clusterState.GetBroker(brokerID)
-		if ok {
-			memberIDs = append(memberIDs, brokerID)
-			memberAddresses = append(memberAddresses, broker.Address)
-		}
-	}
-
-	// 4. Install view locally with current sequence (no state exchange needed)
-	currentSeq := n.lastAppliedSeqNum
-	err := n.viewState.InstallView(newViewNumber, n.id, memberIDs, memberAddresses, currentSeq)
-	if err != nil {
-		fmt.Printf("[Leader %s] Failed to install view locally: %v\n", n.id[:8], err)
-		n.unfreezeOperations()
-		return
-	}
-
-	// 5. Collect current log offsets (for new node synchronization)
+	// 3. Collect current log offsets for new node synchronization
 	agreedLogOffsets := n.collectLogOffsets()
 
-	// 6. Serialize agreed state
-	stateSnapshot, err := n.clusterState.Serialize()
-	if err != nil {
-		fmt.Printf("[Leader %s] Failed to serialize state for view install: %v\n", n.id[:8], err)
-		n.unfreezeOperations()
-		return
+	// 4. Install new view (handles view increment, VIEW_INSTALL to followers, and defers unfreeze)
+	currentSeq := n.lastAppliedSeqNum
+	if err := n.installNewView(0, currentSeq, agreedLogOffsets, nil); err != nil {
+		log.Printf("[Leader %s] View change for node join failed: %v\n", n.id[:8], err)
+		// installNewView defers unfreeze, so no manual unfreeze needed
 	}
 
-	// 7. Send VIEW_INSTALL to ALL followers (including existing ones)
-	// This ensures all followers update their view and membership atomically
-	var wg sync.WaitGroup
-	for i, memberID := range memberIDs {
-		if memberID == n.id {
-			continue // Skip self
-		}
-
-		wg.Add(1)
-		go func(mID, mAddr string) {
-			defer wg.Done()
-			// For lightweight view change (node join), no log merge needed - pass nil
-			ack := n.sendViewInstall(mID, mAddr, newViewNumber, currentSeq, stateSnapshot, memberIDs, memberAddresses, agreedLogOffsets, nil)
-			if ack.success {
-				fmt.Printf("[Leader %s] VIEW_INSTALL_ACK from %s (success)\n", n.id[:8], ack.brokerID[:8])
-			} else {
-				fmt.Printf("[Leader %s] VIEW_INSTALL_ACK from %s (failed: %s)\n",
-					n.id[:8], ack.brokerID[:8], ack.errorMsg)
-			}
-		}(memberID, memberAddresses[i])
-	}
-
-	// Wait for all acks (with timeout)
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		fmt.Printf("[Leader %s] All VIEW_INSTALL acknowledgments received\n", n.id[:8])
-	case <-time.After(5 * time.Second):
-		fmt.Printf("[Leader %s] VIEW_INSTALL timeout - some followers may not have received the new view\n", n.id[:8])
-	}
-
-	// 8. Unfreeze operations
-	n.unfreezeOperations()
-
-	// Note: State replication is already done via VIEW_INSTALL messages sent above
-	// All followers (including the new node) received state in VIEW_INSTALL
-
-	fmt.Printf("[Leader %s] Lightweight view change complete - New view: %d with %d members\n",
-		n.id[:8], newViewNumber, len(memberIDs))
+	fmt.Printf("[Leader %s] View change for node join complete\n", n.id[:8])
 }
 
 // collectLogOffsets returns a map of topic -> highest offset for all local logs

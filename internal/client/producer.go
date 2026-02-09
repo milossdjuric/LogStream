@@ -342,6 +342,16 @@ func (p *Producer) reconnectToCluster() error {
 	const maxAttempts = 10
 	const attemptDelay = 5 * time.Second
 
+	// Close existing UDP socket before discovery to free the port
+	// DiscoverLeader needs to bind broadcast sockets to clientPort,
+	// which conflicts with the existing udpConn on the same port
+	p.brokerAddrMu.Lock()
+	if p.udpConn != nil {
+		p.udpConn.Close()
+		p.udpConn = nil
+	}
+	p.brokerAddrMu.Unlock()
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		fmt.Printf("[Producer %s] Reconnection attempt %d/%d...\n", p.id[:8], attempt, maxAttempts)
 
@@ -408,15 +418,27 @@ func (p *Producer) reconnectToCluster() error {
 
 		fmt.Printf("[Producer %s] <- PRODUCE_ACK (new broker: %s)\n", p.id[:8], newBrokerAddr)
 
-		// Resolve new broker address (reuse existing UDP socket)
+		// Resolve new broker address
 		newRemoteAddr, err := net.ResolveUDPAddr("udp", newBrokerAddr)
 		if err != nil {
 			log.Printf("[Producer %s] Failed to resolve new broker address: %v", p.id[:8], err)
 			continue
 		}
 
-		// Update broker connection state (reuse UDP socket)
+		// Re-create UDP socket (was closed before discovery to free the port)
+		udpPort := 0
+		if p.clientPort > 0 {
+			udpPort = p.clientPort
+		}
+		newUDPConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: udpPort})
+		if err != nil {
+			log.Printf("[Producer %s] Failed to re-create UDP socket: %v", p.id[:8], err)
+			continue
+		}
+
+		// Update broker connection state with new UDP socket
 		p.brokerAddrMu.Lock()
+		p.udpConn = newUDPConn
 		p.udpRemoteAddr = newRemoteAddr
 		p.brokerAddr = newBrokerAddr
 		p.brokerAddrMu.Unlock()

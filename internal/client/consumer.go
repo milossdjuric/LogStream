@@ -477,6 +477,14 @@ func (c *Consumer) reconnectToCluster() error {
 	}
 	c.tcpConnMu.Unlock()
 
+	// Close existing UDP socket before discovery to free the port
+	// DiscoverLeader needs to bind broadcast sockets to clientPort,
+	// which conflicts with the existing udpConn on the same port
+	if c.udpConn != nil {
+		c.udpConn.Close()
+		c.udpConn = nil
+	}
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		fmt.Printf("[Consumer %s] Reconnection attempt %d/%d...\n", c.id[:8], attempt, maxAttempts)
 
@@ -602,6 +610,19 @@ func (c *Consumer) reconnectToCluster() error {
 		c.tcpConnMu.Lock()
 		c.tcpConn = brokerConn
 		c.tcpConnMu.Unlock()
+
+		// Re-create UDP socket (was closed before discovery to free the port)
+		udpPort := 0
+		if c.clientPort > 0 {
+			udpPort = c.clientPort
+		}
+		newUDPConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: udpPort})
+		if err != nil {
+			log.Printf("[Consumer %s] Warning: Failed to re-create UDP socket: %v", c.id[:8], err)
+			// Continue anyway - consumer can still receive data via TCP from broker
+		} else {
+			c.udpConn = newUDPConn
+		}
 
 		// Update leader address and UDP heartbeat target
 		c.leaderAddr = leaderAddr

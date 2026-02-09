@@ -591,7 +591,7 @@ func (n *Node) handleTCPJoin(msg *protocol.JoinMsg, conn net.Conn) {
 
 	// Register new broker via view change
 	newNodeID := senderID
-	n.performLightweightViewChange(newNodeID, msg.Address)
+	n.performViewChangeForNodeJoin(newNodeID, msg.Address)
 
 	// Send JOIN_RESPONSE
 	brokers := n.clusterState.ListBrokers()
