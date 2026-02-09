@@ -16,19 +16,19 @@ type Producer struct {
 	topic         string
 	leaderAddr    string
 	brokerAddr    string
-	brokerAddrMu  sync.RWMutex   // Protects brokerAddr, udpRemoteAddr, and udpConn
+	brokerAddrMu  sync.RWMutex // Protects brokerAddr, udpRemoteAddr, and udpConn
 	udpConn       *net.UDPConn
 	udpRemoteAddr *net.UDPAddr
-	tcpListener   net.Listener   // TCP listener for incoming messages from leader
-	clientPort    int            // Fixed TCP listener port (0 = OS picks)
-	advertiseAddr string         // Override advertised IP (e.g. Windows host IP for WSL)
+	tcpListener   net.Listener // TCP listener for incoming messages from leader
+	clientPort    int          // Fixed TCP listener port (0 = OS picks)
+	advertiseAddr string       // Override advertised IP (e.g. Windows host IP for WSL)
 	stopHeartbeat chan struct{}
 	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
 	wg            sync.WaitGroup // Synchronize goroutine lifecycle
 
 	// UDP heartbeat state
-	leaderAddrUDP         *net.UDPAddr   // Resolved leader UDP address for heartbeats
+	leaderAddrUDP         *net.UDPAddr // Resolved leader UDP address for heartbeats
 	lastLeaderHeartbeat   time.Time
 	lastLeaderHeartbeatMu sync.RWMutex
 }
@@ -266,7 +266,7 @@ func (p *Producer) GetSequenceNum() int64 {
 // Detects leader death via missing incoming heartbeats and triggers cluster re-discovery
 func (p *Producer) sendHeartbeats() {
 	defer p.wg.Done()
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -281,11 +281,12 @@ func (p *Producer) sendHeartbeats() {
 				protocol.WriteUDPMessage(conn, heartbeat, p.leaderAddrUDP)
 			}
 
-			// Check for leader failure (no heartbeat received for 60s)
+			// Check for leader failure (no heartbeat received for 10s)
+			// This detects leader death within ~12 seconds instead of 60+
 			p.lastLeaderHeartbeatMu.RLock()
 			lastHB := p.lastLeaderHeartbeat
 			p.lastLeaderHeartbeatMu.RUnlock()
-			if !lastHB.IsZero() && time.Since(lastHB) > 60*time.Second {
+			if !lastHB.IsZero() && time.Since(lastHB) > 10*time.Second {
 				fmt.Printf("[Producer %s] Leader appears down (no heartbeat for %v), attempting re-discovery...\n",
 					p.id[:8], time.Since(lastHB).Round(time.Second))
 				if err := p.reconnectToCluster(); err != nil {

@@ -14,23 +14,23 @@ import (
 
 // Consumer handles consuming data from LogStream
 type Consumer struct {
-	id               string
-	topic            string
-	leaderAddr       string
-	brokerAddr       string   // Assigned broker address (from CONSUME_ACK)
-	brokerAddrMu     sync.RWMutex
-	tcpConn          net.Conn // Connection to the assigned broker
-	tcpConnMu        sync.Mutex
-	tcpListener      net.Listener // TCP listener for incoming messages from leader
-	localAddr        string       // Local address used for registration
-	results          chan *protocol.ResultMessage
-	stopSignal       chan struct{}
-	stopListener     chan struct{}
-	enableProcessing       bool  // Whether to request data processing from broker
-	analyticsWindowSeconds int32 // 0 = use broker default
-	analyticsIntervalMs    int32 // 0 = use broker default
-	clientPort             int    // Fixed TCP listener port (0 = OS picks)
-	advertiseAddr          string // Override advertised IP (e.g. Windows host IP for WSL)
+	id                     string
+	topic                  string
+	leaderAddr             string
+	brokerAddr             string // Assigned broker address (from CONSUME_ACK)
+	brokerAddrMu           sync.RWMutex
+	tcpConn                net.Conn // Connection to the assigned broker
+	tcpConnMu              sync.Mutex
+	tcpListener            net.Listener // TCP listener for incoming messages from leader
+	localAddr              string       // Local address used for registration
+	results                chan *protocol.ResultMessage
+	stopSignal             chan struct{}
+	stopListener           chan struct{}
+	enableProcessing       bool           // Whether to request data processing from broker
+	analyticsWindowSeconds int32          // 0 = use broker default
+	analyticsIntervalMs    int32          // 0 = use broker default
+	clientPort             int            // Fixed TCP listener port (0 = OS picks)
+	advertiseAddr          string         // Override advertised IP (e.g. Windows host IP for WSL)
 	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
 
 	// UDP heartbeat state (consumer sends heartbeats to leader to stay alive)
@@ -329,6 +329,10 @@ func (c *Consumer) receiveResults() {
 				continue
 			}
 
+			// Set read deadline to detect broker death faster
+			// If broker dies, read will timeout instead of blocking indefinitely
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
 			msg, err := protocol.ReadTCPMessage(conn)
 			if err != nil {
 				errStr := err.Error()
@@ -447,7 +451,7 @@ func (c *Consumer) receiveResults() {
 // sendHeartbeats sends periodic heartbeats to leader via UDP
 func (c *Consumer) sendHeartbeats() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
