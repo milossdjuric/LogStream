@@ -520,10 +520,14 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 			if n.tryNextAvailableNode(electionID, ringParticipants) {
 				fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded to next available node\n", n.id[:8])
 			} else {
-				// No other nodes in the ring are reachable
-				// Since we're forwarding a higher candidate ID (not ours), we can't declare victory
-				fmt.Printf("[Node %s] [Election-Announce] WARNING: No other nodes reachable, but candidate %s is not me\n", n.id[:8], candidateID[:8])
-				fmt.Printf("[Node %s] [Election-Announce] Election cannot complete - waiting for nodes to become available\n", n.id[:8])
+				// No other nodes in the ring are reachable - including the higher candidate
+				// The higher candidate is dead (unreachable), so we are the sole survivor
+				fmt.Printf("[Node %s] [Election-Announce] ======================================\n", n.id[:8])
+				fmt.Printf("[Node %s] [Election-Announce] No nodes reachable (including candidate %s) - I WIN as sole survivor!\n", n.id[:8], candidateID[:8])
+				fmt.Printf("[Node %s] [Election-Announce] ======================================\n\n", n.id[:8])
+
+				n.election.DeclareVictory(n.id)
+				n.becomeLeaderAfterElection(electionID)
 			}
 		} else {
 			fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded candidate\n", n.id[:8])
@@ -598,6 +602,15 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	fmt.Printf("[Node %s] [Election-Victory] Ring participants: %d nodes\n", n.id[:8], len(ringParticipants))
 	fmt.Printf("[Node %s] [Election-Victory] My ID: %s\n", n.id[:8], n.id[:8])
 
+	// If VICTORY completed the circuit back to us (the winner), just return.
+	// Do NOT freeze - we already ran becomeLeaderAfterElection which handles unfreeze
+	// via installNewView's defer. Re-freezing here after installNewView unfroze would
+	// leave the node permanently frozen with no unfreeze path.
+	if leaderID == n.id {
+		fmt.Printf("[Election] VICTORY message completed circuit back to winner\n")
+		return
+	}
+
 	// VIEW-SYNCHRONOUS: Ensure we're frozen during election
 	// (should already be frozen from ANNOUNCE, but ensure consistency)
 	if !n.IsFrozen() {
@@ -623,11 +636,6 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 			return
 		}
 		fmt.Printf("[Node %s] [Election-Victory] Ring computed, next node: %s\n", n.id[:8], n.nextNode)
-	}
-
-	if leaderID == n.id {
-		fmt.Printf("[Election] VICTORY message completed circuit\n")
-		return
 	}
 
 	fmt.Printf("[Election] Accepting %s as new leader\n", leaderID[:8])
