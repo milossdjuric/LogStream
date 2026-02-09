@@ -482,7 +482,8 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 	// This is the key fix: all nodes use the same ring, not their own computation
 	if len(ringParticipants) < 2 {
 		fmt.Printf("[Node %s] [Election-Announce] WARNING: Ring participants too small (%d)\n", n.id[:8], len(ringParticipants))
-		fmt.Printf("[Node %s] [Election-Announce] Ignoring election - invalid ring\n", n.id[:8])
+		fmt.Printf("[Node %s] [Election-Announce] Ignoring election - invalid ring, unfreezing\n", n.id[:8])
+		n.unfreezeOperations()
 		return
 	}
 
@@ -493,8 +494,9 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 	if n.nextNode == "" || true { // Always recompute to use message's ring
 		fmt.Printf("[Node %s] [Election-Announce] Computing ring from message's participants...\n", n.id[:8])
 		if err := n.computeRingFromFiltered(ringParticipants); err != nil {
-			fmt.Printf("[Node %s] [Election-Announce] ERROR: Cannot compute ring: %v\n", n.id[:8], err)
+			fmt.Printf("[Node %s] [Election-Announce] ERROR: Cannot compute ring: %v, unfreezing\n", n.id[:8], err)
 			log.Printf("[Election] ERROR: Cannot compute ring: %v\n", err)
+			n.unfreezeOperations()
 			return
 		}
 		fmt.Printf("[Node %s] [Election-Announce] Ring computed, next node: %s\n", n.id[:8], n.nextNode)
@@ -606,7 +608,8 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	// Use ring participants from the message
 	if len(ringParticipants) < 2 {
 		fmt.Printf("[Node %s] [Election-Victory] WARNING: Ring participants too small (%d)\n", n.id[:8], len(ringParticipants))
-		fmt.Printf("[Node %s] [Election-Victory] Ignoring VICTORY message\n", n.id[:8])
+		fmt.Printf("[Node %s] [Election-Victory] Ignoring VICTORY message, unfreezing\n", n.id[:8])
+		n.unfreezeOperations()
 		return
 	}
 
@@ -614,8 +617,9 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	if n.nextNode == "" || true { // Always use message's ring
 		fmt.Printf("[Node %s] [Election-Victory] Computing ring from message's participants...\n", n.id[:8])
 		if err := n.computeRingFromFiltered(ringParticipants); err != nil {
-			fmt.Printf("[Node %s] [Election-Victory] ERROR: Cannot compute ring: %v\n", n.id[:8], err)
+			fmt.Printf("[Node %s] [Election-Victory] ERROR: Cannot compute ring: %v, unfreezing\n", n.id[:8], err)
 			log.Printf("[Election] ERROR: Cannot compute ring: %v\n", err)
+			n.unfreezeOperations()
 			return
 		}
 		fmt.Printf("[Node %s] [Election-Victory] Ring computed, next node: %s\n", n.id[:8], n.nextNode)

@@ -277,6 +277,15 @@ func (n *Node) becomeLeaderInternal(fromElection bool, electionID int64) {
 				n.runLeaderDuties()
 			}()
 		}
+	} else if fromElection {
+		// Existing leader won a re-election (e.g., split-brain scenario where
+		// another node sent an ELECTION ANNOUNCE to us, we froze, then won).
+		// We're already the leader, so no state exchange or view install needed -
+		// just unfreeze operations that were frozen during the election.
+		fmt.Printf("[Leader %s] Re-elected as leader (was already leader), unfreezing operations\n", n.id[:8])
+		if n.IsFrozen() {
+			n.unfreezeOperations()
+		}
 	}
 }
 
