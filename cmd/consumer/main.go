@@ -128,9 +128,6 @@ func main() {
 				fmt.Printf("  Data:   %s\n", string(result.Data))
 			}
 
-		case err := <-consumer.Errors():
-			log.Printf("[Consumer %s] Error: %v\n", cid, err)
-
 		case <-sigChan:
 			fmt.Printf("\n\n[Consumer %s] Received %d messages total\n", cid, received)
 			fmt.Printf("[Consumer %s] Disconnecting...\n", cid)

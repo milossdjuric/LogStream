@@ -20,7 +20,7 @@ func (n *Node) runLeaderDuties() {
 	}
 
 	heartbeatTicker := time.NewTicker(5 * time.Second)
-	clientHeartbeatTicker := time.NewTicker(30 * time.Second)
+	clientHeartbeatTicker := time.NewTicker(10 * time.Second)
 	timeoutTicker := time.NewTicker(5 * time.Second) // Check more frequently for faster cleanup
 	defer heartbeatTicker.Stop()
 	defer clientHeartbeatTicker.Stop()
@@ -259,8 +259,7 @@ func (n *Node) replicateAllState() error {
 }
 
 
-// sendHeartbeatsToProducers sends TCP unicast heartbeats to all registered producers
-// Proposal requirement: "the leader node sends heartbeat messages to the consumers/producers"
+// sendHeartbeatsToProducers sends UDP unicast heartbeats to all registered producers
 func (n *Node) sendHeartbeatsToProducers() {
 	if !n.IsLeader() {
 		return
@@ -271,7 +270,8 @@ func (n *Node) sendHeartbeatsToProducers() {
 		return
 	}
 
-	fmt.Printf("[Leader %s] Sending heartbeats to %d producer(s)...\n", n.id[:8], len(producers))
+	viewNumber := n.viewState.GetViewNumber()
+	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
 
 	for _, producerID := range producers {
 		producer, ok := n.clusterState.GetProducer(producerID)
@@ -279,33 +279,15 @@ func (n *Node) sendHeartbeatsToProducers() {
 			continue
 		}
 
-		// Send heartbeat via TCP in goroutine to avoid blocking
-		go func(pid string, addr string) {
-			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-			if err != nil {
-				// Producer might be down - will be detected by timeout check
-				return
-			}
-			defer conn.Close()
-
-		// Create heartbeat message with current view number
-		viewNumber := n.viewState.GetViewNumber()
-		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
-
-		// Send heartbeat
-		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-			return // Producer might be down
+		addr, err := net.ResolveUDPAddr("udp", producer.Address)
+		if err != nil {
+			continue
 		}
-
-		// Update producer heartbeat timestamp on success
-		n.clusterState.UpdateProducerHeartbeat(pid)
-		fmt.Printf("[Leader %s] -> HEARTBEAT (TCP) to producer %s\n", n.id[:8], pid[:8])
-		}(producerID, producer.Address)
+		protocol.WriteUDPMessage(n.udpDataListener, heartbeat, addr)
 	}
 }
 
-// sendHeartbeatsToConsumers sends TCP unicast heartbeats to all registered consumers
-// Proposal requirement: "the leader node sends heartbeat messages to the consumers/producers"
+// sendHeartbeatsToConsumers sends UDP unicast heartbeats to all registered consumers
 func (n *Node) sendHeartbeatsToConsumers() {
 	if !n.IsLeader() {
 		return
@@ -316,7 +298,8 @@ func (n *Node) sendHeartbeatsToConsumers() {
 		return
 	}
 
-	fmt.Printf("[Leader %s] Sending heartbeats to %d consumer(s)...\n", n.id[:8], len(consumers))
+	viewNumber := n.viewState.GetViewNumber()
+	heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
 
 	for _, consumerID := range consumers {
 		consumer, ok := n.clusterState.GetConsumer(consumerID)
@@ -324,28 +307,11 @@ func (n *Node) sendHeartbeatsToConsumers() {
 			continue
 		}
 
-		// Send heartbeat via TCP in goroutine to avoid blocking
-		go func(cid string, addr string) {
-			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-			if err != nil {
-				// Consumer might be down - will be detected by timeout check
-				return
-			}
-			defer conn.Close()
-
-		// Create heartbeat message with current view number
-		viewNumber := n.viewState.GetViewNumber()
-		heartbeat := protocol.NewHeartbeatMsg(n.id, protocol.NodeType_LEADER, 0, viewNumber, n.address)
-
-		// Send heartbeat
-		if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-			return // Consumer might be down
+		addr, err := net.ResolveUDPAddr("udp", consumer.Address)
+		if err != nil {
+			continue
 		}
-
-		// Update consumer heartbeat timestamp on success
-		n.clusterState.UpdateConsumerHeartbeat(cid)
-		fmt.Printf("[Leader %s] -> HEARTBEAT (TCP) to consumer %s\n", n.id[:8], cid[:8])
-		}(consumerID, consumer.Address)
+		protocol.WriteUDPMessage(n.udpDataListener, heartbeat, addr)
 	}
 }
 

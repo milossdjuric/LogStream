@@ -215,17 +215,35 @@ func (n *Node) receiveUDPData() {
 			}
 		}
 
-		// Handle only DATA messages
-		if dataMsg, ok := msg.(*protocol.DataMsg); ok {
-			fmt.Printf("[Node %s] [UDP-DATA-Listener] Received DATA from %s\n", 
+		// Handle DATA and HeartbeatMsg messages
+		switch m := msg.(type) {
+		case *protocol.DataMsg:
+			fmt.Printf("[Node %s] [UDP-DATA-Listener] Received DATA from %s\n",
 				n.id[:8], remoteAddr)
-			// Handle DATA message
-			go n.handleData(dataMsg, remoteAddr)
-		} else {
-			// Ignore non-DATA messages on this listener
-			fmt.Printf("[Node %s] [UDP-DATA-Listener] Ignoring non-DATA message type: %T\n", 
+			go n.handleData(m, remoteAddr)
+		case *protocol.HeartbeatMsg:
+			n.handleUDPClientHeartbeat(m)
+		default:
+			fmt.Printf("[Node %s] [UDP-DATA-Listener] Ignoring message type: %T\n",
 				n.id[:8], msg)
 		}
+	}
+}
+
+// handleUDPClientHeartbeat processes a heartbeat received via UDP from a client (producer/consumer)
+func (n *Node) handleUDPClientHeartbeat(msg *protocol.HeartbeatMsg) {
+	senderID := protocol.GetSenderID(msg)
+	senderType := protocol.GetSenderType(msg)
+
+	if !n.IsLeader() {
+		return
+	}
+
+	switch senderType {
+	case protocol.NodeType_PRODUCER:
+		n.clusterState.UpdateProducerHeartbeat(senderID)
+	case protocol.NodeType_CONSUMER:
+		n.clusterState.UpdateConsumerHeartbeat(senderID)
 	}
 }
 

@@ -24,16 +24,19 @@ type Consumer struct {
 	tcpListener      net.Listener // TCP listener for incoming messages from leader
 	localAddr        string       // Local address used for registration
 	results          chan *protocol.ResultMessage
-	errors           chan error
 	stopSignal       chan struct{}
 	stopListener     chan struct{}
-	reconnectSignal  chan string // Signal to reconnect to a new broker
 	enableProcessing       bool  // Whether to request data processing from broker
 	analyticsWindowSeconds int32 // 0 = use broker default
 	analyticsIntervalMs    int32 // 0 = use broker default
 	clientPort             int    // Fixed TCP listener port (0 = OS picks)
 	advertiseAddr          string // Override advertised IP (e.g. Windows host IP for WSL)
 	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
+
+	// UDP heartbeat state (consumer sends heartbeats to leader to stay alive)
+	udpConn       *net.UDPConn
+	leaderAddrUDP *net.UDPAddr
+	stopHeartbeat chan struct{}
 }
 
 // NewConsumer creates a new consumer
@@ -49,10 +52,9 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 		topic:            topic,
 		leaderAddr:       leaderAddr,
 		results:          make(chan *protocol.ResultMessage, 100),
-		errors:           make(chan error, 10),
 		stopSignal:       make(chan struct{}),
 		stopListener:     make(chan struct{}),
-		reconnectSignal:  make(chan string, 1),
+		stopHeartbeat:    make(chan struct{}),
 		enableProcessing: true, // Enable data processing by default
 	}
 }
@@ -166,9 +168,24 @@ func (c *Consumer) Connect() error {
 
 	fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (subscribed to broker for topic: %s)\n", c.id[:8], c.topic)
 
+	// Create UDP socket for heartbeats (bind to clientPort so leader can send heartbeats back)
+	udpPort := 0
+	if c.clientPort > 0 {
+		udpPort = c.clientPort
+	}
+	var err error
+	c.udpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: udpPort})
+	if err != nil {
+		return fmt.Errorf("failed to create UDP socket: %w", err)
+	}
+	c.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", c.leaderAddr)
+
+	// Start UDP heartbeat goroutine (consumer → leader, keeps consumer alive on leader side)
+	c.wg.Add(1)
+	go c.sendHeartbeats()
+
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
 	// Always bind to 0.0.0.0:port (not the advertised IP which may not be local, e.g. WSL)
-	var err error
 	if c.clientPort > 0 {
 		listenAddr := fmt.Sprintf("0.0.0.0:%d", c.clientPort)
 		c.tcpListener, err = net.Listen("tcp", listenAddr)
@@ -186,10 +203,6 @@ func (c *Consumer) Connect() error {
 		c.wg.Add(1)
 		go c.listenForMessages()
 	}
-
-	// Start reconnection handler
-	c.wg.Add(1)
-	go c.handleReconnections()
 
 	// Start receiving results from broker in background goroutine
 	c.wg.Add(1)
@@ -337,27 +350,65 @@ func (c *Consumer) receiveResults() {
 				}
 
 				if isEOF {
-					select {
-					case c.errors <- fmt.Errorf("connection closed by server"):
-					default:
+					log.Printf("[Consumer %s] Connection closed by server (EOF)", c.id[:8])
+
+					// Close broken connection
+					c.tcpConnMu.Lock()
+					if c.tcpConn != nil {
+						c.tcpConn.Close()
+						c.tcpConn = nil
 					}
+					c.tcpConnMu.Unlock()
 
-					// Attempt cluster re-discovery instead of giving up
-					fmt.Printf("[Consumer %s] Connection lost, waiting for cluster to stabilize...\n", c.id[:8])
+					// Wait for REASSIGN_BROKER from leader before attempting re-discovery.
+					// The leader checks broker timeouts every 5s with a 30s threshold,
+					// so REASSIGN_BROKER should arrive within ~35s if the leader is alive.
+					// Exponential backoff: 2s, 4s, 8s, 16s = 30s total wait.
+					fmt.Printf("[Consumer %s] Connection lost, waiting for REASSIGN_BROKER from leader...\n", c.id[:8])
 
-					// Wait for cluster to elect new leader (election takes ~10-15s)
-					select {
-					case <-time.After(5 * time.Second):
-					case <-c.stopSignal:
-						return
-					}
+					backoff := 2 * time.Second
+					maxBackoff := 16 * time.Second
+					totalWait := time.Duration(0)
+					maxTotalWait := 35 * time.Second
 
-					fmt.Printf("[Consumer %s] Attempting cluster reconnection...\n", c.id[:8])
-					if err := c.reconnectToCluster(); err != nil {
+					restored := false
+					for totalWait < maxTotalWait {
 						select {
-						case c.errors <- fmt.Errorf("cluster reconnection failed: %w", err):
-						default:
+						case <-time.After(backoff):
+						case <-c.stopSignal:
+							return
 						}
+						totalWait += backoff
+
+						// Check if REASSIGN_BROKER restored the connection via Reconnect()
+						c.tcpConnMu.Lock()
+						restored = c.tcpConn != nil
+						c.tcpConnMu.Unlock()
+
+						if restored {
+							fmt.Printf("[Consumer %s] Connection restored by REASSIGN_BROKER, resuming\n", c.id[:8])
+							break
+						}
+
+						fmt.Printf("[Consumer %s] Still waiting for REASSIGN_BROKER (%.0fs elapsed)...\n",
+							c.id[:8], totalWait.Seconds())
+
+						backoff *= 2
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+					}
+
+					if restored {
+						continue // Resume receiving on new connection
+					}
+
+					// REASSIGN_BROKER never arrived - leader is probably dead too.
+					// Fall back to full cluster re-discovery.
+					fmt.Printf("[Consumer %s] No REASSIGN_BROKER received after %.0fs, attempting cluster re-discovery...\n",
+						c.id[:8], totalWait.Seconds())
+					if err := c.reconnectToCluster(); err != nil {
+						log.Printf("[Consumer %s] Cluster reconnection failed: %v", c.id[:8], err)
 						return // Give up after all retries exhausted
 					}
 
@@ -370,10 +421,7 @@ func (c *Consumer) receiveResults() {
 					continue
 				}
 
-				select {
-				case c.errors <- fmt.Errorf("failed to read result: %w", err):
-				default:
-				}
+				log.Printf("[Consumer %s] Failed to read result: %v", c.id[:8], err)
 
 				time.Sleep(1 * time.Second)
 				continue
@@ -382,10 +430,7 @@ func (c *Consumer) receiveResults() {
 			// Type assert to RESULT message
 			resultMsg, ok := msg.(*protocol.ResultMsg)
 			if !ok {
-				select {
-				case c.errors <- fmt.Errorf("unexpected message type: %T", msg):
-				default:
-				}
+				log.Printf("[Consumer %s] Unexpected message type: %T", c.id[:8], msg)
 				continue
 			}
 
@@ -395,6 +440,25 @@ func (c *Consumer) receiveResults() {
 			case <-c.stopSignal:
 				return
 			}
+		}
+	}
+}
+
+// sendHeartbeats sends periodic heartbeats to leader via UDP
+func (c *Consumer) sendHeartbeats() {
+	defer c.wg.Done()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			heartbeat := protocol.NewHeartbeatMsg(c.id, protocol.NodeType_CONSUMER, 0, 0, "")
+			if c.udpConn != nil && c.leaderAddrUDP != nil {
+				protocol.WriteUDPMessage(c.udpConn, heartbeat, c.leaderAddrUDP)
+			}
+		case <-c.stopHeartbeat:
+			return
 		}
 	}
 }
@@ -539,8 +603,9 @@ func (c *Consumer) reconnectToCluster() error {
 		c.tcpConn = brokerConn
 		c.tcpConnMu.Unlock()
 
-		// Update leader address
+		// Update leader address and UDP heartbeat target
 		c.leaderAddr = leaderAddr
+		c.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", leaderAddr)
 
 		fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (reconnected to broker for topic: %s)\n", c.id[:8], subAck.Topic)
 		fmt.Printf("[Consumer %s] Reconnected: leader=%s, broker=%s\n", c.id[:8], leaderAddr, newBrokerAddr)
@@ -553,11 +618,6 @@ func (c *Consumer) reconnectToCluster() error {
 // Results returns the channel for receiving result messages
 func (c *Consumer) Results() <-chan *protocol.ResultMessage {
 	return c.results
-}
-
-// Errors returns the channel for receiving errors
-func (c *Consumer) Errors() <-chan error {
-	return c.errors
 }
 
 // listenForMessages listens for incoming TCP messages from the leader
@@ -617,39 +677,13 @@ func (c *Consumer) handleIncomingConnection(conn net.Conn) {
 		fmt.Printf("[Consumer %s] <- REASSIGN_BROKER (topic: %s, new broker: %s)\n",
 			c.id[:8], m.Topic, m.NewBrokerAddress)
 
-		// Signal reconnection to new broker
-		select {
-		case c.reconnectSignal <- m.NewBrokerAddress:
-		default:
-			// Channel full, skip
+		// Reconnect directly to new broker (same pattern as producer's UpdateBrokerAddress)
+		if err := c.Reconnect(m.NewBrokerAddress); err != nil {
+			log.Printf("[Consumer %s] Reconnection to new broker failed: %v", c.id[:8], err)
 		}
-
-	case *protocol.HeartbeatMsg:
-		// Heartbeat from leader - just acknowledge
-		fmt.Printf("[Consumer %s] <- HEARTBEAT from leader\n", c.id[:8])
 
 	default:
 		// Unknown message type
-	}
-}
-
-// handleReconnections handles broker reconnection requests
-func (c *Consumer) handleReconnections() {
-	defer c.wg.Done()
-
-	for {
-		select {
-		case <-c.stopSignal:
-			return
-		case newBrokerAddr := <-c.reconnectSignal:
-			fmt.Printf("[Consumer %s] Reconnecting to new broker: %s\n", c.id[:8], newBrokerAddr)
-			if err := c.Reconnect(newBrokerAddr); err != nil {
-				select {
-				case c.errors <- fmt.Errorf("reconnection failed: %w", err):
-				default:
-				}
-			}
-		}
 	}
 }
 
@@ -763,6 +797,7 @@ func (c *Consumer) GetBrokerAddress() string {
 func (c *Consumer) Close() {
 	close(c.stopSignal)
 	close(c.stopListener)
+	close(c.stopHeartbeat)
 
 	// Close TCP listener to unblock Accept()
 	if c.tcpListener != nil {
@@ -777,9 +812,13 @@ func (c *Consumer) Close() {
 	}
 	c.tcpConnMu.Unlock()
 
+	// Close UDP socket
+	if c.udpConn != nil {
+		c.udpConn.Close()
+	}
+
 	// Wait for goroutines to actually exit (proper synchronization)
 	c.wg.Wait()
 
 	close(c.results)
-	close(c.errors)
 }

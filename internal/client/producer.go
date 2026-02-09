@@ -26,6 +26,11 @@ type Producer struct {
 	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
 	wg            sync.WaitGroup // Synchronize goroutine lifecycle
+
+	// UDP heartbeat state
+	leaderAddrUDP         *net.UDPAddr   // Resolved leader UDP address for heartbeats
+	lastLeaderHeartbeat   time.Time
+	lastLeaderHeartbeatMu sync.RWMutex
 }
 
 // NewProducer creates a new producer
@@ -109,9 +114,13 @@ func (p *Producer) Connect() error {
 
 	fmt.Printf("[Producer %s] <- PRODUCE_ACK (assigned broker: %s)\n", p.id[:8], p.brokerAddr)
 
-	// Create UDP connection for sending data
+	// Create UDP connection for sending data (bind to clientPort so leader can send heartbeats back)
 	var err error
-	p.udpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	udpPort := 0
+	if p.clientPort > 0 {
+		udpPort = p.clientPort
+	}
+	p.udpConn, err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: udpPort})
 	if err != nil {
 		return fmt.Errorf("failed to create UDP socket: %w", err)
 	}
@@ -148,9 +157,19 @@ func (p *Producer) Connect() error {
 	p.wg.Add(1)
 	go p.listenForMessages()
 
-	// Start heartbeat routine to send periodic heartbeats
-	p.wg.Add(1) // Register goroutine before starting
+	// Initialize UDP heartbeat state
+	p.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", p.leaderAddr)
+	p.lastLeaderHeartbeatMu.Lock()
+	p.lastLeaderHeartbeat = time.Now()
+	p.lastLeaderHeartbeatMu.Unlock()
+
+	// Start heartbeat routine to send periodic heartbeats via UDP
+	p.wg.Add(1)
 	go p.sendHeartbeats()
+
+	// Start UDP receive loop for incoming heartbeats from leader
+	p.wg.Add(1)
+	go p.receiveUDPMessages()
 
 	return nil
 }
@@ -243,51 +262,76 @@ func (p *Producer) GetSequenceNum() int64 {
 	return p.seqNum
 }
 
-// sendHeartbeats sends periodic heartbeats to leader
-// Detects leader death via consecutive failures and triggers cluster re-discovery
+// sendHeartbeats sends periodic heartbeats to leader via UDP
+// Detects leader death via missing incoming heartbeats and triggers cluster re-discovery
 func (p *Producer) sendHeartbeats() {
-	defer p.wg.Done() // Signal completion when goroutine exits
-	ticker := time.NewTicker(30 * time.Second)
+	defer p.wg.Done()
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-
-	consecutiveFailures := 0
 
 	for {
 		select {
 		case <-ticker.C:
-			// Send heartbeat via TCP to leader
-			conn, err := net.DialTimeout("tcp", p.leaderAddr, 5*time.Second)
-			if err != nil {
-				consecutiveFailures++
-				log.Printf("[Producer %s] Heartbeat failed (%d consecutive): %v", p.id[:8], consecutiveFailures, err)
-
-				if consecutiveFailures >= 3 {
-					fmt.Printf("[Producer %s] Leader appears down after %d heartbeat failures, attempting re-discovery...\n",
-						p.id[:8], consecutiveFailures)
-					if err := p.reconnectToCluster(); err != nil {
-						log.Printf("[Producer %s] Cluster re-discovery failed: %v", p.id[:8], err)
-					} else {
-						consecutiveFailures = 0
-						fmt.Printf("[Producer %s] Successfully reconnected to cluster\n", p.id[:8])
-					}
-				}
-				continue
-			}
-
-			// Create heartbeat message (producers don't have view numbers, use 0)
+			// Send heartbeat via UDP to leader
 			heartbeat := protocol.NewHeartbeatMsg(p.id, protocol.NodeType_PRODUCER, 0, 0, "")
-
-			// Send heartbeat message
-			if err := protocol.WriteTCPMessage(conn, heartbeat); err != nil {
-				log.Printf("[Producer %s] Failed to write heartbeat: %v", p.id[:8], err)
-			} else {
-				consecutiveFailures = 0
+			p.brokerAddrMu.RLock()
+			conn := p.udpConn
+			p.brokerAddrMu.RUnlock()
+			if conn != nil && p.leaderAddrUDP != nil {
+				protocol.WriteUDPMessage(conn, heartbeat, p.leaderAddrUDP)
 			}
 
-			conn.Close()
+			// Check for leader failure (no heartbeat received for 60s)
+			p.lastLeaderHeartbeatMu.RLock()
+			lastHB := p.lastLeaderHeartbeat
+			p.lastLeaderHeartbeatMu.RUnlock()
+			if !lastHB.IsZero() && time.Since(lastHB) > 60*time.Second {
+				fmt.Printf("[Producer %s] Leader appears down (no heartbeat for %v), attempting re-discovery...\n",
+					p.id[:8], time.Since(lastHB).Round(time.Second))
+				if err := p.reconnectToCluster(); err != nil {
+					log.Printf("[Producer %s] Cluster re-discovery failed: %v", p.id[:8], err)
+				} else {
+					fmt.Printf("[Producer %s] Successfully reconnected to cluster\n", p.id[:8])
+				}
+			}
 
 		case <-p.stopHeartbeat:
 			return
+		}
+	}
+}
+
+// receiveUDPMessages receives incoming UDP messages (heartbeats from leader)
+func (p *Producer) receiveUDPMessages() {
+	defer p.wg.Done()
+	for {
+		select {
+		case <-p.stopHeartbeat:
+			return
+		default:
+		}
+
+		p.brokerAddrMu.RLock()
+		conn := p.udpConn
+		p.brokerAddrMu.RUnlock()
+		if conn == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		msg, _, err := protocol.ReadUDPMessage(conn)
+		if err != nil {
+			continue // timeout or error, retry
+		}
+
+		if hb, ok := msg.(*protocol.HeartbeatMsg); ok {
+			senderType := protocol.GetSenderType(hb)
+			if senderType == protocol.NodeType_LEADER {
+				p.lastLeaderHeartbeatMu.Lock()
+				p.lastLeaderHeartbeat = time.Now()
+				p.lastLeaderHeartbeatMu.Unlock()
+			}
 		}
 	}
 }
@@ -364,35 +408,25 @@ func (p *Producer) reconnectToCluster() error {
 
 		fmt.Printf("[Producer %s] <- PRODUCE_ACK (new broker: %s)\n", p.id[:8], newBrokerAddr)
 
-		// Create new UDP connection before swapping
-		newUDPConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-		if err != nil {
-			log.Printf("[Producer %s] Failed to create new UDP socket: %v", p.id[:8], err)
-			continue
-		}
-
+		// Resolve new broker address (reuse existing UDP socket)
 		newRemoteAddr, err := net.ResolveUDPAddr("udp", newBrokerAddr)
 		if err != nil {
-			newUDPConn.Close()
 			log.Printf("[Producer %s] Failed to resolve new broker address: %v", p.id[:8], err)
 			continue
 		}
 
-		// Atomically swap connection state
+		// Update broker connection state (reuse UDP socket)
 		p.brokerAddrMu.Lock()
-		oldConn := p.udpConn
-		p.udpConn = newUDPConn
 		p.udpRemoteAddr = newRemoteAddr
 		p.brokerAddr = newBrokerAddr
 		p.brokerAddrMu.Unlock()
 
-		// Update leader address
+		// Update leader address and UDP target
 		p.leaderAddr = leaderAddr
-
-		// Close old UDP connection
-		if oldConn != nil {
-			oldConn.Close()
-		}
+		p.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", leaderAddr)
+		p.lastLeaderHeartbeatMu.Lock()
+		p.lastLeaderHeartbeat = time.Now()
+		p.lastLeaderHeartbeatMu.Unlock()
 
 		fmt.Printf("[Producer %s] Reconnected: leader=%s, broker=%s\n", p.id[:8], leaderAddr, newBrokerAddr)
 		return nil
@@ -466,10 +500,6 @@ func (p *Producer) handleIncomingConnection(conn net.Conn) {
 		} else {
 			fmt.Printf("[Producer %s] Successfully updated broker to %s\n", p.id[:8], m.NewBrokerAddress)
 		}
-
-	case *protocol.HeartbeatMsg:
-		// Heartbeat from leader - just acknowledge
-		fmt.Printf("[Producer %s] <- HEARTBEAT from leader\n", p.id[:8])
 
 	default:
 		log.Printf("[Producer %s] Received unexpected message type: %T", p.id[:8], msg)
