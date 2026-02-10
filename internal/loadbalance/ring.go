@@ -71,3 +71,47 @@ func (r *ConsistentHashRing) GetNode(key string) string {
 
 	return r.nodes[r.sortedNodes[idx]]
 }
+
+// GetNodeExcluding returns the node for the given key, skipping excludeID.
+// If excludeID is the only node in the ring, it returns excludeID anyway.
+func (r *ConsistentHashRing) GetNodeExcluding(key string, excludeID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if len(r.sortedNodes) == 0 {
+		return ""
+	}
+
+	// If only one node, return it regardless
+	if len(r.sortedNodes) == 1 {
+		return r.nodes[r.sortedNodes[0]]
+	}
+
+	hash := crc32.ChecksumIEEE([]byte(key))
+
+	idx := sort.Search(len(r.sortedNodes), func(i int) bool {
+		return r.sortedNodes[i] >= hash
+	})
+
+	if idx == len(r.sortedNodes) {
+		idx = 0
+	}
+
+	// Walk the ring until we find a node that isn't excluded
+	for i := 0; i < len(r.sortedNodes); i++ {
+		nodeID := r.nodes[r.sortedNodes[(idx+i)%len(r.sortedNodes)]]
+		if nodeID != excludeID {
+			return nodeID
+		}
+	}
+
+	// All nodes are the excluded node (shouldn't happen with >1 distinct nodes)
+	return r.nodes[r.sortedNodes[idx]]
+}
+
+// NodeCount returns the number of nodes in the ring.
+func (r *ConsistentHashRing) NodeCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.sortedNodes)
+}

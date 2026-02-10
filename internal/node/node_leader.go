@@ -19,16 +19,20 @@ func (n *Node) runLeaderDuties() {
 		log.Printf("[Leader %s] Failed to send initial heartbeat: %v\n", n.id[:8], err)
 	}
 
-	heartbeatTicker := time.NewTicker(5 * time.Second)
-	clientHeartbeatTicker := time.NewTicker(10 * time.Second)
+	heartbeatTicker := time.NewTicker(time.Duration(n.config.BrokerHeartbeatInterval) * time.Second)
+	clientHeartbeatTicker := time.NewTicker(time.Duration(n.config.ClientHeartbeatInterval) * time.Second)
 	timeoutTicker := time.NewTicker(5 * time.Second) // Check more frequently for faster cleanup
+	rebalanceTicker := time.NewTicker(10 * time.Second)
 	defer heartbeatTicker.Stop()
 	defer clientHeartbeatTicker.Stop()
 	defer timeoutTicker.Stop()
+	defer rebalanceTicker.Stop()
 
 	for {
 		select {
 		case <-heartbeatTicker.C:
+			// Keep leader's own broker entry alive (in case multicast loopback doesn't work)
+			n.clusterState.UpdateBrokerHeartbeat(n.id)
 			if err := n.sendHeartbeat(); err != nil {
 				log.Printf("[Leader %s] Failed to send heartbeat: %v\n", n.id[:8], err)
 			}
@@ -37,18 +41,43 @@ func (n *Node) runLeaderDuties() {
 			n.sendHeartbeatsToProducers()
 			n.sendHeartbeatsToConsumers()
 
+		case <-rebalanceTicker.C:
+			// Periodically check if leader is handling streams that should be on followers
+			ringCount := n.brokerRing.NodeCount()
+			leaderStreams := n.clusterState.GetStreamsByBroker(n.id)
+			fmt.Printf("[Leader %s] [Rebalance-Check] Ring nodes=%d, streams on leader=%d\n",
+				n.id[:8], ringCount, len(leaderStreams))
+			if ringCount > 1 {
+				reassignments := n.rebalanceLeaderStreams()
+				if len(reassignments) > 0 {
+					n.replicateAllState()
+					n.notifyStreamReassignments(reassignments)
+				}
+			}
+
 		case <-timeoutTicker.C:
-			removedBrokers := n.clusterState.CheckBrokerTimeouts(30 * time.Second)
-			if len(removedBrokers) > 0 {
-				fmt.Printf("[Leader %s] Removed %d dead brokers\n", n.id[:8], len(removedBrokers))
-				for _, brokerID := range removedBrokers {
+			removedBrokers := n.clusterState.CheckBrokerTimeouts(time.Duration(n.config.BrokerTimeout) * time.Second)
+			// Filter out self - leader should never remove itself from broker registry
+			var actualRemovedBrokers []string
+			for _, id := range removedBrokers {
+				if id == n.id {
+					fmt.Printf("[Leader %s] WARNING: Almost removed self from broker registry! Re-registering.\n", n.id[:8])
+					n.clusterState.RegisterBroker(n.id, n.address, true)
+					continue
+				}
+				actualRemovedBrokers = append(actualRemovedBrokers, id)
+			}
+			if len(actualRemovedBrokers) > 0 {
+				fmt.Printf("[Leader %s] Removed %d dead brokers\n", n.id[:8], len(actualRemovedBrokers))
+				// Sync ring BEFORE failover so dead brokers are excluded from selection
+				n.syncBrokerRing()
+				for _, brokerID := range actualRemovedBrokers {
 					n.handleBrokerFailure(brokerID)
 				}
-				n.syncBrokerRing()
 				n.replicateAllState()
 			}
 
-			deadProducers := n.clusterState.CheckProducerTimeouts(30 * time.Second)
+			deadProducers := n.clusterState.CheckProducerTimeouts(time.Duration(n.config.ClientTimeout) * time.Second)
 			if len(deadProducers) > 0 {
 				for _, producerID := range deadProducers {
 					n.cleanupProducer(producerID)
@@ -56,7 +85,7 @@ func (n *Node) runLeaderDuties() {
 				n.replicateAllState()
 			}
 
-			deadConsumers := n.clusterState.CheckConsumerTimeouts(30 * time.Second)
+			deadConsumers := n.clusterState.CheckConsumerTimeouts(time.Duration(n.config.ClientTimeout) * time.Second)
 			if len(deadConsumers) > 0 {
 				for _, consumerID := range deadConsumers {
 					n.cleanupConsumer(consumerID)
@@ -257,7 +286,6 @@ func (n *Node) sendStateUpdate(brokerID, brokerAddr string, viewNumber, seqNum i
 func (n *Node) replicateAllState() error {
 	return n.replicateStateToFollowers()
 }
-
 
 // sendHeartbeatsToProducers sends UDP unicast heartbeats to all registered producers
 func (n *Node) sendHeartbeatsToProducers() {
@@ -550,29 +578,37 @@ func (n *Node) handleBrokerFailure(failedBrokerID string) {
 	fmt.Printf("[Leader %s] [Failover] Found %d streams to reassign from broker %s\n",
 		n.id[:8], len(streams), failedBrokerID[:8])
 
-	// Reassign each stream to a new broker using consistent hashing
+	// Reassign each stream to a new broker using consistent hashing.
+	// Query the ring directly (not GetBrokerForTopic) because the stream assignment
+	// still points to the failed broker.
 	for _, stream := range streams {
-		// Get new broker for this topic
-		newBrokerID, newBrokerAddr, err := n.GetBrokerForTopic(stream.Topic)
-		if err != nil {
-			// If consistent hash returns the failed broker (only one in ring), fall back to leader
-			if newBrokerID == failedBrokerID {
-				newBrokerID = n.id
-				newBrokerAddr = n.address
-				fmt.Printf("[Leader %s] [Failover] Falling back to self for topic %s\n", n.id[:8], stream.Topic)
-			} else {
-				log.Printf("[Leader %s] [Failover] Failed to find new broker for topic %s: %v\n",
-					n.id[:8], stream.Topic, err)
-				continue
-			}
+		var newBrokerID string
+		// Prefer followers over leader for data processing, unless leader is alone
+		if n.brokerRing.NodeCount() > 1 {
+			newBrokerID = n.brokerRing.GetNodeExcluding(stream.Topic, n.id)
+		} else {
+			newBrokerID = n.brokerRing.GetNode(stream.Topic)
 		}
 
-		// Skip if new broker is the same as failed broker
-		if newBrokerID == failedBrokerID {
+		// If ring returned empty or the failed broker, fall back to leader
+		if newBrokerID == "" || newBrokerID == failedBrokerID {
 			newBrokerID = n.id
+			fmt.Printf("[Leader %s] [Failover] Falling back to self for topic %s\n", n.id[:8], stream.Topic)
+		}
+
+		newBrokerAddr := ""
+		if newBrokerID == n.id {
 			newBrokerAddr = n.address
-			fmt.Printf("[Leader %s] [Failover] Falling back to self for topic %s (hash returned failed broker)\n",
-				n.id[:8], stream.Topic)
+		} else {
+			broker, ok := n.clusterState.GetBroker(newBrokerID)
+			if !ok {
+				newBrokerID = n.id
+				newBrokerAddr = n.address
+				fmt.Printf("[Leader %s] [Failover] Broker %s not in state, falling back to self for topic %s\n",
+					n.id[:8], newBrokerID[:8], stream.Topic)
+			} else {
+				newBrokerAddr = broker.Address
+			}
 		}
 
 		// Reassign the stream

@@ -662,17 +662,102 @@ func (n *Node) performViewChangeForNodeJoin(newNodeID, newNodeAddr string) {
 	// 2. Register new broker in cluster state
 	n.clusterState.RegisterBroker(newNodeID, newNodeAddr, false)
 
-	// 3. Collect current log offsets for new node synchronization
+	// 3. Sync the broker ring so the new node is included in topic assignment
+	n.syncBrokerRing()
+
+	// 4. Rebalance: move streams assigned to leader to followers now that we have more nodes
+	leaderStreams := n.clusterState.GetStreamsByBroker(n.id)
+	fmt.Printf("[Leader %s] [ViewChange-Rebalance] Ring nodes=%d, streams on leader=%d\n",
+		n.id[:8], n.brokerRing.NodeCount(), len(leaderStreams))
+	reassignments := n.rebalanceLeaderStreams()
+
+	// 5. Collect current log offsets for new node synchronization
 	agreedLogOffsets := n.collectLogOffsets()
 
-	// 4. Install new view (handles view increment, VIEW_INSTALL to followers, and defers unfreeze)
+	// 6. Install new view (handles view increment, VIEW_INSTALL to followers, and defers unfreeze)
+	// The updated stream assignments are included in the replicated state.
 	currentSeq := n.lastAppliedSeqNum
 	if err := n.installNewView(0, currentSeq, agreedLogOffsets, nil); err != nil {
 		log.Printf("[Leader %s] View change for node join failed: %v\n", n.id[:8], err)
 		// installNewView defers unfreeze, so no manual unfreeze needed
 	}
 
+	// 7. Notify clients AFTER view install so the follower has the stream assignments
+	// before clients try to reconnect
+	n.notifyStreamReassignments(reassignments)
+
 	fmt.Printf("[Leader %s] View change for node join complete\n", n.id[:8])
+}
+
+// streamReassignment holds info about a reassigned stream for deferred client notification
+type streamReassignment struct {
+	topic      string
+	producerID string
+	consumerID string
+	newBrokerID   string
+	newBrokerAddr string
+}
+
+// rebalanceLeaderStreams reassigns streams currently assigned to the leader to followers.
+// Called when a new broker joins and the leader can delegate data processing.
+// Returns reassignment info so callers can notify clients AFTER state is replicated.
+func (n *Node) rebalanceLeaderStreams() []streamReassignment {
+	if n.brokerRing.NodeCount() <= 1 {
+		return nil
+	}
+
+	streams := n.clusterState.GetStreamsByBroker(n.id)
+	if len(streams) == 0 {
+		return nil
+	}
+
+	fmt.Printf("[Leader %s] [Rebalance] Found %d streams assigned to leader, reassigning to followers\n",
+		n.id[:8], len(streams))
+
+	var reassignments []streamReassignment
+
+	for _, stream := range streams {
+		newBrokerID := n.brokerRing.GetNodeExcluding(stream.Topic, n.id)
+		if newBrokerID == "" || newBrokerID == n.id {
+			continue
+		}
+
+		broker, ok := n.clusterState.GetBroker(newBrokerID)
+		if !ok {
+			continue
+		}
+
+		if err := n.clusterState.ReassignStreamBroker(stream.Topic, newBrokerID, broker.Address); err != nil {
+			log.Printf("[Leader %s] [Rebalance] Failed to reassign topic %s: %v\n", n.id[:8], stream.Topic, err)
+			continue
+		}
+
+		fmt.Printf("[Leader %s] [Rebalance] Reassigned topic %s: %s -> %s @ %s\n",
+			n.id[:8], stream.Topic, n.id[:8], newBrokerID[:8], broker.Address)
+
+		reassignments = append(reassignments, streamReassignment{
+			topic:         stream.Topic,
+			producerID:    stream.ProducerId,
+			consumerID:    stream.ConsumerId,
+			newBrokerID:   newBrokerID,
+			newBrokerAddr: broker.Address,
+		})
+	}
+
+	return reassignments
+}
+
+// notifyStreamReassignments sends REASSIGN_BROKER to affected clients.
+// Must be called AFTER installNewView so the follower has the updated stream assignments.
+func (n *Node) notifyStreamReassignments(reassignments []streamReassignment) {
+	for _, r := range reassignments {
+		if r.producerID != "" {
+			go n.notifyClientOfReassignment(r.producerID, protocol.NodeType_PRODUCER, r.topic, r.newBrokerAddr, r.newBrokerID)
+		}
+		if r.consumerID != "" {
+			go n.notifyClientOfReassignment(r.consumerID, protocol.NodeType_CONSUMER, r.topic, r.newBrokerAddr, r.newBrokerID)
+		}
+	}
 }
 
 // collectLogOffsets returns a map of topic -> highest offset for all local logs
