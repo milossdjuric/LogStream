@@ -144,8 +144,6 @@ func (m *NackMsg) Unmarshal(data []byte) error {
 	return proto.Unmarshal(data, m.NackMessage)
 }
 
-// ============== View-Synchronous Recovery Messages ==============
-
 // TCP unicast from new leader to followers during recovery
 type StateExchangeMsg struct {
 	*StateExchangeMessage

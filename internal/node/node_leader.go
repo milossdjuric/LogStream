@@ -99,13 +99,11 @@ func (n *Node) runLeaderDuties() {
 	}
 }
 
-// sendHeartbeat sends a heartbeat message to all brokers via multicast
 func (n *Node) sendHeartbeat() error {
 	if !n.IsLeader() {
 		return fmt.Errorf("only leader can send heartbeat")
 	}
 
-	// protocol.SendHeartbeatMulticast() provided by protocol package
 	viewNumber := n.viewState.GetViewNumber()
 	err := protocol.SendHeartbeatMulticast(
 		n.multicastSender,
@@ -123,14 +121,7 @@ func (n *Node) sendHeartbeat() error {
 	return err
 }
 
-// replicateStateToFollowers performs TCP-based state replication to all followers
-// This replaces UDP multicast REPLICATE with reliable TCP VIEW_INSTALL messages
-// Key benefits:
-//  1. Reliable delivery with ACK confirmation
-//  2. No race conditions with UDP listener readiness
-//  3. Consistent with view-synchronous protocol (same mechanism as VIEW_INSTALL)
-//
-// Called event-driven on every state change (brokers, producers, consumers)
+// replicateStateToFollowers sends the current cluster state to all followers via TCP VIEW_INSTALL.
 func (n *Node) replicateStateToFollowers() error {
 	if !n.IsLeader() {
 		return fmt.Errorf("only leader can replicate state")
@@ -253,10 +244,6 @@ func (n *Node) sendStateUpdate(brokerID, brokerAddr string, viewNumber, seqNum i
 	// Set deadline
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	// Send VIEW_INSTALL message (reusing existing protocol message)
-	// Note: We use the same view number (not incremented) for state updates
-	// View increments only happen during membership changes or elections
-	// For state updates (not recovery), we don't need merged logs - pass nil
 	msg := protocol.NewViewInstallMsg(n.id, viewNumber, seqNum, stateSnapshot, memberIDs, memberAddresses, logOffsets, nil)
 	if err := protocol.WriteTCPMessage(conn, msg); err != nil {
 		return viewInstallAck{brokerID: brokerID, success: false, errorMsg: err.Error()}
@@ -287,7 +274,6 @@ func (n *Node) replicateAllState() error {
 	return n.replicateStateToFollowers()
 }
 
-// sendHeartbeatsToProducers sends UDP unicast heartbeats to all registered producers
 func (n *Node) sendHeartbeatsToProducers() {
 	if !n.IsLeader() {
 		return
@@ -315,7 +301,6 @@ func (n *Node) sendHeartbeatsToProducers() {
 	}
 }
 
-// sendHeartbeatsToConsumers sends UDP unicast heartbeats to all registered consumers
 func (n *Node) sendHeartbeatsToConsumers() {
 	if !n.IsLeader() {
 		return
@@ -343,10 +328,8 @@ func (n *Node) sendHeartbeatsToConsumers() {
 	}
 }
 
-// listenForBroadcastJoins listens for JOIN requests from new nodes
 func (n *Node) listenForBroadcastJoins() {
 	for {
-		// protocol.BroadcastConnection.ReceiveMessage() provided by protocol package
 		msg, sender, err := n.broadcastListener.ReceiveMessage()
 		if err != nil {
 			return // Listener closed
@@ -443,9 +426,7 @@ func (n *Node) listenForBroadcastJoins() {
 				continue
 			}
 
-			// CRITICAL: Verify TCP connectivity BEFORE registering the node
-			// UDP broadcast may work even when TCP doesn't (different networks, NAT, firewall)
-			// Without this check, we register nodes we can't actually communicate with via TCP
+			// Verify TCP connectivity before registering (UDP broadcast may work when TCP doesn't)
 			if !n.verifyTCPConnectivity(joinMsg.Address, senderID) {
 				fmt.Printf("[Leader %s] REJECTING JOIN from %s: TCP connectivity verification failed to %s\n",
 					n.id[:8], senderID[:8], joinMsg.Address)
@@ -489,13 +470,10 @@ func (n *Node) listenForBroadcastJoins() {
 				fmt.Printf("[Leader %s] -> JOIN_RESPONSE to %s\n", n.id[:8], sender)
 			}
 
-			// Note: State replication is handled by performViewChangeForNodeJoin via TCP VIEW_INSTALL
-			// No additional UDP multicast sync needed
 		}
 	}
 }
 
-// startBroadcastListener starts the broadcast listener for incoming JOIN requests
 func (n *Node) startBroadcastListener() {
 	if n.broadcastListener == nil {
 		fmt.Printf("[Node %s] [becomeLeader] Creating broadcast listener on port %d...\n", n.id[:8], n.config.BroadcastPort)
@@ -524,9 +502,7 @@ func (n *Node) startBroadcastListener() {
 	}
 }
 
-// verifyTCPConnectivity tests if we can establish a TCP connection to a node
-// This is critical because UDP broadcast may work even when TCP doesn't
-// (e.g., different networks, NAT, firewall rules)
+// verifyTCPConnectivity tests TCP connectivity (UDP broadcast may work when TCP doesn't).
 func (n *Node) verifyTCPConnectivity(address, nodeID string) bool {
 	fmt.Printf("[Leader %s] [TCP-Verify] Testing TCP connectivity to %s at %s...\n",
 		n.id[:8], nodeID[:8], address)
@@ -557,10 +533,6 @@ func (n *Node) verifyTCPConnectivity(address, nodeID string) bool {
 	return true
 }
 
-// ============== Stream Failover ==============
-
-// handleBrokerFailure handles stream failover when a broker fails
-// Reassigns all streams from the failed broker to healthy brokers
 func (n *Node) handleBrokerFailure(failedBrokerID string) {
 	if !n.IsLeader() {
 		return
@@ -635,8 +607,6 @@ func (n *Node) handleBrokerFailure(failedBrokerID string) {
 	fmt.Printf("[Leader %s] [Failover] Completed stream failover for broker %s\n", n.id[:8], failedBrokerID[:8])
 }
 
-// notifyClientOfReassignment sends a REASSIGN_BROKER message to a client
-// This notifies producers and consumers when their assigned broker changes
 func (n *Node) notifyClientOfReassignment(clientID string, clientType protocol.NodeType, topic, newBrokerAddr, newBrokerID string) {
 	if !n.IsLeader() {
 		return
@@ -696,9 +666,6 @@ func (n *Node) notifyClientOfReassignment(clientID string, clientType protocol.N
 		n.id[:8], clientTypeName, clientID[:8], topic, newBrokerAddr)
 }
 
-// ============== Client Cleanup ==============
-
-// cleanupProducer cleans up state for a disconnected/dead producer
 func (n *Node) cleanupProducer(producerID string) {
 	if !n.IsLeader() {
 		return
@@ -729,7 +696,6 @@ func (n *Node) cleanupProducer(producerID string) {
 	fmt.Printf("[Leader %s] [Cleanup] Producer %s cleanup complete\n", n.id[:8], producerID[:8])
 }
 
-// cleanupConsumer cleans up state for a disconnected/dead consumer
 func (n *Node) cleanupConsumer(consumerID string) {
 	if !n.IsLeader() {
 		return

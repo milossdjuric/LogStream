@@ -661,7 +661,6 @@ func (c *Consumer) reconnectToCluster() error {
 	return fmt.Errorf("failed to reconnect after %d attempts", maxAttempts)
 }
 
-// Results returns the channel for receiving result messages
 func (c *Consumer) Results() <-chan *protocol.ResultMessage {
 	return c.results
 }
@@ -827,32 +826,26 @@ func (c *Consumer) Reconnect(newBrokerAddr string) error {
 	return nil
 }
 
-// ID returns the consumer's unique identifier
 func (c *Consumer) ID() string {
 	return c.id
 }
 
-// GetBrokerAddress returns the current broker address
 func (c *Consumer) GetBrokerAddress() string {
 	c.brokerAddrMu.RLock()
 	defer c.brokerAddrMu.RUnlock()
 	return c.brokerAddr
 }
 
-// Close shuts down the consumer. Safe to call multiple times.
 func (c *Consumer) Close() {
 	c.closeOnce.Do(func() {
-		// Signal all goroutines to stop
 		close(c.stopSignal)
 		close(c.stopListener)
 		close(c.stopHeartbeat)
 
-		// Close TCP listener to unblock Accept()
 		if c.tcpListener != nil {
 			c.tcpListener.Close()
 		}
 
-		// Close broker connection to unblock ReadTCPMessage()
 		c.tcpConnMu.Lock()
 		if c.tcpConn != nil {
 			c.tcpConn.Close()
@@ -860,12 +853,10 @@ func (c *Consumer) Close() {
 		}
 		c.tcpConnMu.Unlock()
 
-		// Close UDP socket to free the port immediately
 		if c.udpConn != nil {
 			c.udpConn.Close()
 		}
 
-		// Wait for goroutines with timeout to prevent hanging
 		done := make(chan struct{})
 		go func() {
 			c.wg.Wait()

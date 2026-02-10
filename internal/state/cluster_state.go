@@ -109,7 +109,6 @@ func (cs *ClusterState) CheckBrokerTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// UpdateBrokerHeartbeat updates the last heartbeat timestamp for a broker
 func (cs *ClusterState) UpdateBrokerHeartbeat(brokerID string) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -119,7 +118,6 @@ func (cs *ClusterState) UpdateBrokerHeartbeat(brokerID string) {
 	}
 }
 
-// GetBroker retrieves broker info (read-only, returns a copy)
 func (cs *ClusterState) GetBroker(id string) (*protocol.BrokerInfo, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -138,14 +136,12 @@ func (cs *ClusterState) GetBroker(id string) (*protocol.BrokerInfo, bool) {
 	return proto.Clone(broker).(*protocol.BrokerInfo), true
 }
 
-// GetBrokerCount returns the number of registered brokers
 func (cs *ClusterState) GetBrokerCount() int {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return len(cs.brokers)
 }
 
-// ListBrokers returns all broker IDs
 func (cs *ClusterState) ListBrokers() []string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -192,7 +188,6 @@ func (cs *ClusterState) RemoveProducer(id string) error {
 	return nil
 }
 
-// UpdateProducerHeartbeat updates last heartbeat timestamp
 func (cs *ClusterState) UpdateProducerHeartbeat(id string) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -238,7 +233,6 @@ func (cs *ClusterState) CheckProducerTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// GetProducer retrieves producer info
 func (cs *ClusterState) GetProducer(id string) (*protocol.ProducerInfo, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -251,7 +245,6 @@ func (cs *ClusterState) GetProducer(id string) (*protocol.ProducerInfo, bool) {
 	return proto.Clone(producer).(*protocol.ProducerInfo), true
 }
 
-// ListProducers returns all producer IDs
 func (cs *ClusterState) ListProducers() []string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -263,7 +256,6 @@ func (cs *ClusterState) ListProducers() []string {
 	return ids
 }
 
-// CountProducers returns number of producers
 func (cs *ClusterState) CountProducers() int {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -356,7 +348,6 @@ func (cs *ClusterState) RemoveConsumer(id string) error {
 	return nil
 }
 
-// UpdateConsumerHeartbeat updates last heartbeat timestamp
 func (cs *ClusterState) UpdateConsumerHeartbeat(id string) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -404,7 +395,6 @@ func (cs *ClusterState) CheckConsumerTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// GetConsumer retrieves consumer info
 func (cs *ClusterState) GetConsumer(id string) (*protocol.ConsumerInfo, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -434,7 +424,6 @@ func (cs *ClusterState) GetConsumerSubscribers(topic string) []string {
 	return subscribers
 }
 
-// ListConsumers returns all consumer IDs
 func (cs *ClusterState) ListConsumers() []string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -446,14 +435,12 @@ func (cs *ClusterState) ListConsumers() []string {
 	return ids
 }
 
-// CountConsumers returns number of consumers
 func (cs *ClusterState) CountConsumers() int {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return len(cs.consumers)
 }
 
-// GetSequenceNum returns the current sequence number
 func (cs *ClusterState) GetSequenceNum() int64 {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -582,11 +569,6 @@ func (cs *ClusterState) PrintStatus() {
 	fmt.Println("============================")
 }
 
-// ============================================================================
-// Stream Assignment Methods (One-to-One Producer-Consumer Mapping)
-// ============================================================================
-
-// GetStreamAssignment returns the stream assignment for a topic
 func (cs *ClusterState) GetStreamAssignment(topic string) (*protocol.StreamAssignment, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

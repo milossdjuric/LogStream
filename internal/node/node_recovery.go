@@ -12,15 +12,6 @@ import (
 	"github.com/milossdjuric/logstream/internal/storage"
 )
 
-// View-Synchronous Recovery Protocol Implementation
-// Based on the project specification:
-// 1. All brokers detect failure and freeze operations
-// 2. Brokers execute LCR election algorithm
-// 3. New leader initiates state exchange protocol
-// 4. Majority agreement on completed updates
-// 5. State synchronization across brokers
-// 6. Install new view with updated membership
-
 // IsFrozen returns whether the node is frozen for recovery
 func (n *Node) IsFrozen() bool {
 	return n.viewState.IsFrozen()
@@ -456,8 +447,6 @@ collectAcks:
 	n.lastReplicatedSeq = agreedSeq
 	fmt.Printf("[Leader %s] Reset lastReplicatedSeq to %d for new view\n", n.id[:8], agreedSeq)
 
-	// Note: unfreeze happens via defer at the top of this function
-
 	fmt.Printf("[Leader %s] New view %d is now active\n", n.id[:8], newViewNumber)
 	return nil
 }
@@ -581,9 +570,7 @@ func (n *Node) handleViewInstall(msg *protocol.ViewInstallMsg, conn net.Conn) {
 						}
 					}
 
-					// CRITICAL: Reset lastLeaderHeartbeat to prevent false failure detection
-					// Without this, the follower would immediately detect "leader failure" after
-					// installing the new view because the old heartbeat timestamp is stale
+					// Reset heartbeat so follower doesn't immediately suspect the new leader
 					n.lastLeaderHeartbeatMu.Lock()
 					n.lastLeaderHeartbeat = time.Now()
 					n.lastLeaderHeartbeatMu.Unlock()
@@ -656,34 +643,22 @@ func (n *Node) performViewChangeForNodeJoin(newNodeID, newNodeAddr string) {
 	fmt.Printf("[Leader %s] New Node: %s (%s)\n", n.id[:8], newNodeID[:8], newNodeAddr)
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
-	// 1. Freeze operations
 	n.freezeOperations()
-
-	// 2. Register new broker in cluster state
 	n.clusterState.RegisterBroker(newNodeID, newNodeAddr, false)
-
-	// 3. Sync the broker ring so the new node is included in topic assignment
 	n.syncBrokerRing()
 
-	// 4. Rebalance: move streams assigned to leader to followers now that we have more nodes
 	leaderStreams := n.clusterState.GetStreamsByBroker(n.id)
 	fmt.Printf("[Leader %s] [ViewChange-Rebalance] Ring nodes=%d, streams on leader=%d\n",
 		n.id[:8], n.brokerRing.NodeCount(), len(leaderStreams))
 	reassignments := n.rebalanceLeaderStreams()
 
-	// 5. Collect current log offsets for new node synchronization
 	agreedLogOffsets := n.collectLogOffsets()
-
-	// 6. Install new view (handles view increment, VIEW_INSTALL to followers, and defers unfreeze)
-	// The updated stream assignments are included in the replicated state.
 	currentSeq := n.lastAppliedSeqNum
 	if err := n.installNewView(0, currentSeq, agreedLogOffsets, nil); err != nil {
 		log.Printf("[Leader %s] View change for node join failed: %v\n", n.id[:8], err)
-		// installNewView defers unfreeze, so no manual unfreeze needed
 	}
 
-	// 7. Notify clients AFTER view install so the follower has the stream assignments
-	// before clients try to reconnect
+	// Notify clients after view install so follower has stream assignments before clients reconnect
 	n.notifyStreamReassignments(reassignments)
 
 	fmt.Printf("[Leader %s] View change for node join complete\n", n.id[:8])

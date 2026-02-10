@@ -165,8 +165,6 @@ func NewReplicateAckMsg(senderID string, ackedSeq, viewNumber int64, success boo
 	}
 }
 
-// ============== View-Synchronous Recovery Message Factories ==============
-
 // TCP unicast from new leader to followers during recovery
 func NewStateExchangeMsg(senderID string, electionID, viewNumber int64) *StateExchangeMsg {
 	return &StateExchangeMsg{

@@ -12,23 +12,18 @@ import (
 	"github.com/milossdjuric/logstream/internal/storage"
 )
 
-// getConsumerOffset returns the last sent offset for a consumer on a topic
 func (n *Node) getConsumerOffset(consumerID, topic string) uint64 {
 	return n.consumerOffsets.GetOffset(consumerID, topic)
 }
 
-// setConsumerOffset updates the last sent offset for a consumer on a topic
 func (n *Node) setConsumerOffset(consumerID, topic string, offset uint64) {
 	n.consumerOffsets.SetOffset(consumerID, topic, offset)
 }
 
-// removeConsumerOffsets cleans up offset tracking for a consumer
 func (n *Node) removeConsumerOffsets(consumerID string) {
 	n.consumerOffsets.RemoveConsumer(consumerID)
 }
 
-// handleSubscribe processes SUBSCRIBE requests from consumers
-// This is called when a consumer connects to the assigned broker after registration
 func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 	consumerID := msg.ConsumerId
 	topic := msg.Topic
@@ -129,11 +124,6 @@ func (n *Node) handleSubscribe(msg *protocol.SubscribeMsg, conn net.Conn) {
 	go n.streamResultsToConsumerWithProcessing(consumerID, topic, conn, enableProcessing, analyticsWindowSeconds, analyticsIntervalMs)
 }
 
-// safeIDStr safely formats a node ID string for logging (defined in node_handlers.go)
-// Returns first 8 characters if long enough, or "(empty)" if empty
-
-// handleConsumeRequest processes CONSUME requests from consumers
-// Implements one-to-one consumer-to-topic mapping and broker assignment
 func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 	consumerID := protocol.GetSenderID(msg)
 	topic := msg.Topic
@@ -309,8 +299,6 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 	fmt.Printf("[Leader %s] -> CONSUME_ACK to %s (topic: %s, broker: %s @ %s)\n",
 		n.id[:8], consumerID[:8], topic, stream.AssignedBrokerId[:8], assignedBrokerAddress)
 
-	// Connection will be closed by handleTCPConnection
-	// Consumer will connect to the assigned broker with SUBSCRIBE message
 	fmt.Printf("[Leader %s] Consumer %s should now connect to broker %s for results\n",
 		n.id[:8], consumerID[:8], assignedBrokerAddress)
 }
@@ -457,8 +445,6 @@ func (n *Node) sendNewDataToConsumer(consumerID, topic string, conn net.Conn) er
 
 	return nil
 }
-
-// ============== Data Processing Pipeline ==============
 
 // ProcessedResult contains analytics/aggregation results
 type ProcessedResult struct {

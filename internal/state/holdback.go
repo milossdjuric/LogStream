@@ -12,13 +12,7 @@ type HoldbackMessage struct {
 	UpdateType    string // Type of update (e.g., "REGISTRY")
 }
 
-// RegistryHoldbackQueue ensures FIFO delivery of registry updates from leader
-//
-// How it works:
-// 1. Leader sends REPLICATE messages with sequence numbers: 1, 2, 3, 4, ...
-// 2. Follower receives them (possibly out of order due to network): 1, 3, 2, 5, 4, ...
-// 3. Holdback queue buffers out-of-order messages and delivers them in sequence
-// 4. Follower applies updates in FIFO order: 1 -> 2 -> 3 -> 4 -> 5
+// RegistryHoldbackQueue buffers out-of-order REPLICATE messages and delivers them in sequence.
 type RegistryHoldbackQueue struct {
 	mu           sync.Mutex
 	nextExpected int64                        // Next sequence number we expect from leader
@@ -103,23 +97,18 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 	return nil
 }
 
-// GetNextExpected returns the next sequence number we expect
-// Useful for detecting gaps and sending NACK requests (future feature)
 func (hq *RegistryHoldbackQueue) GetNextExpected() int64 {
 	hq.mu.Lock()
 	defer hq.mu.Unlock()
 	return hq.nextExpected
 }
 
-// GetBufferSize returns the number of buffered out-of-order messages
 func (hq *RegistryHoldbackQueue) GetBufferSize() int {
 	hq.mu.Lock()
 	defer hq.mu.Unlock()
 	return len(hq.buffer)
 }
 
-// Reset clears the queue and sets a new expected sequence number
-// Used when a new leader is elected and we need to resynchronize
 func (hq *RegistryHoldbackQueue) Reset(newExpected int64) {
 	hq.mu.Lock()
 	defer hq.mu.Unlock()
@@ -131,7 +120,6 @@ func (hq *RegistryHoldbackQueue) Reset(newExpected int64) {
 	fmt.Printf("[Holdback] Reset to sequence %d\n", newExpected)
 }
 
-// PrintStatus displays current holdback queue state (for debugging)
 func (hq *RegistryHoldbackQueue) PrintStatus() {
 	hq.mu.Lock()
 	defer hq.mu.Unlock()

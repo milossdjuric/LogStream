@@ -298,7 +298,6 @@ func (p *Producer) SendData(data []byte) error {
 	return nil
 }
 
-// GetSequenceNum returns the current sequence number (for debugging/testing)
 func (p *Producer) GetSequenceNum() int64 {
 	return p.seqNum
 }
@@ -589,34 +588,27 @@ func (p *Producer) UpdateBrokerAddress(newAddr string) error {
 	return nil
 }
 
-// GetBrokerAddress returns the current broker address
 func (p *Producer) GetBrokerAddress() string {
 	p.brokerAddrMu.RLock()
 	defer p.brokerAddrMu.RUnlock()
 	return p.brokerAddr
 }
 
-// Close shuts down the producer
-// Close shuts down the producer. Safe to call multiple times.
 func (p *Producer) Close() {
 	p.closeOnce.Do(func() {
-		// Signal all goroutines to stop
 		close(p.stopHeartbeat)
 		close(p.stopListener)
 
-		// Close TCP listener to unblock Accept()
 		if p.tcpListener != nil {
 			p.tcpListener.Close()
 		}
 
-		// Close UDP socket to free the port immediately and unblock ReadUDPMessage()
 		p.brokerAddrMu.Lock()
 		if p.udpConn != nil {
 			p.udpConn.Close()
 		}
 		p.brokerAddrMu.Unlock()
 
-		// Wait for goroutines with timeout to prevent hanging
 		done := make(chan struct{})
 		go func() {
 			p.wg.Wait()

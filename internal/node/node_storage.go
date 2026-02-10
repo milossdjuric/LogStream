@@ -214,9 +214,6 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 			n.id[:8], len(subscribers), topic)
 	}
 
-	// Note: Data delivery to consumers is handled by streamResultsToConsumer() polling
-	// This avoids race conditions and duplicate sends
-
 	return nil
 }
 
