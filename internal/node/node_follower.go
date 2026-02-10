@@ -21,7 +21,7 @@ func (n *Node) runFollowerDuties() {
 
 	// Followers send heartbeats so leader knows they're alive
 	// Increased frequency to 2 seconds to prevent timeout issues
-	heartbeatTicker := time.NewTicker(2 * time.Second)
+	heartbeatTicker := time.NewTicker(time.Duration(n.config.FollowerHeartbeatInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 
 	// Send immediate heartbeat right after joining (before waiting for first tick)
@@ -81,9 +81,9 @@ func (n *Node) runFollowerDuties() {
 			timeSinceLastHeartbeat := time.Since(n.lastLeaderHeartbeat)
 			n.lastLeaderHeartbeatMu.RUnlock()
 			
-			// Timeout thresholds (simple, no Phi complexity)
-			suspicionTimeout := 10 * time.Second  // Warn after 10s
-			failureTimeout := 15 * time.Second    // Fail after 15s
+			// Timeout thresholds (configurable via env vars)
+			suspicionTimeout := time.Duration(n.config.SuspicionTimeout) * time.Second
+			failureTimeout := time.Duration(n.config.FailureTimeout) * time.Second
 			
 			suspected := timeSinceLastHeartbeat > suspicionTimeout && timeSinceLastHeartbeat < failureTimeout
 			failed := timeSinceLastHeartbeat > failureTimeout

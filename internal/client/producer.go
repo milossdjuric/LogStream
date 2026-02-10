@@ -10,6 +10,16 @@ import (
 	"github.com/milossdjuric/logstream/internal/protocol"
 )
 
+// ProducerOptions holds all configurable producer options
+type ProducerOptions struct {
+	ClientPort        int           // Fixed TCP listener port (0 = OS picks)
+	AdvertiseAddr     string        // Override advertised IP (e.g. Windows host IP for WSL)
+	HeartbeatInterval time.Duration // How often to send heartbeats to leader (default: 2s)
+	LeaderTimeout     time.Duration // How long without leader heartbeat before reconnect (default: 10s)
+	ReconnectAttempts int           // Max reconnection attempts (default: 10)
+	ReconnectDelay    time.Duration // Delay between reconnection attempts (default: 5s)
+}
+
 // Producer handles producing data to LogStream
 type Producer struct {
 	id            string
@@ -26,6 +36,13 @@ type Producer struct {
 	stopListener  chan struct{}
 	seqNum        int64          // Monotonically increasing sequence number for FIFO ordering
 	wg            sync.WaitGroup // Synchronize goroutine lifecycle
+	closeOnce     sync.Once      // Ensures Close() is safe to call multiple times
+
+	// Configurable timing
+	heartbeatInterval time.Duration
+	leaderTimeout     time.Duration
+	reconnectAttempts int
+	reconnectDelay    time.Duration
 
 	// UDP heartbeat state
 	leaderAddrUDP         *net.UDPAddr // Resolved leader UDP address for heartbeats
@@ -42,12 +59,16 @@ func NewProducer(topic, leaderAddr string) *Producer {
 		idSeed = topic
 	}
 	return &Producer{
-		id:            protocol.GenerateClientID("producer", idSeed),
-		topic:         topic,
-		leaderAddr:    leaderAddr,
-		stopHeartbeat: make(chan struct{}),
-		stopListener:  make(chan struct{}),
-		seqNum:        1, // Start at 1 (0 means unset)
+		id:                protocol.GenerateClientID("producer", idSeed),
+		topic:             topic,
+		leaderAddr:        leaderAddr,
+		stopHeartbeat:     make(chan struct{}),
+		stopListener:      make(chan struct{}),
+		seqNum:            1, // Start at 1 (0 means unset)
+		heartbeatInterval: 2 * time.Second,
+		leaderTimeout:     10 * time.Second,
+		reconnectAttempts: 10,
+		reconnectDelay:    5 * time.Second,
 	}
 }
 
@@ -57,6 +78,26 @@ func NewProducerWithPort(topic, leaderAddr string, port int, advertiseAddr strin
 	p := NewProducer(topic, leaderAddr)
 	p.clientPort = port
 	p.advertiseAddr = advertiseAddr
+	return p
+}
+
+// NewProducerWithOptions creates a new producer with full options.
+func NewProducerWithOptions(topic, leaderAddr string, opts ProducerOptions) *Producer {
+	p := NewProducer(topic, leaderAddr)
+	p.clientPort = opts.ClientPort
+	p.advertiseAddr = opts.AdvertiseAddr
+	if opts.HeartbeatInterval > 0 {
+		p.heartbeatInterval = opts.HeartbeatInterval
+	}
+	if opts.LeaderTimeout > 0 {
+		p.leaderTimeout = opts.LeaderTimeout
+	}
+	if opts.ReconnectAttempts > 0 {
+		p.reconnectAttempts = opts.ReconnectAttempts
+	}
+	if opts.ReconnectDelay > 0 {
+		p.reconnectDelay = opts.ReconnectDelay
+	}
 	return p
 }
 
@@ -266,7 +307,7 @@ func (p *Producer) GetSequenceNum() int64 {
 // Detects leader death via missing incoming heartbeats and triggers cluster re-discovery
 func (p *Producer) sendHeartbeats() {
 	defer p.wg.Done()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(p.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -281,14 +322,13 @@ func (p *Producer) sendHeartbeats() {
 				protocol.WriteUDPMessage(conn, heartbeat, p.leaderAddrUDP)
 			}
 
-			// Check for leader failure (no heartbeat received for 10s)
-			// This detects leader death within ~12 seconds instead of 60+
+			// Check for leader failure (no heartbeat received within timeout)
 			p.lastLeaderHeartbeatMu.RLock()
 			lastHB := p.lastLeaderHeartbeat
 			p.lastLeaderHeartbeatMu.RUnlock()
-			if !lastHB.IsZero() && time.Since(lastHB) > 10*time.Second {
-				fmt.Printf("[Producer %s] Leader appears down (no heartbeat for %v), attempting re-discovery...\n",
-					p.id[:8], time.Since(lastHB).Round(time.Second))
+			if !lastHB.IsZero() && time.Since(lastHB) > p.leaderTimeout {
+				fmt.Printf("[Producer %s] Leader appears down (no heartbeat for %v, timeout: %v), attempting re-discovery...\n",
+					p.id[:8], time.Since(lastHB).Round(time.Second), p.leaderTimeout)
 				if err := p.reconnectToCluster(); err != nil {
 					log.Printf("[Producer %s] Cluster re-discovery failed: %v", p.id[:8], err)
 				} else {
@@ -340,8 +380,8 @@ func (p *Producer) receiveUDPMessages() {
 // reconnectToCluster re-discovers the cluster leader and re-registers the producer.
 // Called when the leader appears to be down (consecutive heartbeat failures).
 func (p *Producer) reconnectToCluster() error {
-	const maxAttempts = 10
-	const attemptDelay = 5 * time.Second
+	maxAttempts := p.reconnectAttempts
+	attemptDelay := p.reconnectDelay
 
 	// Close existing UDP socket before discovery to free the port
 	// DiscoverLeader needs to bind broadcast sockets to clientPort,
@@ -557,21 +597,35 @@ func (p *Producer) GetBrokerAddress() string {
 }
 
 // Close shuts down the producer
+// Close shuts down the producer. Safe to call multiple times.
 func (p *Producer) Close() {
-	close(p.stopHeartbeat)
-	close(p.stopListener)
+	p.closeOnce.Do(func() {
+		// Signal all goroutines to stop
+		close(p.stopHeartbeat)
+		close(p.stopListener)
 
-	// Close TCP listener to unblock Accept()
-	if p.tcpListener != nil {
-		p.tcpListener.Close()
-	}
+		// Close TCP listener to unblock Accept()
+		if p.tcpListener != nil {
+			p.tcpListener.Close()
+		}
 
-	// Wait for goroutines to actually exit (proper synchronization)
-	p.wg.Wait()
+		// Close UDP socket to free the port immediately and unblock ReadUDPMessage()
+		p.brokerAddrMu.Lock()
+		if p.udpConn != nil {
+			p.udpConn.Close()
+		}
+		p.brokerAddrMu.Unlock()
 
-	p.brokerAddrMu.Lock()
-	if p.udpConn != nil {
-		p.udpConn.Close()
-	}
-	p.brokerAddrMu.Unlock()
+		// Wait for goroutines with timeout to prevent hanging
+		done := make(chan struct{})
+		go func() {
+			p.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			fmt.Printf("[Producer %s] Shutdown timeout - forcing exit\n", p.id[:8])
+		}
+	})
 }

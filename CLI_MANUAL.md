@@ -14,8 +14,9 @@ Command-line interface reference for LogStream cluster management tool, broker, 
 6. [All Producer Start Combinations](#all-producer-start-combinations)
 7. [All Consumer Start Combinations](#all-consumer-start-combinations)
 8. [Process Management](#process-management)
-9. [Environment Variables](#environment-variables)
-10. [Debug Commands](#debug-commands)
+9. [Direct Binary Usage (Without logstreamctl)](#direct-binary-usage-without-logstreamctl)
+10. [Environment Variables](#environment-variables)
+11. [Debug Commands](#debug-commands)
 
 ---
 
@@ -60,22 +61,16 @@ All LogStream components (brokers, producers, consumers) use **UDP broadcast** f
 ### How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     UDP Broadcast Discovery                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   Client (Producer/Consumer)              Leader Broker          │
-│          │                                      │                │
-│          │──── JOIN (UDP broadcast) ──────────►│ port 8888      │
-│          │     (subnet broadcast address)       │                │
-│          │                                      │                │
-│          │◄─── JOIN_RESPONSE (UDP unicast) ────│                │
-│          │     (leader address returned)        │                │
-│          │                                      │                │
-│          │──── PRODUCE/CONSUME (TCP) ─────────►│ port 8001      │
-│          │     (connect to discovered leader)   │                │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Client (Producer/Consumer)              Leader Broker
+        |                                      |
+        |---- JOIN (UDP broadcast) ----------->| port 8888
+        |     (subnet broadcast address)       |
+        |                                      |
+        |<--- JOIN_RESPONSE (UDP unicast) -----|
+        |     (leader address returned)        |
+        |                                      |
+        |---- PRODUCE/CONSUME (TCP) ---------> | port 8001
+        |     (connect to discovered leader)   |
 ```
 
 ### Discovery Features
@@ -198,9 +193,19 @@ The broker `--address` flag supports three formats:
 ./logstreamctl start broker --name node1 --broadcast-port 8889
 ```
 
+**Explicit leader (bypass broadcast discovery):**
+```bash
+./logstreamctl start broker --name node2 --leader 192.168.1.10:8001
+```
+
+**Custom timing (faster failure detection):**
+```bash
+./logstreamctl start broker --name node1 --broker-hb-interval 3 --suspicion-timeout 6 --failure-timeout 10
+```
+
 **Full options:**
 ```bash
-./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --multicast 239.0.0.1:9999 --broadcast-port 8888 --background
+./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --multicast 239.0.0.1:9999 --broadcast-port 8888 --max-records 50000 --background
 ```
 
 ### Multi-Broker Cluster (Same Machine)
@@ -224,6 +229,15 @@ The broker `--address` flag supports three formats:
 | `--address` | `-a` | auto:8001 | IP:PORT, or just PORT, or omit for auto |
 | `--multicast` | `-m` | 239.0.0.1:9999 | Multicast group for heartbeats |
 | `--broadcast-port` | `-b` | 8888 | UDP broadcast port for discovery |
+| `--leader` | `-l` | (auto-discover) | Explicit leader address (bypasses broadcast) |
+| `--max-records` | | 10000 | Max records per topic log (0 = unlimited) |
+| `--broker-hb-interval` | | 5 | Leader->follower heartbeat interval in seconds |
+| `--client-hb-interval` | | 10 | Leader->client heartbeat interval in seconds |
+| `--broker-timeout` | | 30 | Dead broker removal timeout in seconds |
+| `--client-timeout` | | 30 | Dead client removal timeout in seconds |
+| `--follower-hb-interval` | | 2 | Follower->leader heartbeat interval in seconds |
+| `--suspicion-timeout` | | 10 | Leader suspicion timeout in seconds |
+| `--failure-timeout` | | 15 | Leader failure timeout in seconds |
 | `--background` | `-bg` | false | Run as daemon |
 
 ---
@@ -295,6 +309,11 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 ./logstreamctl start producer --name prod1 --topic logs --rate 5 --background
 ```
 
+**Custom heartbeat and reconnection timing:**
+```bash
+./logstreamctl start producer --name prod1 --topic logs --rate 5 --hb-interval 5 --hb-timeout 30 --reconnect-attempts 20 --reconnect-delay 2
+```
+
 **Different topics:**
 ```bash
 ./logstreamctl start producer --name prod1 --topic sensors --rate 5
@@ -304,7 +323,7 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 
 **Full options with explicit leader:**
 ```bash
-./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --rate 10 --count 1000 --message "log-entry" --background
+./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --port 8002 --rate 10 --count 1000 --message "log-entry" --background
 ```
 
 ### Producer Options Reference
@@ -312,12 +331,18 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--name` | `-n` | (required) | Unique process name |
-| `--leader` | `-l` | UDP broadcast | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
+| `--leader` | `-l` | (auto-discover) | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
 | `--topic` | `-t` | logs | Topic name |
+| `--port` | `-p` | (auto-assign) | Client TCP port |
+| `--address` | `-a` | (auto-detect) | Advertised IP (for WSL/NAT: set to Windows host LAN IP) |
 | `--rate` | `-r` | 0 | Messages/sec (0 = interactive) |
 | `--interval` | `-i` | 0 | Interval in ms between messages (overrides --rate) |
 | `--count` | `-c` | 0 | Total messages (0 = unlimited) |
 | `--message` | `-m` | "log message" | Message template |
+| `--hb-interval` | | 2 | Heartbeat interval in seconds |
+| `--hb-timeout` | | 10 | Leader timeout in seconds before reconnect |
+| `--reconnect-attempts` | | 10 | Max reconnection attempts |
+| `--reconnect-delay` | | 5 | Delay between reconnection attempts in seconds |
 | `--background` | `-bg` | false | Run as daemon |
 
 ### Rate vs Interval
@@ -383,6 +408,11 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 ./logstreamctl start consumer --name cons1 --topic logs --no-analytics --background
 ```
 
+**Custom heartbeat and reconnection timing:**
+```bash
+./logstreamctl start consumer --name cons1 --topic logs --hb-interval 5 --reconnect-attempts 20 --reconnect-delay 2
+```
+
 **Different topics with different analytics settings:**
 ```bash
 ./logstreamctl start consumer --name cons-sensors --topic sensors --window 30 --interval 500
@@ -395,11 +425,16 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--name` | `-n` | (required) | Unique process name |
-| `--leader` | `-l` | UDP broadcast | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
+| `--leader` | `-l` | (auto-discover) | Leader broker IP:PORT (discovers via UDP broadcast if omitted) |
 | `--topic` | `-t` | logs | Topic name |
+| `--port` | `-p` | (auto-assign) | Client TCP port |
+| `--address` | `-a` | (auto-detect) | Advertised IP (for WSL/NAT: set to Windows host LAN IP) |
 | `--no-analytics` | | false | Disable analytics processing |
 | `--window` | `-w` | 0 (broker default) | Analytics window in seconds |
 | `--interval` | | 0 (broker default) | Analytics update interval in ms |
+| `--hb-interval` | | 2 | Heartbeat interval in seconds |
+| `--reconnect-attempts` | | 10 | Max reconnection attempts |
+| `--reconnect-delay` | | 5 | Delay between reconnection attempts in seconds |
 | `--background` | `-bg` | false | Run as daemon |
 
 ---
@@ -581,12 +616,14 @@ tail -f ~/.logstream/logs/node1.log
 
 ## Direct Binary Usage (Without logstreamctl)
 
-You can also run binaries directly with environment variables:
+You can also run binaries directly without logstreamctl.
 
 ### Broker (./logstream)
 
+The broker uses environment variables only (no CLI flags):
+
 ```bash
-# Auto-detect
+# Auto-detect address
 ./logstream
 
 # With explicit address
@@ -594,21 +631,72 @@ NODE_ADDRESS=172.28.226.255:8001 ./logstream
 
 # Full config
 NODE_ADDRESS=172.28.226.255:8001 MULTICAST_GROUP=239.0.0.1:9999 BROADCAST_PORT=8888 ./logstream
+
+# With explicit leader (bypass broadcast)
+NODE_ADDRESS=172.28.226.255:8002 LEADER_ADDRESS=172.28.226.255:8001 ./logstream
+
+# Custom timing
+BROKER_HB_INTERVAL=3 CLIENT_TIMEOUT=60 FAILURE_TIMEOUT=20 ./logstream
 ```
 
 ### Producer (./producer)
 
+The producer uses CLI flags (with LEADER_ADDRESS and TOPIC env var fallback):
+
 ```bash
-LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./producer
+# Auto-discover cluster, interactive mode
+./producer -topic logs
+
+# Auto-discover, auto mode at 10 msg/sec
+./producer -topic logs -rate 10
+
+# Explicit leader
+./producer -leader 172.28.226.255:8001 -topic logs -rate 5
+
+# Fixed port (for NAT/firewall port forwarding)
+./producer -topic logs -port 8002
+
+# Advertised address (WSL/NAT)
+./producer -topic logs -port 8002 -address 192.168.1.50
+
+# Custom heartbeat timing
+./producer -topic logs -hb-interval 5 -hb-timeout 30
+
+# Custom reconnection
+./producer -topic logs -reconnect-attempts 20 -reconnect-delay 2
+
+# Send 100 messages then exit
+./producer -topic logs -rate 10 -count 100
+
+# Slow rate (1 message every 5 seconds)
+./producer -topic logs -interval 5000
 ```
 
 ### Consumer (./consumer)
 
-```bash
-LEADER_ADDRESS=172.28.226.255:8001 TOPIC=logs ./consumer
+The consumer uses CLI flags (with LEADER_ADDRESS and TOPIC env var fallback):
 
-# With custom analytics window and interval
+```bash
+# Auto-discover cluster, with analytics
+./consumer -topic logs
+
+# Explicit leader
+./consumer -leader 172.28.226.255:8001 -topic logs
+
+# Raw data only (no analytics)
+./consumer -topic logs -analytics=false
+
+# Custom analytics window and interval
 ./consumer -topic logs -window 30 -interval 2000
+
+# Fixed port (for NAT/firewall port forwarding)
+./consumer -topic logs -port 8003
+
+# Custom heartbeat timing
+./consumer -topic logs -hb-interval 5
+
+# Custom reconnection
+./consumer -topic logs -reconnect-attempts 20 -reconnect-delay 2
 ```
 
 ---
@@ -626,11 +714,11 @@ sudo ip netns exec logstream-a env NODE_ADDRESS=172.20.0.10:8001 ./logstream &
 sudo ip netns exec logstream-b env NODE_ADDRESS=172.20.0.20:8001 ./logstream &
 sudo ip netns exec logstream-c env NODE_ADDRESS=172.20.0.30:8001 ./logstream &
 
-# Start producer
-sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./producer &
+# Start producer (explicit leader since broadcast may not cross namespaces)
+sudo ip netns exec logstream-a ./producer -leader 172.20.0.10:8001 -topic test -rate 5 &
 
 # Start consumer
-sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./consumer &
+sudo ip netns exec logstream-a ./consumer -leader 172.20.0.10:8001 -topic test &
 
 # Cleanup
 sudo ./deploy/netns/cleanup.sh
@@ -667,25 +755,33 @@ go run cmd/netdiag/main.go
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NODE_ADDRESS` | Auto-detect | Node's IP:PORT (e.g., `192.168.1.10:8001`) |
+| `NODE_ADDRESS` | (auto-detect) | Node's IP:PORT (e.g., `192.168.1.10:8001`) |
 | `MULTICAST_GROUP` | `239.0.0.1:9999` | Multicast address for heartbeats and replication |
 | `BROADCAST_PORT` | `8888` | UDP broadcast port for cluster discovery |
+| `LEADER_ADDRESS` | (auto-discover) | Explicit leader address (bypass broadcast) |
+| `ANALYTICS_WINDOW_SECONDS` | `60` | Analytics window size in seconds |
+| `MAX_RECORDS_PER_TOPIC` | `10000` | Max records per topic log (0 = unlimited) |
+| `BROKER_HB_INTERVAL` | `5` | Leader->follower heartbeat interval in seconds |
+| `CLIENT_HB_INTERVAL` | `10` | Leader->client heartbeat interval in seconds |
+| `BROKER_TIMEOUT` | `30` | Dead broker removal timeout in seconds |
+| `CLIENT_TIMEOUT` | `30` | Dead client removal timeout in seconds |
+| `FOLLOWER_HB_INTERVAL` | `2` | Follower->leader heartbeat interval in seconds |
+| `SUSPICION_TIMEOUT` | `10` | Seconds without leader heartbeat before suspicion |
+| `FAILURE_TIMEOUT` | `15` | Seconds without leader heartbeat before failure |
 
 ### Producer Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LEADER_ADDRESS` | `127.0.0.1:8001` | Leader broker address |
-| `TOPIC` | `default` | Topic to produce messages to |
-| `PRODUCER_ID` | Auto-generated | Unique producer identifier |
+| `LEADER_ADDRESS` | (auto-discover) | Leader broker address (fallback for `-leader` flag) |
+| `TOPIC` | `logs` | Topic to produce to (fallback for `-topic` flag) |
 
 ### Consumer Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LEADER_ADDRESS` | `127.0.0.1:8001` | Leader broker address |
-| `TOPIC` | `default` | Topic to consume messages from |
-| `CONSUMER_ID` | Auto-generated | Unique consumer identifier |
+| `LEADER_ADDRESS` | (auto-discover) | Leader broker address (fallback for `-leader` flag) |
+| `TOPIC` | `logs` | Topic to consume from (fallback for `-topic` flag) |
 
 ---
 
@@ -861,10 +957,10 @@ go build -o producer cmd/producer/main.go
 go build -o consumer cmd/consumer/main.go
 
 # Start producer
-sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./producer &
+sudo ip netns exec logstream-a ./producer -leader 172.20.0.10:8001 -topic test -rate 5 &
 
 # Start consumer
-sudo ip netns exec logstream-a env LEADER_ADDRESS=172.20.0.10:8001 TOPIC=test ./consumer &
+sudo ip netns exec logstream-a ./consumer -leader 172.20.0.10:8001 -topic test &
 ```
 
 ### Clean Up Everything

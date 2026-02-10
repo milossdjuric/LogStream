@@ -24,6 +24,10 @@ func main() {
 	interval := flag.Int("interval", 0, "Interval between messages in milliseconds (overrides -rate)")
 	count := flag.Int("count", 0, "Number of messages to send (0 = unlimited)")
 	message := flag.String("message", "log message", "Message template for auto mode")
+	hbInterval := flag.Int("hb-interval", 2, "Heartbeat interval in seconds (default: 2)")
+	hbTimeout := flag.Int("hb-timeout", 10, "Leader timeout in seconds before reconnect (default: 10)")
+	reconnectAttempts := flag.Int("reconnect-attempts", 10, "Max reconnection attempts (default: 10)")
+	reconnectDelay := flag.Int("reconnect-delay", 5, "Delay between reconnection attempts in seconds (default: 5)")
 	help := flag.Bool("help", false, "Show help")
 
 	flag.Parse()
@@ -77,6 +81,12 @@ func main() {
 		fmt.Println()
 		fmt.Println("  # Slow rate - 1 message every 5 seconds")
 		fmt.Println("  ./producer -topic logs -interval 5000")
+		fmt.Println()
+		fmt.Println("  # Custom heartbeat timing")
+		fmt.Println("  ./producer -topic logs -hb-interval 5 -hb-timeout 30")
+		fmt.Println()
+		fmt.Println("  # More reconnection attempts with shorter delay")
+		fmt.Println("  ./producer -topic logs -reconnect-attempts 20 -reconnect-delay 2")
 		os.Exit(0)
 	}
 
@@ -94,7 +104,14 @@ func main() {
 	fmt.Println()
 
 	// Create producer
-	producer := client.NewProducerWithPort(*topic, *leader, *port, *address)
+	producer := client.NewProducerWithOptions(*topic, *leader, client.ProducerOptions{
+		ClientPort:        *port,
+		AdvertiseAddr:     *address,
+		HeartbeatInterval: time.Duration(*hbInterval) * time.Second,
+		LeaderTimeout:     time.Duration(*hbTimeout) * time.Second,
+		ReconnectAttempts: *reconnectAttempts,
+		ReconnectDelay:    time.Duration(*reconnectDelay) * time.Second,
+	})
 
 	// Connect to cluster
 	fmt.Println("Connecting to cluster...")
@@ -104,7 +121,7 @@ func main() {
 	fmt.Println("[OK] Connected successfully")
 	fmt.Println()
 
-	// Setup signal handling
+	// Setup signal handling - first Ctrl+C graceful, second forces exit
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
@@ -195,7 +212,13 @@ func main() {
 		}
 	}
 
-	fmt.Println("\nDisconnecting...")
+	fmt.Println("\nDisconnecting (press Ctrl+C again to force)...")
+	// Second Ctrl+C forces immediate exit
+	go func() {
+		<-sigChan
+		fmt.Println("\n[Producer] Forced exit")
+		os.Exit(1)
+	}()
 	producer.Close()
 	fmt.Println("[OK] Disconnected")
 }

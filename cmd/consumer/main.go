@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/milossdjuric/logstream/internal/client"
 )
@@ -20,6 +21,9 @@ func main() {
 	analytics := flag.Bool("analytics", true, "Request analytics/processing from broker")
 	windowSeconds := flag.Int("window", 0, "Analytics window in seconds (0 = broker default, typically 60)")
 	intervalMs := flag.Int("interval", 0, "Analytics update interval in ms (0 = broker default, typically 1000)")
+	hbInterval := flag.Int("hb-interval", 2, "Heartbeat interval in seconds (default: 2)")
+	reconnectAttempts := flag.Int("reconnect-attempts", 10, "Max reconnection attempts (default: 10)")
+	reconnectDelay := flag.Int("reconnect-delay", 5, "Delay between reconnection attempts in seconds (default: 5)")
 	help := flag.Bool("help", false, "Show help")
 
 	flag.Parse()
@@ -63,6 +67,12 @@ func main() {
 		fmt.Println()
 		fmt.Println("  # Custom analytics window (30s) and update interval (2s)")
 		fmt.Println("  ./consumer -topic logs -window 30 -interval 2000")
+		fmt.Println()
+		fmt.Println("  # Custom heartbeat timing")
+		fmt.Println("  ./consumer -topic logs -hb-interval 5")
+		fmt.Println()
+		fmt.Println("  # More reconnection attempts with shorter delay")
+		fmt.Println("  ./consumer -topic logs -reconnect-attempts 20 -reconnect-delay 2")
 		os.Exit(0)
 	}
 
@@ -73,6 +83,9 @@ func main() {
 		AnalyticsIntervalMs:    int32(*intervalMs),
 		ClientPort:             *port,
 		AdvertiseAddr:          *address,
+		HeartbeatInterval:      time.Duration(*hbInterval) * time.Second,
+		ReconnectAttempts:      *reconnectAttempts,
+		ReconnectDelay:         time.Duration(*reconnectDelay) * time.Second,
 	})
 
 	// Consumer ID prefix for all logs
@@ -109,7 +122,7 @@ func main() {
 	fmt.Printf("[Consumer %s] Receiving messages (Press Ctrl+C to stop)...\n", cid)
 	fmt.Println()
 
-	// Setup signal handling
+	// Setup signal handling - first Ctrl+C graceful, second forces exit
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -130,7 +143,13 @@ func main() {
 
 		case <-sigChan:
 			fmt.Printf("\n\n[Consumer %s] Received %d messages total\n", cid, received)
-			fmt.Printf("[Consumer %s] Disconnecting...\n", cid)
+			fmt.Printf("[Consumer %s] Disconnecting (press Ctrl+C again to force)...\n", cid)
+			// Second Ctrl+C forces immediate exit
+			go func() {
+				<-sigChan
+				fmt.Printf("\n[Consumer %s] Forced exit\n", cid)
+				os.Exit(1)
+			}()
 			consumer.Close()
 			fmt.Printf("[Consumer %s] Disconnected\n", cid)
 			return

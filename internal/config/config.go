@@ -23,6 +23,15 @@ type Config struct {
 
 	// Storage configuration
 	MaxRecordsPerTopic int // Max records to keep per topic log (0 = unlimited, default: 10000)
+
+	// Broker timing configuration
+	BrokerHeartbeatInterval  int // Leader->follower heartbeat interval in seconds (default: 5)
+	ClientHeartbeatInterval  int // Leader->client heartbeat interval in seconds (default: 10)
+	BrokerTimeout            int // Seconds before removing dead brokers (default: 30)
+	ClientTimeout            int // Seconds before removing dead clients (default: 30)
+	FollowerHeartbeatInterval int // Follower->leader heartbeat interval in seconds (default: 2)
+	SuspicionTimeout         int // Seconds without leader HB before suspicion (default: 10)
+	FailureTimeout           int // Seconds without leader HB before failure (default: 15)
 }
 
 func LoadConfig() (*Config, error) {
@@ -31,8 +40,15 @@ func LoadConfig() (*Config, error) {
 		MulticastGroup:         getEnv("MULTICAST_GROUP", "239.0.0.1:9999"),
 		BroadcastPort:          getEnvInt("BROADCAST_PORT", 8888),
 		LeaderAddress:          getEnv("LEADER_ADDRESS", ""), // Optional: bypass broadcast discovery
-		AnalyticsWindowSeconds: getEnvInt("ANALYTICS_WINDOW_SECONDS", 60),
-		MaxRecordsPerTopic:    getEnvInt("MAX_RECORDS_PER_TOPIC", 10000),
+		AnalyticsWindowSeconds:   getEnvInt("ANALYTICS_WINDOW_SECONDS", 60),
+		MaxRecordsPerTopic:      getEnvInt("MAX_RECORDS_PER_TOPIC", 10000),
+		BrokerHeartbeatInterval:  getEnvInt("BROKER_HB_INTERVAL", 5),
+		ClientHeartbeatInterval:  getEnvInt("CLIENT_HB_INTERVAL", 10),
+		BrokerTimeout:            getEnvInt("BROKER_TIMEOUT", 30),
+		ClientTimeout:            getEnvInt("CLIENT_TIMEOUT", 30),
+		FollowerHeartbeatInterval: getEnvInt("FOLLOWER_HB_INTERVAL", 2),
+		SuspicionTimeout:         getEnvInt("SUSPICION_TIMEOUT", 10),
+		FailureTimeout:           getEnvInt("FAILURE_TIMEOUT", 15),
 	}
 
 	if cfg.NodeAddress == "" {
@@ -149,6 +165,28 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("MAX_RECORDS_PER_TOPIC must be non-negative (got %d)", c.MaxRecordsPerTopic)
 	}
 
+	if c.BrokerHeartbeatInterval <= 0 {
+		return fmt.Errorf("BROKER_HB_INTERVAL must be positive (got %d)", c.BrokerHeartbeatInterval)
+	}
+	if c.ClientHeartbeatInterval <= 0 {
+		return fmt.Errorf("CLIENT_HB_INTERVAL must be positive (got %d)", c.ClientHeartbeatInterval)
+	}
+	if c.BrokerTimeout <= 0 {
+		return fmt.Errorf("BROKER_TIMEOUT must be positive (got %d)", c.BrokerTimeout)
+	}
+	if c.ClientTimeout <= 0 {
+		return fmt.Errorf("CLIENT_TIMEOUT must be positive (got %d)", c.ClientTimeout)
+	}
+	if c.FollowerHeartbeatInterval <= 0 {
+		return fmt.Errorf("FOLLOWER_HB_INTERVAL must be positive (got %d)", c.FollowerHeartbeatInterval)
+	}
+	if c.SuspicionTimeout <= 0 {
+		return fmt.Errorf("SUSPICION_TIMEOUT must be positive (got %d)", c.SuspicionTimeout)
+	}
+	if c.FailureTimeout <= 0 {
+		return fmt.Errorf("FAILURE_TIMEOUT must be positive (got %d)", c.FailureTimeout)
+	}
+
 	return nil
 }
 
@@ -169,6 +207,13 @@ func (c *Config) Print() {
 	} else {
 		fmt.Printf("Max Records/Topic:   unlimited\n")
 	}
+	fmt.Printf("Broker HB Interval:  %ds\n", c.BrokerHeartbeatInterval)
+	fmt.Printf("Client HB Interval:  %ds\n", c.ClientHeartbeatInterval)
+	fmt.Printf("Broker Timeout:      %ds\n", c.BrokerTimeout)
+	fmt.Printf("Client Timeout:      %ds\n", c.ClientTimeout)
+	fmt.Printf("Follower HB Interval:%ds\n", c.FollowerHeartbeatInterval)
+	fmt.Printf("Suspicion Timeout:   %ds\n", c.SuspicionTimeout)
+	fmt.Printf("Failure Timeout:     %ds\n", c.FailureTimeout)
 	fmt.Println("================================")
 }
 

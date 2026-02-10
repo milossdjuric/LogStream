@@ -179,6 +179,13 @@ func startBroker(args []string) {
 	broadcastPort := "8888"
 	leaderAddress := "" // Optional: bypass broadcast discovery
 	maxRecords := 0
+	brokerHBInterval := 0
+	clientHBInterval := 0
+	brokerTimeout := 0
+	clientTimeout := 0
+	followerHBInterval := 0
+	suspicionTimeout := 0
+	failureTimeout := 0
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -213,6 +220,41 @@ func startBroker(args []string) {
 				maxRecords, _ = strconv.Atoi(args[i+1])
 				i++
 			}
+		case "--broker-hb-interval":
+			if i+1 < len(args) {
+				brokerHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--client-hb-interval":
+			if i+1 < len(args) {
+				clientHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--broker-timeout":
+			if i+1 < len(args) {
+				brokerTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--client-timeout":
+			if i+1 < len(args) {
+				clientTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--follower-hb-interval":
+			if i+1 < len(args) {
+				followerHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--suspicion-timeout":
+			if i+1 < len(args) {
+				suspicionTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--failure-timeout":
+			if i+1 < len(args) {
+				failureTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -222,15 +264,22 @@ func startBroker(args []string) {
 			fmt.Println("  logstreamctl start broker [options]")
 			fmt.Println()
 			fmt.Println("Options:")
-			fmt.Println("  --name, -n           Process name (required)")
-			fmt.Println("  --address, -a        Node address IP:PORT (default: auto-detect:8001)")
-			fmt.Println("                       Can also specify just port: --address 8002")
-			fmt.Println("  --multicast, -m      Multicast group (default: 239.0.0.1:9999)")
-			fmt.Println("  --broadcast-port, -b Broadcast port (default: 8888)")
-			fmt.Println("  --leader, -l         Explicit leader address (bypasses broadcast discovery)")
-			fmt.Println("                       Use when broadcast doesn't work (e.g., WiFi AP isolation)")
-			fmt.Println("  --max-records        Max records per topic log (default: 10000, 0 = unlimited)")
-			fmt.Println("  --background, -bg    Run in background (default: foreground)")
+			fmt.Println("  --name, -n              Process name (required)")
+			fmt.Println("  --address, -a           Node address IP:PORT (default: auto-detect:8001)")
+			fmt.Println("                          Can also specify just port: --address 8002")
+			fmt.Println("  --multicast, -m         Multicast group (default: 239.0.0.1:9999)")
+			fmt.Println("  --broadcast-port, -b    Broadcast port (default: 8888)")
+			fmt.Println("  --leader, -l            Explicit leader address (bypasses broadcast discovery)")
+			fmt.Println("                          Use when broadcast doesn't work (e.g., WiFi AP isolation)")
+			fmt.Println("  --max-records           Max records per topic log (default: 10000, 0 = unlimited)")
+			fmt.Println("  --broker-hb-interval    Leader->follower heartbeat interval in seconds (default: 5)")
+			fmt.Println("  --client-hb-interval    Leader->client heartbeat interval in seconds (default: 10)")
+			fmt.Println("  --broker-timeout        Dead broker removal timeout in seconds (default: 30)")
+			fmt.Println("  --client-timeout        Dead client removal timeout in seconds (default: 30)")
+			fmt.Println("  --follower-hb-interval  Follower->leader heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --suspicion-timeout     Leader suspicion timeout in seconds (default: 10)")
+			fmt.Println("  --failure-timeout       Leader failure timeout in seconds (default: 15)")
+			fmt.Println("  --background, -bg       Run in background (default: foreground)")
 			os.Exit(0)
 		}
 	}
@@ -308,6 +357,27 @@ func startBroker(args []string) {
 	}
 	if maxRecords > 0 {
 		env = append(env, fmt.Sprintf("MAX_RECORDS_PER_TOPIC=%d", maxRecords))
+	}
+	if brokerHBInterval > 0 {
+		env = append(env, fmt.Sprintf("BROKER_HB_INTERVAL=%d", brokerHBInterval))
+	}
+	if clientHBInterval > 0 {
+		env = append(env, fmt.Sprintf("CLIENT_HB_INTERVAL=%d", clientHBInterval))
+	}
+	if brokerTimeout > 0 {
+		env = append(env, fmt.Sprintf("BROKER_TIMEOUT=%d", brokerTimeout))
+	}
+	if clientTimeout > 0 {
+		env = append(env, fmt.Sprintf("CLIENT_TIMEOUT=%d", clientTimeout))
+	}
+	if followerHBInterval > 0 {
+		env = append(env, fmt.Sprintf("FOLLOWER_HB_INTERVAL=%d", followerHBInterval))
+	}
+	if suspicionTimeout > 0 {
+		env = append(env, fmt.Sprintf("SUSPICION_TIMEOUT=%d", suspicionTimeout))
+	}
+	if failureTimeout > 0 {
+		env = append(env, fmt.Sprintf("FAILURE_TIMEOUT=%d", failureTimeout))
 	}
 
 	if background {
@@ -411,6 +481,10 @@ func startProducer(args []string) {
 	interval := 0
 	count := 0
 	message := "log message"
+	hbInterval := 0
+	hbTimeout := 0
+	reconnectAttempts := 0
+	reconnectDelay := 0
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -460,6 +534,26 @@ func startProducer(args []string) {
 				message = args[i+1]
 				i++
 			}
+		case "--hb-interval":
+			if i+1 < len(args) {
+				hbInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--hb-timeout":
+			if i+1 < len(args) {
+				hbTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-attempts":
+			if i+1 < len(args) {
+				reconnectAttempts, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-delay":
+			if i+1 < len(args) {
+				reconnectDelay, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -469,17 +563,21 @@ func startProducer(args []string) {
 			fmt.Println("  logstreamctl start producer [options]")
 			fmt.Println()
 			fmt.Println("Options:")
-			fmt.Println("  --name, -n        Process name (required)")
-			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
-			fmt.Println("  --topic, -t       Topic name (default: logs)")
-			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
-			fmt.Println("  --address, -a     Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
-			fmt.Println("  --rate, -r        Messages per second (default: 0 = interactive)")
-			fmt.Println("  --interval, -i    Interval between messages in ms (overrides --rate)")
-			fmt.Println("                    Example: --interval 2000 = 1 message every 2 seconds")
-			fmt.Println("  --count, -c       Total messages to send (default: 0 = unlimited)")
-			fmt.Println("  --message, -m     Message template (default: log message)")
-			fmt.Println("  --background, -bg Run in background (requires --rate or --interval)")
+			fmt.Println("  --name, -n             Process name (required)")
+			fmt.Println("  --leader, -l           Leader address IP:PORT (optional - auto-discovers via broadcast)")
+			fmt.Println("  --topic, -t            Topic name (default: logs)")
+			fmt.Println("  --port, -p             Client TCP port (default: auto-assign from 9001+)")
+			fmt.Println("  --address, -a          Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
+			fmt.Println("  --rate, -r             Messages per second (default: 0 = interactive)")
+			fmt.Println("  --interval, -i         Interval between messages in ms (overrides --rate)")
+			fmt.Println("                         Example: --interval 2000 = 1 message every 2 seconds")
+			fmt.Println("  --count, -c            Total messages to send (default: 0 = unlimited)")
+			fmt.Println("  --message, -m          Message template (default: log message)")
+			fmt.Println("  --hb-interval          Heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --hb-timeout           Leader timeout in seconds before reconnect (default: 10)")
+			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
+			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
+			fmt.Println("  --background, -bg      Run in background (requires --rate or --interval)")
 			os.Exit(0)
 		}
 	}
@@ -489,14 +587,9 @@ func startProducer(args []string) {
 		os.Exit(1)
 	}
 
-	// Auto-assign port if not specified
+	// Auto-assign port if not specified (clients start from 9001 to avoid broker port range 8001+)
 	if port == 0 {
-		detectedIP, err := autoDetectIP()
-		if err != nil {
-			fmt.Printf("Warning: could not auto-detect IP for port assignment: %v\n", err)
-			detectedIP = "0.0.0.0"
-		}
-		port = findAvailablePort(detectedIP, 8001)
+		port = findAvailableClientPort(9001)
 		fmt.Printf("Auto-assigned port: %d\n", port)
 	}
 
@@ -539,6 +632,18 @@ func startProducer(args []string) {
 	}
 	if message != "log message" {
 		cmdArgs = append(cmdArgs, "-message", message)
+	}
+	if hbInterval > 0 {
+		cmdArgs = append(cmdArgs, "-hb-interval", strconv.Itoa(hbInterval))
+	}
+	if hbTimeout > 0 {
+		cmdArgs = append(cmdArgs, "-hb-timeout", strconv.Itoa(hbTimeout))
+	}
+	if reconnectAttempts > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-attempts", strconv.Itoa(reconnectAttempts))
+	}
+	if reconnectDelay > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-delay", strconv.Itoa(reconnectDelay))
 	}
 
 	// Display leader info
@@ -652,6 +757,9 @@ func startConsumer(args []string) {
 	analytics := true
 	windowSeconds := 0
 	intervalMs := 0
+	hbInterval := 0
+	reconnectAttempts := 0
+	reconnectDelay := 0
 	background := false
 
 	for i := 0; i < len(args); i++ {
@@ -698,6 +806,21 @@ func startConsumer(args []string) {
 				intervalMs, _ = strconv.Atoi(args[i+1])
 				i++
 			}
+		case "--hb-interval":
+			if i+1 < len(args) {
+				hbInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-attempts":
+			if i+1 < len(args) {
+				reconnectAttempts, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-delay":
+			if i+1 < len(args) {
+				reconnectDelay, _ = strconv.Atoi(args[i+1])
+				i++
+			}
 		case "--background", "-bg":
 			background = true
 		case "--help", "-h":
@@ -707,15 +830,18 @@ func startConsumer(args []string) {
 			fmt.Println("  logstreamctl start consumer [options]")
 			fmt.Println()
 			fmt.Println("Options:")
-			fmt.Println("  --name, -n        Process name (required)")
-			fmt.Println("  --leader, -l      Leader address IP:PORT (optional - auto-discovers via broadcast)")
-			fmt.Println("  --topic, -t       Topic name (default: logs)")
-			fmt.Println("  --port, -p        Client TCP port (default: auto-assign from 8001+)")
-			fmt.Println("  --address, -a     Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
-			fmt.Println("  --no-analytics    Disable analytics processing")
-			fmt.Println("  --window, -w      Analytics window in seconds (0 = broker default, typically 60)")
-			fmt.Println("  --interval        Analytics update interval in ms (0 = broker default, typically 1000)")
-			fmt.Println("  --background, -bg Run in background")
+			fmt.Println("  --name, -n             Process name (required)")
+			fmt.Println("  --leader, -l           Leader address IP:PORT (optional - auto-discovers via broadcast)")
+			fmt.Println("  --topic, -t            Topic name (default: logs)")
+			fmt.Println("  --port, -p             Client TCP port (default: auto-assign from 9001+)")
+			fmt.Println("  --address, -a          Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
+			fmt.Println("  --no-analytics         Disable analytics processing")
+			fmt.Println("  --window, -w           Analytics window in seconds (0 = broker default, typically 60)")
+			fmt.Println("  --interval             Analytics update interval in ms (0 = broker default, typically 1000)")
+			fmt.Println("  --hb-interval          Heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
+			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
+			fmt.Println("  --background, -bg      Run in background")
 			os.Exit(0)
 		}
 	}
@@ -726,13 +852,9 @@ func startConsumer(args []string) {
 	}
 
 	// Auto-assign port if not specified
+	// Auto-assign port if not specified (clients start from 9001 to avoid broker port range 8001+)
 	if port == 0 {
-		detectedIP, err := autoDetectIP()
-		if err != nil {
-			fmt.Printf("Warning: could not auto-detect IP for port assignment: %v\n", err)
-			detectedIP = "0.0.0.0"
-		}
-		port = findAvailablePort(detectedIP, 8001)
+		port = findAvailableClientPort(9001)
 		fmt.Printf("Auto-assigned port: %d\n", port)
 	}
 
@@ -773,6 +895,15 @@ func startConsumer(args []string) {
 	}
 	if intervalMs > 0 {
 		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(intervalMs))
+	}
+	if hbInterval > 0 {
+		cmdArgs = append(cmdArgs, "-hb-interval", strconv.Itoa(hbInterval))
+	}
+	if reconnectAttempts > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-attempts", strconv.Itoa(reconnectAttempts))
+	}
+	if reconnectDelay > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-delay", strconv.Itoa(reconnectDelay))
 	}
 
 	// Display leader info
@@ -1435,6 +1566,30 @@ func isPortAvailable(ip string, port int) bool {
 	return true
 }
 
+// isPortAvailableForClient checks both TCP and UDP on 0.0.0.0 (wildcard),
+// since clients bind UDP to 0.0.0.0:port which conflicts with any IP on that port.
+func isPortAvailableForClient(port int) bool {
+	// Check TCP on 0.0.0.0
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	tcpListener.Close()
+
+	// Check UDP on 0.0.0.0 (clients bind UDP here for heartbeats)
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return false
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return false
+	}
+	udpConn.Close()
+	return true
+}
+
 // findAvailablePort finds the first available port starting from startPort
 func findAvailablePort(ip string, startPort int) int {
 	for port := startPort; port < startPort+100; port++ {
@@ -1443,5 +1598,15 @@ func findAvailablePort(ip string, startPort int) int {
 		}
 	}
 	// If no port found in range, return startPort and let it fail with a clear error
+	return startPort
+}
+
+// findAvailableClientPort finds the first port available for a client (checks both TCP and UDP on 0.0.0.0)
+func findAvailableClientPort(startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		if isPortAvailableForClient(port) {
+			return port
+		}
+	}
 	return startPort
 }

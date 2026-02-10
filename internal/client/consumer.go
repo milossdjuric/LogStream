@@ -32,6 +32,12 @@ type Consumer struct {
 	clientPort             int            // Fixed TCP listener port (0 = OS picks)
 	advertiseAddr          string         // Override advertised IP (e.g. Windows host IP for WSL)
 	wg                     sync.WaitGroup // Synchronize goroutine lifecycle
+	closeOnce              sync.Once      // Ensures Close() is safe to call multiple times
+
+	// Configurable timing
+	heartbeatInterval time.Duration
+	reconnectAttempts int
+	reconnectDelay    time.Duration
 
 	// UDP heartbeat state (consumer sends heartbeats to leader to stay alive)
 	udpConn       *net.UDPConn
@@ -48,24 +54,30 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 		idSeed = topic
 	}
 	return &Consumer{
-		id:               protocol.GenerateClientID("consumer", idSeed),
-		topic:            topic,
-		leaderAddr:       leaderAddr,
-		results:          make(chan *protocol.ResultMessage, 100),
-		stopSignal:       make(chan struct{}),
-		stopListener:     make(chan struct{}),
-		stopHeartbeat:    make(chan struct{}),
-		enableProcessing: true, // Enable data processing by default
+		id:                protocol.GenerateClientID("consumer", idSeed),
+		topic:             topic,
+		leaderAddr:        leaderAddr,
+		results:           make(chan *protocol.ResultMessage, 100),
+		stopSignal:        make(chan struct{}),
+		stopListener:      make(chan struct{}),
+		stopHeartbeat:     make(chan struct{}),
+		enableProcessing:  true, // Enable data processing by default
+		heartbeatInterval: 2 * time.Second,
+		reconnectAttempts: 10,
+		reconnectDelay:    5 * time.Second,
 	}
 }
 
 // ConsumerOptions holds all configurable consumer options
 type ConsumerOptions struct {
 	EnableProcessing       bool
-	AnalyticsWindowSeconds int32  // 0 = use broker default
-	AnalyticsIntervalMs    int32  // 0 = use broker default
-	ClientPort             int    // Fixed TCP listener port (0 = OS picks)
-	AdvertiseAddr          string // Override advertised IP (e.g. Windows host IP for WSL)
+	AnalyticsWindowSeconds int32         // 0 = use broker default
+	AnalyticsIntervalMs    int32         // 0 = use broker default
+	ClientPort             int           // Fixed TCP listener port (0 = OS picks)
+	AdvertiseAddr          string        // Override advertised IP (e.g. Windows host IP for WSL)
+	HeartbeatInterval      time.Duration // How often to send heartbeats to leader (default: 2s)
+	ReconnectAttempts      int           // Max reconnection attempts (default: 10)
+	ReconnectDelay         time.Duration // Delay between reconnection attempts (default: 5s)
 }
 
 // NewConsumerWithOptions creates a new consumer with options
@@ -85,6 +97,15 @@ func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) 
 	c.analyticsIntervalMs = opts.AnalyticsIntervalMs
 	c.clientPort = opts.ClientPort
 	c.advertiseAddr = opts.AdvertiseAddr
+	if opts.HeartbeatInterval > 0 {
+		c.heartbeatInterval = opts.HeartbeatInterval
+	}
+	if opts.ReconnectAttempts > 0 {
+		c.reconnectAttempts = opts.ReconnectAttempts
+	}
+	if opts.ReconnectDelay > 0 {
+		c.reconnectDelay = opts.ReconnectDelay
+	}
 	return c
 }
 
@@ -451,7 +472,7 @@ func (c *Consumer) receiveResults() {
 // sendHeartbeats sends periodic heartbeats to leader via UDP
 func (c *Consumer) sendHeartbeats() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(c.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -470,8 +491,8 @@ func (c *Consumer) sendHeartbeats() {
 // reconnectToCluster re-discovers the cluster leader and re-registers the consumer.
 // Called when the broker connection is lost (leader or broker died).
 func (c *Consumer) reconnectToCluster() error {
-	const maxAttempts = 10
-	const attemptDelay = 5 * time.Second
+	maxAttempts := c.reconnectAttempts
+	attemptDelay := c.reconnectDelay
 
 	// Close existing broker connection
 	c.tcpConnMu.Lock()
@@ -818,32 +839,44 @@ func (c *Consumer) GetBrokerAddress() string {
 	return c.brokerAddr
 }
 
-// Close shuts down the consumer
+// Close shuts down the consumer. Safe to call multiple times.
 func (c *Consumer) Close() {
-	close(c.stopSignal)
-	close(c.stopListener)
-	close(c.stopHeartbeat)
+	c.closeOnce.Do(func() {
+		// Signal all goroutines to stop
+		close(c.stopSignal)
+		close(c.stopListener)
+		close(c.stopHeartbeat)
 
-	// Close TCP listener to unblock Accept()
-	if c.tcpListener != nil {
-		c.tcpListener.Close()
-	}
+		// Close TCP listener to unblock Accept()
+		if c.tcpListener != nil {
+			c.tcpListener.Close()
+		}
 
-	// Close broker connection
-	c.tcpConnMu.Lock()
-	if c.tcpConn != nil {
-		c.tcpConn.Close()
-		c.tcpConn = nil
-	}
-	c.tcpConnMu.Unlock()
+		// Close broker connection to unblock ReadTCPMessage()
+		c.tcpConnMu.Lock()
+		if c.tcpConn != nil {
+			c.tcpConn.Close()
+			c.tcpConn = nil
+		}
+		c.tcpConnMu.Unlock()
 
-	// Close UDP socket
-	if c.udpConn != nil {
-		c.udpConn.Close()
-	}
+		// Close UDP socket to free the port immediately
+		if c.udpConn != nil {
+			c.udpConn.Close()
+		}
 
-	// Wait for goroutines to actually exit (proper synchronization)
-	c.wg.Wait()
+		// Wait for goroutines with timeout to prevent hanging
+		done := make(chan struct{})
+		go func() {
+			c.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			fmt.Printf("[Consumer %s] Shutdown timeout - forcing exit\n", c.id[:8])
+		}
 
-	close(c.results)
+		close(c.results)
+	})
 }
