@@ -310,6 +310,15 @@ func (n *Node) becomeFollower() {
 			n.broadcastListener = nil
 		}
 
+		// Unfreeze operations after losing election.
+		// The new leader's VIEW_INSTALL will bring state up to date;
+		// handleStateExchange() re-freezes temporarily if it arrives before this.
+		// Without this, the node stays permanently frozen if VIEW_INSTALL never arrives.
+		if n.IsFrozen() {
+			fmt.Printf("[Node %s] Unfreezing operations after election loss\n", n.id[:8])
+			n.unfreezeOperations()
+		}
+
 		go n.runFollowerDuties()
 	}
 }
@@ -395,9 +404,12 @@ func (n *Node) GetClusterState() *state.ClusterState {
 
 func (n *Node) syncBrokerRing() {
 	brokerIDs := n.clusterState.ListBrokers()
+	// Rebuild ring from scratch to remove stale entries
+	newRing := loadbalance.NewConsistentHashRing()
 	for _, brokerID := range brokerIDs {
-		n.brokerRing.AddNode(brokerID)
+		newRing.AddNode(brokerID)
 	}
+	n.brokerRing = newRing
 	fmt.Printf("[Node %s] Broker ring synced with %d brokers\n", n.id[:8], len(brokerIDs))
 }
 
@@ -445,7 +457,17 @@ func (n *Node) GetBrokerForTopic(topic string) (brokerID string, brokerAddress s
 		return stream.AssignedBrokerId, stream.BrokerAddress, nil
 	}
 
-	brokerID = n.brokerRing.GetNode(topic)
+	// If this node is the leader and there are followers, delegate data processing
+	// to followers by excluding the leader from selection.
+	// Leader only handles data when it's the sole node in the cluster.
+	if n.IsLeader() && n.brokerRing.NodeCount() > 1 {
+		brokerID = n.brokerRing.GetNodeExcluding(topic, n.id)
+		fmt.Printf("[Node %s] GetBrokerForTopic(%s): Leader delegating to follower (ring has %d nodes)\n",
+			n.id[:8], topic, n.brokerRing.NodeCount())
+	} else {
+		brokerID = n.brokerRing.GetNode(topic)
+	}
+
 	if brokerID == "" {
 		return "", "", fmt.Errorf("no brokers available for topic assignment")
 	}

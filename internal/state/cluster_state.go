@@ -465,8 +465,8 @@ func (cs *ClusterState) Serialize() ([]byte, error) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
-	fmt.Printf("[ClusterState-Serialize] Starting serialization (seq=%d, brokers=%d, producers=%d, consumers=%d)\n",
-		cs.seqNum, len(cs.brokers), len(cs.producers), len(cs.consumers))
+	fmt.Printf("[ClusterState-Serialize] Starting serialization (seq=%d, brokers=%d, producers=%d, consumers=%d, streams=%d)\n",
+		cs.seqNum, len(cs.brokers), len(cs.producers), len(cs.consumers), len(cs.streams))
 
 	// Create protobuf snapshot
 	snapshot := &protocol.ClusterStateSnapshot{
@@ -474,6 +474,7 @@ func (cs *ClusterState) Serialize() ([]byte, error) {
 		Producers: cs.producers,
 		Consumers: cs.consumers,
 		SeqNum:    cs.seqNum,
+		Streams:   cs.streams,
 	}
 
 	// Marshal to protobuf bytes
@@ -501,8 +502,8 @@ func (cs *ClusterState) Deserialize(data []byte) error {
 		return fmt.Errorf("failed to deserialize cluster state: %w", err)
 	}
 
-	fmt.Printf("[ClusterState-Deserialize] Parsed snapshot: seq=%d brokers=%d producers=%d consumers=%d\n",
-		snapshot.SeqNum, len(snapshot.Brokers), len(snapshot.Producers), len(snapshot.Consumers))
+	fmt.Printf("[ClusterState-Deserialize] Parsed snapshot: seq=%d brokers=%d producers=%d consumers=%d streams=%d\n",
+		snapshot.SeqNum, len(snapshot.Brokers), len(snapshot.Producers), len(snapshot.Consumers), len(snapshot.Streams))
 
 	// Copy brokers
 	if snapshot.Brokers == nil {
@@ -531,6 +532,16 @@ func (cs *ClusterState) Deserialize(data []byte) error {
 		cs.consumers = make(map[string]*protocol.ConsumerInfo, len(snapshot.Consumers))
 		for id, consumer := range snapshot.Consumers {
 			cs.consumers[id] = consumer
+		}
+	}
+
+	// Copy stream assignments
+	if snapshot.Streams == nil {
+		cs.streams = make(map[string]*protocol.StreamAssignment)
+	} else {
+		cs.streams = make(map[string]*protocol.StreamAssignment, len(snapshot.Streams))
+		for topic, stream := range snapshot.Streams {
+			cs.streams[topic] = stream
 		}
 	}
 

@@ -142,6 +142,25 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 	fmt.Printf("[Leader %s] <- CONSUME from %s (topic: %s, addr: %s)\n",
 		n.id[:8], consumerID[:8], topic, address)
 
+	// Only the leader handles CONSUME registration
+	if !n.IsLeader() {
+		fmt.Printf("[Node %s] CONSUME from %s REJECTED - not the leader (client will re-discover)\n",
+			n.id[:8], consumerID[:8])
+		ack := &protocol.ConsumeMessage{
+			Header: &protocol.MessageHeader{
+				Type:        protocol.MessageType_CONSUME,
+				Timestamp:   time.Now().UnixNano(),
+				SenderId:    n.id,
+				SequenceNum: 0,
+				SenderType:  protocol.NodeType_BROKER,
+			},
+			Topic:           "",
+			ConsumerAddress: "",
+		}
+		protocol.WriteTCPMessage(conn, &protocol.ConsumeMsg{ConsumeMessage: ack})
+		return
+	}
+
 	// View-synchronous check: send immediate failure during freeze.
 	// Client will retry with backoff (circuit breaker pattern).
 	if n.IsFrozen() {

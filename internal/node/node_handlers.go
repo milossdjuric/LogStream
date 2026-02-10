@@ -310,6 +310,25 @@ func (n *Node) handleProduceRequest(msg *protocol.ProduceMsg, conn net.Conn) {
 	fmt.Printf("[Leader %s] <- PRODUCE from %s (topic: %s, addr: %s)\n",
 		n.id[:8], producerID[:8], topic, address)
 
+	// Only the leader handles PRODUCE registration
+	if !n.IsLeader() {
+		fmt.Printf("[Node %s] PRODUCE from %s REJECTED - not the leader (client will re-discover)\n",
+			n.id[:8], producerID[:8])
+		ack := &protocol.ProduceMessage{
+			Header: &protocol.MessageHeader{
+				Type:        protocol.MessageType_PRODUCE,
+				Timestamp:   time.Now().UnixNano(),
+				SenderId:    n.id,
+				SequenceNum: 0,
+				SenderType:  protocol.NodeType_BROKER,
+			},
+			Topic:           "",
+			ProducerAddress: "",
+		}
+		protocol.WriteTCPMessage(conn, &protocol.ProduceMsg{ProduceMessage: ack})
+		return
+	}
+
 	// View-synchronous check: send immediate failure during freeze.
 	// Client will retry with backoff (circuit breaker pattern).
 	if n.IsFrozen() {

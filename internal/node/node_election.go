@@ -17,16 +17,16 @@ import (
 // Returns a list of reachable node IDs (including self)
 func (n *Node) detectReachableNodesInParallel() []string {
 	brokers := n.clusterState.ListBrokers()
-	
+
 	fmt.Printf("[Node %s] [Failure-Detection] Probing %d nodes in parallel...\n", n.id[:8], len(brokers))
-	
+
 	// Channel to collect reachable node IDs
 	type result struct {
 		id        string
 		reachable bool
 	}
 	results := make(chan result, len(brokers))
-	
+
 	// Probe all nodes in parallel
 	for _, nodeID := range brokers {
 		go func(id string) {
@@ -35,34 +35,34 @@ func (n *Node) detectReachableNodesInParallel() []string {
 				results <- result{id: id, reachable: true}
 				return
 			}
-			
+
 			broker, ok := n.clusterState.GetBroker(id)
 			if !ok {
 				fmt.Printf("[Node %s] [Failure-Detection] Node %s not in registry, skipping\n", n.id[:8], id[:8])
 				results <- result{id: id, reachable: false}
 				return
 			}
-			
+
 			// Quick connectivity test (short timeout)
 			conn, err := net.DialTimeout("tcp", broker.Address, 2*time.Second)
 			if err != nil {
-				fmt.Printf("[Node %s] [Failure-Detection] Node %s at %s: UNREACHABLE (%v)\n", 
+				fmt.Printf("[Node %s] [Failure-Detection] Node %s at %s: UNREACHABLE (%v)\n",
 					n.id[:8], id[:8], broker.Address, err)
 				results <- result{id: id, reachable: false}
 				return
 			}
 			conn.Close()
-			
+
 			fmt.Printf("[Node %s] [Failure-Detection] Node %s at %s: REACHABLE\n",
 				n.id[:8], id[:8], broker.Address)
 			results <- result{id: id, reachable: true}
 		}(nodeID)
 	}
-	
+
 	// Collect results with timeout
 	reachable := []string{}
 	timeout := time.After(3 * time.Second)
-	
+
 	for i := 0; i < len(brokers); i++ {
 		select {
 		case res := <-results:
@@ -74,10 +74,10 @@ func (n *Node) detectReachableNodesInParallel() []string {
 			break
 		}
 	}
-	
-	fmt.Printf("[Node %s] [Failure-Detection] Reachable nodes: %d/%d\n", 
+
+	fmt.Printf("[Node %s] [Failure-Detection] Reachable nodes: %d/%d\n",
 		n.id[:8], len(reachable), len(brokers))
-	
+
 	return reachable
 }
 
@@ -87,13 +87,13 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string) error {
 	if len(reachableIDs) == 0 {
 		return fmt.Errorf("no reachable nodes to form ring")
 	}
-	
+
 	// Sort to create consistent ring order across all nodes
 	sort.Strings(reachableIDs)
-	
-	fmt.Printf("[Node %s] [Ring-Computation] Creating ring from %d reachable nodes\n", 
+
+	fmt.Printf("[Node %s] [Ring-Computation] Creating ring from %d reachable nodes\n",
 		n.id[:8], len(reachableIDs))
-	
+
 	// Find our position in the ring
 	myPos := -1
 	for i, id := range reachableIDs {
@@ -102,30 +102,30 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string) error {
 			break
 		}
 	}
-	
+
 	if myPos == -1 {
 		return fmt.Errorf("node %s not in reachable set", n.id[:8])
 	}
-	
+
 	// Compute next node in ring (with wraparound)
 	nextPos := (myPos + 1) % len(reachableIDs)
 	nextID := reachableIDs[nextPos]
-	
+
 	// Get next node's address
 	broker, ok := n.clusterState.GetBroker(nextID)
 	if !ok {
 		return fmt.Errorf("next node %s not found in registry", nextID[:8])
 	}
-	
+
 	n.nextNode = broker.Address
 	n.ringPosition = myPos
-	
+
 	fmt.Printf("[Node %s] [Ring-Computation] Ring topology:\n", n.id[:8])
 	fmt.Printf("[Node %s] [Ring-Computation]   Total nodes: %d\n", n.id[:8], len(reachableIDs))
 	fmt.Printf("[Node %s] [Ring-Computation]   My position: %d/%d\n", n.id[:8], myPos+1, len(reachableIDs))
-	fmt.Printf("[Node %s] [Ring-Computation]   Next node: %s at %s\n", 
+	fmt.Printf("[Node %s] [Ring-Computation]   Next node: %s at %s\n",
 		n.id[:8], nextID[:8], n.nextNode)
-	
+
 	// Log full ring for debugging
 	fmt.Printf("[Node %s] [Ring-Computation]   Ring order: ", n.id[:8])
 	for i, id := range reachableIDs {
@@ -136,7 +136,7 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string) error {
 		}
 	}
 	fmt.Printf("(wrap)\n")
-	
+
 	return nil
 }
 
@@ -295,6 +295,7 @@ func (n *Node) StartElection() error {
 		n.election.StartElection(n.id, electionID)
 		n.election.DeclareVictory(n.id)
 		n.becomeLeaderAfterElection(electionID)
+		n.unfreezeOperations()
 		return nil
 	}
 
@@ -303,14 +304,14 @@ func (n *Node) StartElection() error {
 	// This ensures all nodes that detect the same set of reachable nodes will compute the same ring
 	fmt.Printf("\n[Node %s] Phase 1: Detecting reachable nodes (parallel probing)...\n", n.id[:8])
 	reachableNodes := n.detectReachableNodesInParallel()
-	
+
 	if len(reachableNodes) == 0 {
 		fmt.Printf("[Node %s] ERROR: No reachable nodes found (not even self!)\n", n.id[:8])
 		n.election.Reset()
 		n.unfreezeOperations()
 		return fmt.Errorf("no reachable nodes found")
 	}
-	
+
 	if len(reachableNodes) == 1 {
 		// Only this node is reachable - declare victory immediately
 		fmt.Printf("[Node %s] Only 1 reachable node (me) - declaring victory immediately\n", n.id[:8])
