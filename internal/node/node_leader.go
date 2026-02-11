@@ -23,10 +23,12 @@ func (n *Node) runLeaderDuties() {
 	clientHeartbeatTicker := time.NewTicker(time.Duration(n.config.ClientHeartbeatInterval) * time.Second)
 	timeoutTicker := time.NewTicker(5 * time.Second) // Check more frequently for faster cleanup
 	rebalanceTicker := time.NewTicker(10 * time.Second)
+	periodicReplicationTicker := time.NewTicker(30 * time.Second)
 	defer heartbeatTicker.Stop()
 	defer clientHeartbeatTicker.Stop()
 	defer timeoutTicker.Stop()
 	defer rebalanceTicker.Stop()
+	defer periodicReplicationTicker.Stop()
 
 	for {
 		select {
@@ -90,6 +92,13 @@ func (n *Node) runLeaderDuties() {
 				for _, consumerID := range deadConsumers {
 					n.cleanupConsumer(consumerID)
 				}
+				n.replicateAllState()
+			}
+
+		case <-periodicReplicationTicker.C:
+			// Safety net: replicate state periodically so followers that missed
+			// an event-driven replication (transient network blip) can catch up
+			if n.clusterState.GetBrokerCount() > 1 {
 				n.replicateAllState()
 			}
 
