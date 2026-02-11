@@ -310,16 +310,15 @@ func (n *Node) becomeFollower() {
 			n.broadcastListener = nil
 		}
 
-		// Unfreeze operations after losing election.
-		// The new leader's VIEW_INSTALL will bring state up to date;
-		// handleStateExchange() re-freezes temporarily if it arrives before this.
-		// Without this, the node stays permanently frozen if VIEW_INSTALL never arrives.
-		if n.IsFrozen() {
-			fmt.Printf("[Node %s] Unfreezing operations after election loss\n", n.id[:8])
-			n.unfreezeOperations()
-		}
-
 		go n.runFollowerDuties()
+	}
+
+	// Unfreeze regardless of previous role. A follower that starts an election
+	// also freezes, and needs to unfreeze when it loses. Without this, a follower
+	// that loses stays frozen until VIEW_INSTALL arrives (which can take minutes).
+	if n.IsFrozen() {
+		fmt.Printf("[Node %s] Unfreezing operations after election loss\n", n.id[:8])
+		n.unfreezeOperations()
 	}
 }
 

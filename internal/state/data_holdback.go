@@ -131,3 +131,13 @@ func (q *DataHoldbackQueue) Reset(producerID string, newExpected int64) {
 		ph.buffer = make(map[int64]*DataHoldbackMessage)
 	}
 }
+
+// ResetAll clears all producer tracking state.
+// Called on view changes so stale sequence expectations don't cause holdback gaps.
+// The next DATA from any producer will auto-initialize from its current sequence.
+func (q *DataHoldbackQueue) ResetAll() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.producers = make(map[string]*ProducerHoldback)
+}

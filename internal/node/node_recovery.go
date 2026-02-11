@@ -556,10 +556,10 @@ func (n *Node) handleViewInstall(msg *protocol.ViewInstallMsg, conn net.Conn) {
 				} else {
 					fmt.Printf("[Node %s] Successfully installed view %d\n", n.id[:8], viewNumber)
 
-					// Reset holdback queue to agreed sequence + 1
-					// This ensures we start fresh in the new view
+					// Reset holdback queues to start fresh in the new view
 					n.holdbackQueue.Reset(agreedSeq + 1)
-					fmt.Printf("[Node %s] Reset holdback queue to seq %d for new view\n", n.id[:8], agreedSeq+1)
+					n.dataHoldbackQueue.ResetAll()
+					fmt.Printf("[Node %s] Reset holdback queues for new view (registry seq=%d, data=cleared)\n", n.id[:8], agreedSeq+1)
 
 					// Update leader information
 					n.leaderAddress = ""
