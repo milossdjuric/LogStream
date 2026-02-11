@@ -375,6 +375,28 @@ func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[
 		n.lastAppliedSeqNum = agreedSeq
 	}
 
+	// After election, mark all other brokers as followers.
+	// They may have been registered as leader=true from split-brain detection,
+	// but now the election is resolved — only this node is the leader.
+	// Without this, replicateStateToFollowers() skips brokers with IsLeader=true,
+	// preventing stream assignments from reaching followers.
+	for _, memberID := range memberIDs {
+		if memberID == n.id {
+			continue
+		}
+		broker, ok := n.clusterState.GetBroker(memberID)
+		if ok && broker.IsLeader {
+			fmt.Printf("[Leader %s] Clearing stale IsLeader flag for %s (now follower)\n", n.id[:8], memberID[:8])
+			n.clusterState.RegisterBroker(memberID, broker.Address, false)
+		}
+	}
+
+	// Re-serialize state after fixing IsLeader flags
+	stateSnapshot, err = n.clusterState.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to re-serialize state after IsLeader fix: %w", err)
+	}
+
 	// Install view locally first
 	err = n.viewState.InstallView(newViewNumber, n.id, memberIDs, memberAddresses, agreedSeq)
 	if err != nil {
