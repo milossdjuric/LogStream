@@ -278,13 +278,19 @@ func (n *Node) becomeLeaderInternal(fromElection bool, electionID int64) {
 			}()
 		}
 	} else if fromElection {
-		// Existing leader won a re-election (e.g., split-brain scenario where
-		// another node sent an ELECTION ANNOUNCE to us, we froze, then won).
-		// We're already the leader, so no state exchange or view install needed -
-		// just unfreeze operations that were frozen during the election.
-		fmt.Printf("[Leader %s] Re-elected as leader (was already leader), unfreezing operations\n", n.id[:8])
-		if n.IsFrozen() {
-			n.unfreezeOperations()
+		// Re-elected leader: per view-synchronous theory, EVERY election must
+		// produce a new view with an incremented view number, even if the same
+		// leader wins. Followers are frozen and waiting for VIEW_INSTALL.
+		// Without state exchange + new view, we'd stay at the old view number
+		// and followers would treat our VIEW_INSTALLs as state updates, not
+		// view changes — preventing proper split-brain resolution.
+		fmt.Printf("[Leader %s] Re-elected as leader, running state exchange for new view\n", n.id[:8])
+		if err := n.initiateStateExchange(electionID); err != nil {
+			log.Printf("[Leader %s] State exchange failed after re-election: %v\n", n.id[:8], err)
+			if n.IsFrozen() {
+				log.Printf("[Leader %s] Safety unfreeze after re-election state exchange failure\n", n.id[:8])
+				n.unfreezeOperations()
+			}
 		}
 	}
 }
@@ -313,13 +319,11 @@ func (n *Node) becomeFollower() {
 		go n.runFollowerDuties()
 	}
 
-	// Unfreeze regardless of previous role. A follower that starts an election
-	// also freezes, and needs to unfreeze when it loses. Without this, a follower
-	// that loses stays frozen until VIEW_INSTALL arrives (which can take minutes).
-	if n.IsFrozen() {
-		fmt.Printf("[Node %s] Unfreezing operations after election loss\n", n.id[:8])
-		n.unfreezeOperations()
-	}
+	// Per view-synchronous theory, do NOT unfreeze here. A node that loses
+	// an election should stay frozen until it receives VIEW_INSTALL from the
+	// new leader (via handleStateExchange → handleViewInstall). This ensures
+	// no operations are processed between the old and new views.
+	// Follower duties (heartbeats, failure detection) work while frozen.
 }
 
 // PrintStatus displays current node status

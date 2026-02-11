@@ -603,6 +603,47 @@ func (n *Node) handleViewInstall(msg *protocol.ViewInstallMsg, conn net.Conn) {
 		}
 	}
 
+	// Split-brain resolution: step down if we're a leader and received
+	// VIEW_INSTALL from a different node with a higher view number (isViewChange).
+	// Per view-synchronous theory, a higher view number means a more recent
+	// election completed — the sender is the legitimate leader.
+	//
+	// The IsFrozen() check is a safety net for edge cases where view numbers
+	// happen to be equal but our election didn't complete (stuck/frozen leader).
+	//
+	// Mutual step-down is impossible because:
+	// 1. isViewChange: only the lower-view leader steps down (asymmetric)
+	// 2. IsFrozen: only the stuck leader steps down (healthy leader is not frozen)
+	// 3. broker.IsLeader filter in replicateStateToFollowers prevents routine
+	//    VIEW_INSTALLs from reaching competing leaders
+	if success && senderID != n.id && n.IsLeader() && (isViewChange || n.IsFrozen()) {
+		fmt.Printf("[Node %s] Leader received VIEW_INSTALL from %s (isViewChange=%v, frozen=%v) - stepping down (split-brain resolution)\n",
+			n.id[:8], senderID[:8], isViewChange, n.IsFrozen())
+		// Update leader address before stepping down so follower duties
+		// send heartbeats to the correct leader
+		for i, id := range msg.MemberIds {
+			if id == senderID && i < len(msg.MemberAddresses) {
+				n.leaderAddress = msg.MemberAddresses[i]
+				break
+			}
+		}
+		// Reset heartbeat timer so we don't immediately suspect the new leader
+		n.lastLeaderHeartbeatMu.Lock()
+		n.lastLeaderHeartbeat = time.Now()
+		n.lastLeaderHeartbeatMu.Unlock()
+		n.becomeFollower()
+
+		// For the IsFrozen()-only case (no view change), unfreeze explicitly.
+		// The normal unfreeze at line 647 only fires for isViewChange.
+		// This handles the edge case where a frozen leader steps down due to
+		// receiving a state update (same view) from the real leader — the node
+		// was stuck in an election and needs to resume as follower.
+		if !isViewChange && n.IsFrozen() {
+			fmt.Printf("[Node %s] Unfreezing after frozen step-down (no view change)\n", n.id[:8])
+			n.unfreezeOperations()
+		}
+	}
+
 	// Send acknowledgment
 	ack := protocol.NewViewInstallAckMsg(n.id, viewNumber, success, errorMsg)
 	if err := protocol.WriteTCPMessage(conn, ack); err != nil {

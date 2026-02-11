@@ -667,4 +667,17 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	}
 
 	n.becomeFollower()
+
+	// Safety net: if VIEW_INSTALL doesn't arrive within 30s, unfreeze.
+	// Normal flow: STATE_EXCHANGE + VIEW_INSTALL completes in <5s.
+	// This handles edge cases where the new leader crashes or TCP fails
+	// after we accepted it. The follower duties will detect the failure
+	// and start a new election, but we shouldn't stay frozen while waiting.
+	go func() {
+		time.Sleep(30 * time.Second)
+		if n.IsFrozen() && !n.IsLeader() {
+			log.Printf("[Node %s] Safety unfreeze: no VIEW_INSTALL received 30s after election loss\n", n.id[:8])
+			n.unfreezeOperations()
+		}
+	}()
 }

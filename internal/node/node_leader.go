@@ -156,10 +156,17 @@ func (n *Node) replicateStateToFollowers() error {
 			continue // Skip self
 		}
 		broker, ok := n.clusterState.GetBroker(brokerID)
-		if ok {
-			followerIDs = append(followerIDs, brokerID)
-			followerAddresses = append(followerAddresses, broker.Address)
+		if !ok {
+			continue
 		}
+		// Skip brokers registered as leaders (split-brain nodes).
+		// Only replicate to actual followers to avoid sending VIEW_INSTALL
+		// to other leaders, which could cause mutual step-down.
+		if broker.IsLeader {
+			continue
+		}
+		followerIDs = append(followerIDs, brokerID)
+		followerAddresses = append(followerAddresses, broker.Address)
 	}
 
 	if len(followerIDs) == 0 {
