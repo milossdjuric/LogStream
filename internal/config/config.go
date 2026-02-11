@@ -45,7 +45,7 @@ func LoadConfig() (*Config, error) {
 		BrokerHeartbeatInterval:  getEnvInt("BROKER_HB_INTERVAL", 5),
 		ClientHeartbeatInterval:  getEnvInt("CLIENT_HB_INTERVAL", 10),
 		BrokerTimeout:            getEnvInt("BROKER_TIMEOUT", 30),
-		ClientTimeout:            getEnvInt("CLIENT_TIMEOUT", 30),
+		ClientTimeout:            getEnvInt("CLIENT_TIMEOUT", 20),
 		FollowerHeartbeatInterval: getEnvInt("FOLLOWER_HB_INTERVAL", 2),
 		SuspicionTimeout:         getEnvInt("SUSPICION_TIMEOUT", 10),
 		FailureTimeout:           getEnvInt("FAILURE_TIMEOUT", 15),
