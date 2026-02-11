@@ -106,14 +106,16 @@ func (n *Node) initiateStateExchange(electionID int64) error {
 	fmt.Printf("[Leader %s] Using UNION-based log merge\n", n.id[:8])
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
-	// Get list of followers from registry
-	brokers := n.clusterState.ListBrokers()
+	// Determine followers for state exchange from the registry.
+	// During parallel startup, ring participants may not be in the registry yet.
+	// That's acceptable: the node will rejoin via broadcast discovery and converge.
 	var followers []string
 	var followerAddresses []string
 
+	brokers := n.clusterState.ListBrokers()
 	for _, brokerID := range brokers {
 		if brokerID == n.id {
-			continue // Skip self
+			continue
 		}
 		broker, ok := n.clusterState.GetBroker(brokerID)
 		if ok {

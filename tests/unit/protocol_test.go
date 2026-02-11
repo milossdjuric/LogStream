@@ -153,9 +153,9 @@ func TestProtocol_HeartbeatMessage(t *testing.T) {
 }
 
 func TestProtocol_ElectionMessage(t *testing.T) {
-	// NewElectionMsg(senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string)
 	ringParticipants := []string{"node-1", "node-2", "node-3"}
-	msg := protocol.NewElectionMsg("sender-111", "candidate-111", 12345, protocol.ElectionMessage_ANNOUNCE, ringParticipants)
+	ringAddrs := map[string]string{"node-1": "192.168.1.1:8001", "node-2": "192.168.1.2:8001", "node-3": "192.168.1.3:8001"}
+	msg := protocol.NewElectionMsg("sender-111", "candidate-111", 12345, protocol.ElectionMessage_ANNOUNCE, ringParticipants, ringAddrs)
 
 	// Verify header
 	header := msg.GetHeader()
@@ -179,8 +179,16 @@ func TestProtocol_ElectionMessage(t *testing.T) {
 		t.Errorf("Expected 3 ring participants, got %d", len(msg.RingParticipants))
 	}
 
+	// Verify ring addresses
+	if len(msg.RingParticipantAddrs) != 3 {
+		t.Errorf("Expected 3 ring addresses, got %d", len(msg.RingParticipantAddrs))
+	}
+	if msg.RingParticipantAddrs["node-1"] != "192.168.1.1:8001" {
+		t.Errorf("Expected node-1 address '192.168.1.1:8001', got '%s'", msg.RingParticipantAddrs["node-1"])
+	}
+
 	// Test VICTORY phase
-	msg2 := protocol.NewElectionMsg("sender-222", "winner-222", 12345, protocol.ElectionMessage_VICTORY, ringParticipants)
+	msg2 := protocol.NewElectionMsg("sender-222", "winner-222", 12345, protocol.ElectionMessage_VICTORY, ringParticipants, ringAddrs)
 	if msg2.Phase != protocol.ElectionMessage_VICTORY {
 		t.Errorf("Expected VICTORY phase, got %v", msg2.Phase)
 	}

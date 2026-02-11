@@ -119,6 +119,9 @@ message ElectionMessage {
   // Ring participants for consistent ring computation during election
   // All nodes use the same filtered list to ensure ring consistency
   repeated string ring_participants = 5;
+  // Address mapping for ring participants (ID -> address)
+  // Allows receiving nodes to register unknown participants before computing ring
+  map<string, string> ring_participant_addrs = 6;
 }
 
 // UDP multicast from Leader to Brokers, FIFO ordering

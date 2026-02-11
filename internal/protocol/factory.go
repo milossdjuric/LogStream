@@ -125,14 +125,16 @@ func NewJoinResponseMsg(leaderID, leaderAddr, multicastGroup string, brokers []s
 
 // TCP unicast from Broker to next Broker in logical ring
 // ringParticipants ensures all nodes use the same filtered ring for consistency
-func NewElectionMsg(senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string) *ElectionMsg {
+// ringAddrs maps participant IDs to their addresses so receiving nodes can register unknown participants
+func NewElectionMsg(senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string, ringAddrs map[string]string) *ElectionMsg {
 	return &ElectionMsg{
 		ElectionMessage: &ElectionMessage{
-			Header:           newHeader(MessageType_ELECTION, senderID, NodeType_BROKER, 0),
-			CandidateId:      candidateID,
-			ElectionId:       electionID,
-			Phase:            phase,
-			RingParticipants: ringParticipants,
+			Header:               newHeader(MessageType_ELECTION, senderID, NodeType_BROKER, 0),
+			CandidateId:          candidateID,
+			ElectionId:           electionID,
+			Phase:                phase,
+			RingParticipants:     ringParticipants,
+			RingParticipantAddrs: ringAddrs,
 		},
 	}
 }

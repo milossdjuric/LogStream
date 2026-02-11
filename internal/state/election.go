@@ -192,3 +192,4 @@ func (es *ElectionState) GetRingParticipants() []string {
 	copy(result, es.ringParticipants)
 	return result
 }
+

@@ -839,8 +839,11 @@ type ElectionMessage struct {
 	// Ring participants for consistent ring computation during election
 	// All nodes use the same filtered list to ensure ring consistency
 	RingParticipants []string `protobuf:"bytes,5,rep,name=ring_participants,json=ringParticipants,proto3" json:"ring_participants,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Address mapping for ring participants (ID -> address)
+	// Allows receiving nodes to register unknown participants before computing ring
+	RingParticipantAddrs map[string]string `protobuf:"bytes,6,rep,name=ring_participant_addrs,json=ringParticipantAddrs,proto3" json:"ring_participant_addrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ElectionMessage) Reset() {
@@ -904,6 +907,13 @@ func (x *ElectionMessage) GetPhase() ElectionMessage_Phase {
 func (x *ElectionMessage) GetRingParticipants() []string {
 	if x != nil {
 		return x.RingParticipants
+	}
+	return nil
+}
+
+func (x *ElectionMessage) GetRingParticipantAddrs() map[string]string {
+	if x != nil {
+		return x.RingParticipantAddrs
 	}
 	return nil
 }
@@ -2208,14 +2218,18 @@ const file_messages_proto_rawDesc = "" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12%\n" +
 	"\x0eleader_address\x18\x03 \x01(\tR\rleaderAddress\x12'\n" +
 	"\x0fmulticast_group\x18\x04 \x01(\tR\x0emulticastGroup\x12)\n" +
-	"\x10broker_addresses\x18\x05 \x03(\tR\x0fbrokerAddresses\"\x8e\x02\n" +
+	"\x10broker_addresses\x18\x05 \x03(\tR\x0fbrokerAddresses\"\xc2\x03\n" +
 	"\x0fElectionMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12\x1f\n" +
 	"\velection_id\x18\x03 \x01(\x03R\n" +
 	"electionId\x125\n" +
 	"\x05phase\x18\x04 \x01(\x0e2\x1f.protocol.ElectionMessage.PhaseR\x05phase\x12+\n" +
-	"\x11ring_participants\x18\x05 \x03(\tR\x10ringParticipants\"\"\n" +
+	"\x11ring_participants\x18\x05 \x03(\tR\x10ringParticipants\x12i\n" +
+	"\x16ring_participant_addrs\x18\x06 \x03(\v23.protocol.ElectionMessage.RingParticipantAddrsEntryR\x14ringParticipantAddrs\x1aG\n" +
+	"\x19RingParticipantAddrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +
 	"\x05Phase\x12\f\n" +
 	"\bANNOUNCE\x10\x00\x12\v\n" +
 	"\aVICTORY\x10\x01\"\xc9\x01\n" +
@@ -2396,7 +2410,7 @@ func file_messages_proto_rawDescGZIP() []byte {
 }
 
 var file_messages_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_messages_proto_goTypes = []any{
 	(MessageType)(0),                     // 0: protocol.MessageType
 	(NodeType)(0),                        // 1: protocol.NodeType
@@ -2428,13 +2442,14 @@ var file_messages_proto_goTypes = []any{
 	(*ViewInstallAckMessage)(nil),        // 27: protocol.ViewInstallAckMessage
 	(*ViewInfo)(nil),                     // 28: protocol.ViewInfo
 	(*ReassignBrokerMessage)(nil),        // 29: protocol.ReassignBrokerMessage
-	nil,                                  // 30: protocol.RegistrySnapshot.BrokersEntry
-	nil,                                  // 31: protocol.ClusterStateSnapshot.BrokersEntry
-	nil,                                  // 32: protocol.ClusterStateSnapshot.ProducersEntry
-	nil,                                  // 33: protocol.ClusterStateSnapshot.ConsumersEntry
-	nil,                                  // 34: protocol.ClusterStateSnapshot.StreamsEntry
-	nil,                                  // 35: protocol.StateExchangeResponseMessage.LogOffsetsEntry
-	nil,                                  // 36: protocol.ViewInstallMessage.AgreedLogOffsetsEntry
+	nil,                                  // 30: protocol.ElectionMessage.RingParticipantAddrsEntry
+	nil,                                  // 31: protocol.RegistrySnapshot.BrokersEntry
+	nil,                                  // 32: protocol.ClusterStateSnapshot.BrokersEntry
+	nil,                                  // 33: protocol.ClusterStateSnapshot.ProducersEntry
+	nil,                                  // 34: protocol.ClusterStateSnapshot.ConsumersEntry
+	nil,                                  // 35: protocol.ClusterStateSnapshot.StreamsEntry
+	nil,                                  // 36: protocol.StateExchangeResponseMessage.LogOffsetsEntry
+	nil,                                  // 37: protocol.ViewInstallMessage.AgreedLogOffsetsEntry
 }
 var file_messages_proto_depIdxs = []int32{
 	0,  // 0: protocol.MessageHeader.type:type_name -> protocol.MessageType
@@ -2449,35 +2464,36 @@ var file_messages_proto_depIdxs = []int32{
 	3,  // 9: protocol.JoinResponseMessage.header:type_name -> protocol.MessageHeader
 	3,  // 10: protocol.ElectionMessage.header:type_name -> protocol.MessageHeader
 	2,  // 11: protocol.ElectionMessage.phase:type_name -> protocol.ElectionMessage.Phase
-	3,  // 12: protocol.ReplicateMessage.header:type_name -> protocol.MessageHeader
-	3,  // 13: protocol.ReplicateAckMessage.header:type_name -> protocol.MessageHeader
-	3,  // 14: protocol.NackMessage.header:type_name -> protocol.MessageHeader
-	30, // 15: protocol.RegistrySnapshot.brokers:type_name -> protocol.RegistrySnapshot.BrokersEntry
-	31, // 16: protocol.ClusterStateSnapshot.brokers:type_name -> protocol.ClusterStateSnapshot.BrokersEntry
-	32, // 17: protocol.ClusterStateSnapshot.producers:type_name -> protocol.ClusterStateSnapshot.ProducersEntry
-	33, // 18: protocol.ClusterStateSnapshot.consumers:type_name -> protocol.ClusterStateSnapshot.ConsumersEntry
-	34, // 19: protocol.ClusterStateSnapshot.streams:type_name -> protocol.ClusterStateSnapshot.StreamsEntry
-	22, // 20: protocol.TopicLogEntries.entries:type_name -> protocol.LogEntry
-	3,  // 21: protocol.StateExchangeMessage.header:type_name -> protocol.MessageHeader
-	3,  // 22: protocol.StateExchangeResponseMessage.header:type_name -> protocol.MessageHeader
-	35, // 23: protocol.StateExchangeResponseMessage.log_offsets:type_name -> protocol.StateExchangeResponseMessage.LogOffsetsEntry
-	23, // 24: protocol.StateExchangeResponseMessage.topic_logs:type_name -> protocol.TopicLogEntries
-	3,  // 25: protocol.ViewInstallMessage.header:type_name -> protocol.MessageHeader
-	36, // 26: protocol.ViewInstallMessage.agreed_log_offsets:type_name -> protocol.ViewInstallMessage.AgreedLogOffsetsEntry
-	23, // 27: protocol.ViewInstallMessage.merged_logs:type_name -> protocol.TopicLogEntries
-	3,  // 28: protocol.ViewInstallAckMessage.header:type_name -> protocol.MessageHeader
-	3,  // 29: protocol.ReassignBrokerMessage.header:type_name -> protocol.MessageHeader
-	1,  // 30: protocol.ReassignBrokerMessage.client_type:type_name -> protocol.NodeType
-	16, // 31: protocol.RegistrySnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
-	16, // 32: protocol.ClusterStateSnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
-	17, // 33: protocol.ClusterStateSnapshot.ProducersEntry.value:type_name -> protocol.ProducerInfo
-	18, // 34: protocol.ClusterStateSnapshot.ConsumersEntry.value:type_name -> protocol.ConsumerInfo
-	19, // 35: protocol.ClusterStateSnapshot.StreamsEntry.value:type_name -> protocol.StreamAssignment
-	36, // [36:36] is the sub-list for method output_type
-	36, // [36:36] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	30, // 12: protocol.ElectionMessage.ring_participant_addrs:type_name -> protocol.ElectionMessage.RingParticipantAddrsEntry
+	3,  // 13: protocol.ReplicateMessage.header:type_name -> protocol.MessageHeader
+	3,  // 14: protocol.ReplicateAckMessage.header:type_name -> protocol.MessageHeader
+	3,  // 15: protocol.NackMessage.header:type_name -> protocol.MessageHeader
+	31, // 16: protocol.RegistrySnapshot.brokers:type_name -> protocol.RegistrySnapshot.BrokersEntry
+	32, // 17: protocol.ClusterStateSnapshot.brokers:type_name -> protocol.ClusterStateSnapshot.BrokersEntry
+	33, // 18: protocol.ClusterStateSnapshot.producers:type_name -> protocol.ClusterStateSnapshot.ProducersEntry
+	34, // 19: protocol.ClusterStateSnapshot.consumers:type_name -> protocol.ClusterStateSnapshot.ConsumersEntry
+	35, // 20: protocol.ClusterStateSnapshot.streams:type_name -> protocol.ClusterStateSnapshot.StreamsEntry
+	22, // 21: protocol.TopicLogEntries.entries:type_name -> protocol.LogEntry
+	3,  // 22: protocol.StateExchangeMessage.header:type_name -> protocol.MessageHeader
+	3,  // 23: protocol.StateExchangeResponseMessage.header:type_name -> protocol.MessageHeader
+	36, // 24: protocol.StateExchangeResponseMessage.log_offsets:type_name -> protocol.StateExchangeResponseMessage.LogOffsetsEntry
+	23, // 25: protocol.StateExchangeResponseMessage.topic_logs:type_name -> protocol.TopicLogEntries
+	3,  // 26: protocol.ViewInstallMessage.header:type_name -> protocol.MessageHeader
+	37, // 27: protocol.ViewInstallMessage.agreed_log_offsets:type_name -> protocol.ViewInstallMessage.AgreedLogOffsetsEntry
+	23, // 28: protocol.ViewInstallMessage.merged_logs:type_name -> protocol.TopicLogEntries
+	3,  // 29: protocol.ViewInstallAckMessage.header:type_name -> protocol.MessageHeader
+	3,  // 30: protocol.ReassignBrokerMessage.header:type_name -> protocol.MessageHeader
+	1,  // 31: protocol.ReassignBrokerMessage.client_type:type_name -> protocol.NodeType
+	16, // 32: protocol.RegistrySnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
+	16, // 33: protocol.ClusterStateSnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
+	17, // 34: protocol.ClusterStateSnapshot.ProducersEntry.value:type_name -> protocol.ProducerInfo
+	18, // 35: protocol.ClusterStateSnapshot.ConsumersEntry.value:type_name -> protocol.ConsumerInfo
+	19, // 36: protocol.ClusterStateSnapshot.StreamsEntry.value:type_name -> protocol.StreamAssignment
+	37, // [37:37] is the sub-list for method output_type
+	37, // [37:37] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_messages_proto_init() }
@@ -2491,7 +2507,7 @@ func file_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_messages_proto_rawDesc), len(file_messages_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   34,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -337,8 +337,9 @@ func SendReplicationMulticast(sender *MulticastConnection, leaderID string, stat
 
 // SendElectionMulticast sends an election message to the multicast group
 // ringParticipants ensures all nodes use the same filtered ring for consistency
-func SendElectionMulticast(sender *MulticastConnection, senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string, multicastAddr string) error {
-	msg := NewElectionMsg(senderID, candidateID, electionID, phase, ringParticipants)
+// ringAddrs maps participant IDs to their addresses
+func SendElectionMulticast(sender *MulticastConnection, senderID, candidateID string, electionID int64, phase ElectionMessage_Phase, ringParticipants []string, ringAddrs map[string]string, multicastAddr string) error {
+	msg := NewElectionMsg(senderID, candidateID, electionID, phase, ringParticipants, ringAddrs)
 	return sender.SendMessage(msg, multicastAddr)
 }
 
