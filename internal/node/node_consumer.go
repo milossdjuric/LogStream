@@ -171,10 +171,11 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 		return
 	}
 
-	// One-to-one check: verify topic doesn't already have a consumer
-	if n.clusterState.HasConsumerForTopic(topic) {
-		log.Printf("[Leader %s] CONSUME from %s REJECTED - topic %s already has a consumer (one-to-one mapping)\n",
-			n.id[:8], consumerID[:8], topic)
+	// One-to-one check: verify topic doesn't already have a DIFFERENT consumer.
+	// Allow re-registration from the same consumer ID (reconnect after heartbeat drift).
+	if stream, exists := n.clusterState.GetStreamAssignment(topic); exists && stream.ConsumerId != "" && stream.ConsumerId != consumerID {
+		log.Printf("[Leader %s] CONSUME from %s REJECTED - topic %s already has consumer %s (one-to-one mapping)\n",
+			n.id[:8], consumerID[:8], topic, stream.ConsumerId[:8])
 		// Send failure response
 		ack := &protocol.ConsumeMessage{
 			Header: &protocol.MessageHeader{
@@ -231,23 +232,29 @@ func (n *Node) handleConsumeRequest(msg *protocol.ConsumeMsg, conn net.Conn) {
 		return
 	}
 
-	// Assign consumer to the stream (one-to-one mapping)
-	if err := n.clusterState.AssignConsumerToStream(consumerID, topic); err != nil {
-		log.Printf("[Leader %s] Failed to assign consumer to stream: %v\n", n.id[:8], err)
-		// Send failure response
-		ack := &protocol.ConsumeMessage{
-			Header: &protocol.MessageHeader{
-				Type:        protocol.MessageType_CONSUME,
-				Timestamp:   time.Now().UnixNano(),
-				SenderId:    n.id,
-				SequenceNum: 0,
-				SenderType:  protocol.NodeType_LEADER,
-			},
-			Topic:           "",
-			ConsumerAddress: "",
+	// Assign consumer to the stream (one-to-one mapping).
+	// Skip if this consumer is already assigned (re-registration).
+	if stream.ConsumerId == consumerID {
+		fmt.Printf("[Leader %s] Consumer %s re-registering for topic %s (reusing stream)\n",
+			n.id[:8], consumerID[:8], topic)
+	} else {
+		if err := n.clusterState.AssignConsumerToStream(consumerID, topic); err != nil {
+			log.Printf("[Leader %s] Failed to assign consumer to stream: %v\n", n.id[:8], err)
+			// Send failure response
+			ack := &protocol.ConsumeMessage{
+				Header: &protocol.MessageHeader{
+					Type:        protocol.MessageType_CONSUME,
+					Timestamp:   time.Now().UnixNano(),
+					SenderId:    n.id,
+					SequenceNum: 0,
+					SenderType:  protocol.NodeType_LEADER,
+				},
+				Topic:           "",
+				ConsumerAddress: "",
+			}
+			protocol.WriteTCPMessage(conn, &protocol.ConsumeMsg{ConsumeMessage: ack})
+			return
 		}
-		protocol.WriteTCPMessage(conn, &protocol.ConsumeMsg{ConsumeMessage: ack})
-		return
 	}
 
 	// Subscribe consumer to topic (legacy - for backwards compatibility)

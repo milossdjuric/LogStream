@@ -349,10 +349,11 @@ func (n *Node) handleProduceRequest(msg *protocol.ProduceMsg, conn net.Conn) {
 		return
 	}
 
-	// One-to-one check: verify topic doesn't already have a producer
-	if n.clusterState.HasProducerForTopic(topic) {
-		log.Printf("[Leader %s] PRODUCE from %s REJECTED - topic %s already has a producer (one-to-one mapping)\n",
-			n.id[:8], producerID[:8], topic)
+	// One-to-one check: verify topic doesn't already have a DIFFERENT producer.
+	// Allow re-registration from the same producer ID (reconnect after heartbeat drift).
+	if stream, exists := n.clusterState.GetStreamAssignment(topic); exists && stream.ProducerId != "" && stream.ProducerId != producerID {
+		log.Printf("[Leader %s] PRODUCE from %s REJECTED - topic %s already has producer %s (one-to-one mapping)\n",
+			n.id[:8], producerID[:8], topic, stream.ProducerId[:8])
 		// Send failure response
 		ack := &protocol.ProduceMessage{
 			Header: &protocol.MessageHeader{
@@ -388,33 +389,44 @@ func (n *Node) handleProduceRequest(msg *protocol.ProduceMsg, conn net.Conn) {
 		return
 	}
 
-	// Select broker using consistent hashing
-	brokerID, brokerAddress, err := n.GetBrokerForTopic(topic)
-	if err != nil {
-		log.Printf("[Leader %s] Failed to assign broker for topic %s: %v\n", n.id[:8], topic, err)
-		// Fall back to self (leader) if no brokers available
-		brokerID = n.id
-		brokerAddress = n.address
-		fmt.Printf("[Leader %s] Falling back to self as broker for topic %s\n", n.id[:8], topic)
-	}
-
-	// Create stream assignment (tracks one-to-one producer-broker mapping)
-	if err := n.clusterState.AssignStream(topic, producerID, brokerID, brokerAddress); err != nil {
-		log.Printf("[Leader %s] Failed to create stream assignment: %v\n", n.id[:8], err)
-		// Send failure response
-		ack := &protocol.ProduceMessage{
-			Header: &protocol.MessageHeader{
-				Type:        protocol.MessageType_PRODUCE,
-				Timestamp:   time.Now().UnixNano(),
-				SenderId:    n.id,
-				SequenceNum: 0,
-				SenderType:  protocol.NodeType_LEADER,
-			},
-			Topic:           topic,
-			ProducerAddress: "",
+	// Check if this is a re-registration (same producer reconnecting for same topic)
+	var brokerID, brokerAddress string
+	if existingStream, exists := n.clusterState.GetStreamAssignment(topic); exists && existingStream.ProducerId == producerID {
+		// Re-registration: reuse existing stream assignment
+		brokerID = existingStream.AssignedBrokerId
+		brokerAddress = existingStream.BrokerAddress
+		fmt.Printf("[Leader %s] Producer %s re-registering for topic %s (reusing broker %s)\n",
+			n.id[:8], producerID[:8], topic, brokerID[:8])
+	} else {
+		// New registration: select broker using consistent hashing
+		var err error
+		brokerID, brokerAddress, err = n.GetBrokerForTopic(topic)
+		if err != nil {
+			log.Printf("[Leader %s] Failed to assign broker for topic %s: %v\n", n.id[:8], topic, err)
+			// Fall back to self (leader) if no brokers available
+			brokerID = n.id
+			brokerAddress = n.address
+			fmt.Printf("[Leader %s] Falling back to self as broker for topic %s\n", n.id[:8], topic)
 		}
-		protocol.WriteTCPMessage(conn, &protocol.ProduceMsg{ProduceMessage: ack})
-		return
+
+		// Create stream assignment (tracks one-to-one producer-broker mapping)
+		if err := n.clusterState.AssignStream(topic, producerID, brokerID, brokerAddress); err != nil {
+			log.Printf("[Leader %s] Failed to create stream assignment: %v\n", n.id[:8], err)
+			// Send failure response
+			ack := &protocol.ProduceMessage{
+				Header: &protocol.MessageHeader{
+					Type:        protocol.MessageType_PRODUCE,
+					Timestamp:   time.Now().UnixNano(),
+					SenderId:    n.id,
+					SequenceNum: 0,
+					SenderType:  protocol.NodeType_LEADER,
+				},
+				Topic:           topic,
+				ProducerAddress: "",
+			}
+			protocol.WriteTCPMessage(conn, &protocol.ProduceMsg{ProduceMessage: ack})
+			return
+		}
 	}
 
 	// Replicate state change immediately

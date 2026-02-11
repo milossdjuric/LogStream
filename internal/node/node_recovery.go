@@ -583,17 +583,20 @@ func (n *Node) handleViewInstall(msg *protocol.ViewInstallMsg, conn net.Conn) {
 					}
 				}
 			} else if isStateUpdate {
-				// State update within same view - just update leader address if needed
+				// State update within same view - always update leader address from sender.
+				// The sender of VIEW_INSTALL is always the current leader, and the address
+				// may have changed after an election (e.g. new leader not in old registry).
 				fmt.Printf("[Node %s] Applied state update (seq=%d) within view %d\n",
 					n.id[:8], agreedSeq, viewNumber)
 
-				// Update leader address if not set
-				if n.leaderAddress == "" {
-					for i, id := range msg.MemberIds {
-						if id == senderID && i < len(msg.MemberAddresses) {
-							n.leaderAddress = msg.MemberAddresses[i]
-							break
+				for i, id := range msg.MemberIds {
+					if id == senderID && i < len(msg.MemberAddresses) {
+						if n.leaderAddress != msg.MemberAddresses[i] {
+							fmt.Printf("[Node %s] Updated leader address: %s -> %s\n",
+								n.id[:8], n.leaderAddress, msg.MemberAddresses[i])
 						}
+						n.leaderAddress = msg.MemberAddresses[i]
+						break
 					}
 				}
 			}

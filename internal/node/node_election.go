@@ -645,10 +645,18 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	// Phi accrual detector will automatically track new leader when heartbeats arrive
 	fmt.Printf("[Node %s] Phi accrual detector ready to track new leader: %s\n", n.id[:8], leaderID[:8])
 
-	// Update stored leader address from registry
+	// Update stored leader address from registry.
+	// Clear stale address first so VIEW_INSTALL will set the correct one
+	// even if the new leader isn't in our registry yet.
 	if broker, ok := n.clusterState.GetBroker(leaderID); ok {
 		n.leaderAddress = broker.Address
 		fmt.Printf("[Node %s] Updated stored leader address to: %s\n", n.id[:8], n.leaderAddress)
+	} else {
+		// New leader not in our registry yet - clear stale address.
+		// The upcoming VIEW_INSTALL from the new leader will set the correct address.
+		fmt.Printf("[Node %s] New leader %s not in registry, clearing stale leader address (%s)\n",
+			n.id[:8], leaderID[:8], n.leaderAddress)
+		n.leaderAddress = ""
 	}
 
 	// Forward VICTORY with ring participants
