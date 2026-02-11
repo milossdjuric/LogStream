@@ -34,7 +34,7 @@ func DefaultBroadcastConfig() *BroadcastConfig {
 	return &BroadcastConfig{
 		Port:                8888,
 		Timeout:             5 * time.Second,
-		MaxRetries:          5,                      // Increased from 3 for circuit breaker
+		MaxRetries:          7,                      // Generous retries for client discovery
 		RetryDelay:          1 * time.Second,        // Initial delay
 		MaxRetryDelay:       10 * time.Second,       // Cap exponential backoff at 10s
 		BackoffMultiplier:   1.5,                    // Exponential backoff multiplier

@@ -432,7 +432,7 @@ func (n *Node) discoverCluster() error {
 	fmt.Printf("[Node %s] Discovering cluster via broadcast...\n", n.id[:8])
 
 	config := protocol.DefaultBroadcastConfig()
-	config.MaxRetries = 3                    // Enough retries to survive view change delays
+	config.MaxRetries = 2                    // Brokers discover quickly or become leader
 	config.Timeout = 2 * time.Second         // Per-attempt timeout
 	config.RetryDelay = 1 * time.Second      // Delay between retries
 

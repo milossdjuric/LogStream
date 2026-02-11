@@ -63,8 +63,8 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 		stopHeartbeat:     make(chan struct{}),
 		enableProcessing:  true, // Enable data processing by default
 		heartbeatInterval: 2 * time.Second,
-		reconnectAttempts: 10,
-		reconnectDelay:    5 * time.Second,
+		reconnectAttempts: 15,
+		reconnectDelay:    3 * time.Second,
 	}
 }
 

@@ -67,8 +67,8 @@ func NewProducer(topic, leaderAddr string) *Producer {
 		seqNum:            1, // Start at 1 (0 means unset)
 		heartbeatInterval: 2 * time.Second,
 		leaderTimeout:     10 * time.Second,
-		reconnectAttempts: 10,
-		reconnectDelay:    5 * time.Second,
+		reconnectAttempts: 15,
+		reconnectDelay:    3 * time.Second,
 	}
 }
 
