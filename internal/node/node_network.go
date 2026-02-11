@@ -432,9 +432,9 @@ func (n *Node) discoverCluster() error {
 	fmt.Printf("[Node %s] Discovering cluster via broadcast...\n", n.id[:8])
 
 	config := protocol.DefaultBroadcastConfig()
-	config.MaxRetries = 2                      // Reduced from 3 to 2 for faster startup
-	config.Timeout = 2 * time.Second           // Reduced from 3s to 2s per attempt
-	config.RetryDelay = 500 * time.Millisecond // Reduced from 1s to 500ms
+	config.MaxRetries = 5                    // Enough retries to survive view change delays
+	config.Timeout = 3 * time.Second         // Per-attempt timeout
+	config.RetryDelay = 2 * time.Second      // Delay between retries
 
 	response, err := protocol.DiscoverClusterWithRetry(
 		n.id,

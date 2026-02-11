@@ -453,15 +453,14 @@ func (n *Node) listenForBroadcastJoins() {
 
 			fmt.Printf("[Leader %s] TCP connectivity verified to %s at %s\n", n.id[:8], senderID[:8], joinMsg.Address)
 
-			// Register new node in state.Registry
+			// View-synchronous: Perform view change BEFORE responding.
+			// The membership change must be committed (VIEW_INSTALL sent to all members
+			// and majority ACK received) before the joining node is told about the cluster.
+			// The joining node's discovery timeout must be long enough to survive this.
 			newNodeID := senderID
-
-			// View-synchronous: Perform view change on node join
-			// This ensures membership changes are delivered atomically with view change
-			// Uses the same installNewView path as post-election recovery
 			n.performViewChangeForNodeJoin(newNodeID, joinMsg.Address)
 
-			// Send response using protocol.BroadcastConnection
+			// Send response after view change is committed
 			responseAddr := fmt.Sprintf("%s", sender)
 			err := n.broadcastListener.SendJoinResponse(
 				n.id,

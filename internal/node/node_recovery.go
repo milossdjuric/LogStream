@@ -712,6 +712,24 @@ func (n *Node) performViewChangeForNodeJoin(newNodeID, newNodeAddr string) {
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
 	n.freezeOperations()
+
+	// Clean up any stale broker registered at the same address as the new node.
+	// This happens when a node restarts at the same address with a new ID -
+	// the old ID is still in the registry as a ghost entry. Without this cleanup:
+	// 1. The membership is inflated (harder to get majority ACK)
+	// 2. If an election fires, the ghost appears "reachable" (probe connects to new node)
+	//    but messages to it never reach the right handler → broken ring → infinite loop
+	for _, existingID := range n.clusterState.ListBrokers() {
+		if existingID == newNodeID || existingID == n.id {
+			continue
+		}
+		if broker, ok := n.clusterState.GetBroker(existingID); ok && broker.Address == newNodeAddr {
+			fmt.Printf("[Leader %s] Removing stale broker %s at %s (replaced by %s)\n",
+				n.id[:8], existingID[:8], newNodeAddr, newNodeID[:8])
+			n.clusterState.RemoveBroker(existingID)
+		}
+	}
+
 	n.clusterState.RegisterBroker(newNodeID, newNodeAddr, false)
 	n.syncBrokerRing()
 
