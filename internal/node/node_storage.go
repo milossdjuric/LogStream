@@ -204,14 +204,11 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 		}
 	}
 
-	// Check subscriber count for logging
+	// Log if no consumers are subscribed to this topic
 	subscribers := n.clusterState.GetConsumerSubscribers(topic)
 	if len(subscribers) == 0 {
 		fmt.Printf("[%s] No consumers subscribed to topic: %s (data stored for future consumers)\n",
 			n.id[:8], topic)
-	} else {
-		fmt.Printf("[%s] %d consumer(s) subscribed to topic %s (will receive via stream)\n",
-			n.id[:8], len(subscribers), topic)
 	}
 
 	return nil

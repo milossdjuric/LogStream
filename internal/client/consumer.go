@@ -40,9 +40,13 @@ type Consumer struct {
 	reconnectDelay    time.Duration
 
 	// UDP heartbeat state (consumer sends heartbeats to leader to stay alive)
-	udpConn       *net.UDPConn
-	leaderAddrUDP *net.UDPAddr
-	stopHeartbeat chan struct{}
+	udpConn               *net.UDPConn
+	udpConnMu             sync.RWMutex
+	leaderAddrUDP         *net.UDPAddr
+	lastLeaderHeartbeat   time.Time
+	lastLeaderHeartbeatMu sync.RWMutex
+	leaderTimeout         time.Duration
+	stopHeartbeat         chan struct{}
 }
 
 // NewConsumer creates a new consumer
@@ -63,6 +67,7 @@ func NewConsumer(topic, leaderAddr string) *Consumer {
 		stopHeartbeat:     make(chan struct{}),
 		enableProcessing:  true, // Enable data processing by default
 		heartbeatInterval: 2 * time.Second,
+		leaderTimeout:     30 * time.Second,
 		reconnectAttempts: 15,
 		reconnectDelay:    3 * time.Second,
 	}
@@ -201,9 +206,14 @@ func (c *Consumer) Connect() error {
 	}
 	c.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", c.leaderAddr)
 
+	c.lastLeaderHeartbeatMu.Lock()
+	c.lastLeaderHeartbeat = time.Now()
+	c.lastLeaderHeartbeatMu.Unlock()
+
 	// Start UDP heartbeat goroutine (consumer → leader, keeps consumer alive on leader side)
-	c.wg.Add(1)
+	c.wg.Add(2)
 	go c.sendHeartbeats()
+	go c.receiveUDPMessages()
 
 	// Start TCP listener for incoming messages (like REASSIGN_BROKER) from leader
 	// Always bind to 0.0.0.0:port (not the advertised IP which may not be local, e.g. WSL)
@@ -470,6 +480,7 @@ func (c *Consumer) receiveResults() {
 }
 
 // sendHeartbeats sends periodic heartbeats to leader via UDP
+// Also checks if leader heartbeats have stopped (leader changed after election)
 func (c *Consumer) sendHeartbeats() {
 	defer c.wg.Done()
 	ticker := time.NewTicker(c.heartbeatInterval)
@@ -479,11 +490,64 @@ func (c *Consumer) sendHeartbeats() {
 		select {
 		case <-ticker.C:
 			heartbeat := protocol.NewHeartbeatMsg(c.id, protocol.NodeType_CONSUMER, 0, 0, "")
-			if c.udpConn != nil && c.leaderAddrUDP != nil {
-				protocol.WriteUDPMessage(c.udpConn, heartbeat, c.leaderAddrUDP)
+			c.udpConnMu.RLock()
+			conn := c.udpConn
+			c.udpConnMu.RUnlock()
+			if conn != nil && c.leaderAddrUDP != nil {
+				protocol.WriteUDPMessage(conn, heartbeat, c.leaderAddrUDP)
 			}
+
+			// Check if leader is still alive (no heartbeat received for leaderTimeout)
+			c.lastLeaderHeartbeatMu.RLock()
+			lastHB := c.lastLeaderHeartbeat
+			c.lastLeaderHeartbeatMu.RUnlock()
+			if !lastHB.IsZero() && time.Since(lastHB) > c.leaderTimeout {
+				fmt.Printf("[Consumer %s] Leader appears down (no heartbeat for %v, timeout: %v), attempting re-discovery...\n",
+					c.id[:8], time.Since(lastHB).Round(time.Second), c.leaderTimeout)
+				if err := c.reconnectToCluster(); err != nil {
+					log.Printf("[Consumer %s] Cluster re-discovery failed: %v", c.id[:8], err)
+				} else {
+					fmt.Printf("[Consumer %s] Successfully reconnected to cluster\n", c.id[:8])
+				}
+			}
+
 		case <-c.stopHeartbeat:
 			return
+		}
+	}
+}
+
+// receiveUDPMessages receives incoming UDP messages (heartbeats from leader)
+func (c *Consumer) receiveUDPMessages() {
+	defer c.wg.Done()
+	for {
+		select {
+		case <-c.stopHeartbeat:
+			return
+		default:
+		}
+
+		c.udpConnMu.RLock()
+		conn := c.udpConn
+		c.udpConnMu.RUnlock()
+		if conn == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		msg, _, err := protocol.ReadUDPMessage(conn)
+		if err != nil {
+			continue // timeout or error, retry
+		}
+
+		if hb, ok := msg.(*protocol.HeartbeatMsg); ok {
+			senderType := protocol.GetSenderType(hb)
+			if senderType == protocol.NodeType_LEADER {
+				c.lastLeaderHeartbeatMu.Lock()
+				c.lastLeaderHeartbeat = time.Now()
+				c.lastLeaderHeartbeatMu.Unlock()
+			}
 		}
 	}
 }
@@ -505,10 +569,12 @@ func (c *Consumer) reconnectToCluster() error {
 	// Close existing UDP socket before discovery to free the port
 	// DiscoverLeader needs to bind broadcast sockets to clientPort,
 	// which conflicts with the existing udpConn on the same port
+	c.udpConnMu.Lock()
 	if c.udpConn != nil {
 		c.udpConn.Close()
 		c.udpConn = nil
 	}
+	c.udpConnMu.Unlock()
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		fmt.Printf("[Consumer %s] Reconnection attempt %d/%d...\n", c.id[:8], attempt, maxAttempts)
@@ -646,12 +712,19 @@ func (c *Consumer) reconnectToCluster() error {
 			log.Printf("[Consumer %s] Warning: Failed to re-create UDP socket: %v", c.id[:8], err)
 			// Continue anyway - consumer can still receive data via TCP from broker
 		} else {
+			c.udpConnMu.Lock()
 			c.udpConn = newUDPConn
+			c.udpConnMu.Unlock()
 		}
 
 		// Update leader address and UDP heartbeat target
 		c.leaderAddr = leaderAddr
 		c.leaderAddrUDP, _ = net.ResolveUDPAddr("udp", leaderAddr)
+
+		// Reset leader heartbeat timer
+		c.lastLeaderHeartbeatMu.Lock()
+		c.lastLeaderHeartbeat = time.Now()
+		c.lastLeaderHeartbeatMu.Unlock()
 
 		fmt.Printf("[Consumer %s] <- SUBSCRIBE_ACK (reconnected to broker for topic: %s)\n", c.id[:8], subAck.Topic)
 		fmt.Printf("[Consumer %s] Reconnected: leader=%s, broker=%s\n", c.id[:8], leaderAddr, newBrokerAddr)
@@ -853,9 +926,11 @@ func (c *Consumer) Close() {
 		}
 		c.tcpConnMu.Unlock()
 
+		c.udpConnMu.Lock()
 		if c.udpConn != nil {
 			c.udpConn.Close()
 		}
+		c.udpConnMu.Unlock()
 
 		done := make(chan struct{})
 		go func() {
