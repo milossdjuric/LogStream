@@ -152,14 +152,14 @@ func (n *Node) Start() error {
 	// Discover existing cluster via UDP broadcast.
 	// The leader's view change (performViewChangeForNodeJoin) can take up to 10s
 	// waiting for VIEW_INSTALL ACKs, so discovery must be patient enough to survive that.
-	// Total discovery budget: first attempt (~15s) + 3 extended retries (~15s each) ≈ 60s
+	// Total discovery budget: first attempt (~9s) + 2 extended retries (~10s each) ≈ 29s
 	err := n.discoverCluster()
 	if err != nil {
 		clusterFound := false
-		maxExtendedRetries := 3
+		maxExtendedRetries := 2
 		for i := 0; i < maxExtendedRetries && !clusterFound; i++ {
 			jitterMs := int(n.id[0]) * 2 % 500
-			baseDelayMs := 2000
+			baseDelayMs := 1000
 			totalDelay := time.Duration(baseDelayMs+jitterMs) * time.Millisecond
 
 			fmt.Printf("[Node %s] Extended discovery attempt %d/%d (delay: %v)\n",
