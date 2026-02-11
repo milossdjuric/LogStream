@@ -265,6 +265,12 @@ func (n *Node) becomeLeaderInternal(fromElection bool, electionID int64) {
 			n.unfreezeOperations()
 		}
 
+		// After election: clean up stale stream assignments pointing to brokers
+		// no longer in the registry (e.g., dead broker replaced by new process at same address)
+		if fromElection {
+			n.cleanupStaleStreamAssignments()
+		}
+
 		// Start broadcast listener for JOIN messages (only leader needs this)
 		n.startBroadcastListener()
 
@@ -295,6 +301,7 @@ func (n *Node) becomeLeaderInternal(fromElection bool, electionID int64) {
 				n.unfreezeOperations()
 			}
 		}
+		n.cleanupStaleStreamAssignments()
 	}
 }
 

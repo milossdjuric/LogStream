@@ -130,6 +130,65 @@ func (n *Node) sendHeartbeat() error {
 	return err
 }
 
+// cleanupStaleStreamAssignments reassigns streams pointing to brokers no longer in the registry.
+// Called after election recovery when the new leader inherits merged state that may contain
+// stream assignments to dead brokers (e.g., old process at same address with different ID).
+func (n *Node) cleanupStaleStreamAssignments() {
+	if !n.IsLeader() {
+		return
+	}
+
+	allStreams := n.clusterState.ListAllStreams()
+	if len(allStreams) == 0 {
+		return
+	}
+
+	registeredBrokers := make(map[string]bool)
+	for _, id := range n.clusterState.ListBrokers() {
+		registeredBrokers[id] = true
+	}
+
+	reassigned := 0
+	for topic, stream := range allStreams {
+		if registeredBrokers[stream.AssignedBrokerId] {
+			continue // Broker is alive
+		}
+
+		// Broker not in registry — reassign via hash ring
+		var newBrokerID string
+		if n.brokerRing.NodeCount() > 1 {
+			newBrokerID = n.brokerRing.GetNodeExcluding(topic, n.id)
+		} else {
+			newBrokerID = n.brokerRing.GetNode(topic)
+		}
+		if newBrokerID == "" {
+			newBrokerID = n.id
+		}
+
+		newBrokerAddr := n.address
+		if newBrokerID != n.id {
+			if broker, ok := n.clusterState.GetBroker(newBrokerID); ok {
+				newBrokerAddr = broker.Address
+			}
+		}
+
+		fmt.Printf("[Leader %s] [Stale-Stream-Cleanup] Reassigning topic %s: dead broker %s -> %s @ %s\n",
+			n.id[:8], topic, stream.AssignedBrokerId[:8], newBrokerID[:8], newBrokerAddr)
+
+		if err := n.clusterState.ReassignStreamBroker(topic, newBrokerID, newBrokerAddr); err != nil {
+			log.Printf("[Leader %s] [Stale-Stream-Cleanup] Failed to reassign topic %s: %v\n",
+				n.id[:8], topic, err)
+		} else {
+			reassigned++
+		}
+	}
+
+	if reassigned > 0 {
+		fmt.Printf("[Leader %s] [Stale-Stream-Cleanup] Reassigned %d stale stream(s)\n", n.id[:8], reassigned)
+		n.replicateAllState()
+	}
+}
+
 // replicateStateToFollowers sends the current cluster state to all followers via TCP VIEW_INSTALL.
 func (n *Node) replicateStateToFollowers() error {
 	if !n.IsLeader() {
@@ -462,12 +521,25 @@ func (n *Node) listenForBroadcastJoins() {
 
 			fmt.Printf("[Leader %s] TCP connectivity verified to %s at %s\n", n.id[:8], senderID[:8], joinMsg.Address)
 
-			// View-synchronous: Perform view change BEFORE responding.
-			// The membership change must be committed (VIEW_INSTALL sent to all members
-			// and majority ACK received) before the joining node is told about the cluster.
-			// The joining node's discovery timeout must be long enough to survive this.
-			newNodeID := senderID
-			n.performViewChangeForNodeJoin(newNodeID, joinMsg.Address)
+			// Deduplicate: if this broker is already registered at the same address,
+			// skip the view change and just resend JOIN_RESPONSE. This prevents
+			// repeated view changes when the joining node's discovery retries
+			// arrive before it receives the first response.
+			alreadyRegistered := false
+			if broker, ok := n.clusterState.GetBroker(senderID); ok && broker.Address == joinMsg.Address {
+				fmt.Printf("[Leader %s] Broker %s already registered at %s, skipping view change (resending response)\n",
+					n.id[:8], senderID[:8], joinMsg.Address)
+				alreadyRegistered = true
+			}
+
+			if !alreadyRegistered {
+				// View-synchronous: Perform view change BEFORE responding.
+				// The membership change must be committed (VIEW_INSTALL sent to all members
+				// and majority ACK received) before the joining node is told about the cluster.
+				// The joining node's discovery timeout must be long enough to survive this.
+				newNodeID := senderID
+				n.performViewChangeForNodeJoin(newNodeID, joinMsg.Address)
+			}
 
 			// Send response after view change is committed
 			responseAddr := fmt.Sprintf("%s", sender)

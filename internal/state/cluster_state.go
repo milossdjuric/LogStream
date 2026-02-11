@@ -653,6 +653,18 @@ func (cs *ClusterState) AssignConsumerToStream(consumerID, topic string) error {
 	return nil
 }
 
+// ListAllStreams returns all stream assignments as a topic -> stream map
+func (cs *ClusterState) ListAllStreams() map[string]*protocol.StreamAssignment {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	result := make(map[string]*protocol.StreamAssignment, len(cs.streams))
+	for topic, stream := range cs.streams {
+		result[topic] = stream
+	}
+	return result
+}
+
 // GetStreamsByBroker returns all stream assignments for a specific broker
 func (cs *ClusterState) GetStreamsByBroker(brokerID string) []*protocol.StreamAssignment {
 	cs.mu.RLock()
