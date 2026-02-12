@@ -90,7 +90,6 @@ func (a *LogAggregator) GetRate(duration time.Duration) float64 {
 	return float64(count) / duration.Seconds()
 }
 
-// TopicAnalytics holds computed analytics for a topic
 type TopicAnalytics struct {
 	Topic          string
 	TotalCount     int64
@@ -99,7 +98,6 @@ type TopicAnalytics struct {
 	WindowRate     float64       // Messages per second within the configured window
 }
 
-// ComputeTopicAnalytics computes analytics for a given topic log using the configured window duration
 func ComputeTopicAnalytics(topic string, log LogReader, windowDuration time.Duration) *TopicAnalytics {
 	agg := NewLogAggregator(log)
 	now := time.Now()
@@ -115,24 +113,20 @@ func ComputeTopicAnalytics(topic string, log LogReader, windowDuration time.Dura
 	}
 }
 
-// MultiLogAggregator aggregates across multiple logs (topics)
 type MultiLogAggregator struct {
 	logs map[string]LogReader
 }
 
-// NewMultiLogAggregator creates an aggregator for multiple topic logs
 func NewMultiLogAggregator() *MultiLogAggregator {
 	return &MultiLogAggregator{
 		logs: make(map[string]LogReader),
 	}
 }
 
-// AddLog adds a topic log to the aggregator
 func (m *MultiLogAggregator) AddLog(topic string, log LogReader) {
 	m.logs[topic] = log
 }
 
-// CountByPatternAcrossTopics counts records matching pattern across all or specific topic
 func (m *MultiLogAggregator) CountByPatternAcrossTopics(pattern string, topic string) int64 {
 	if topic != "" {
 		if log, exists := m.logs[topic]; exists {
@@ -148,7 +142,6 @@ func (m *MultiLogAggregator) CountByPatternAcrossTopics(pattern string, topic st
 	return total
 }
 
-// CountInWindowAcrossTopics counts records in time window across all or specific topic
 func (m *MultiLogAggregator) CountInWindowAcrossTopics(start, end time.Time, topic string) int64 {
 	if topic != "" {
 		if log, exists := m.logs[topic]; exists {
@@ -164,7 +157,6 @@ func (m *MultiLogAggregator) CountInWindowAcrossTopics(start, end time.Time, top
 	return total
 }
 
-// GetAllTopicsStats returns analytics for all registered topics using the configured window duration
 func (m *MultiLogAggregator) GetAllTopicsStats(windowDuration time.Duration) map[string]*TopicAnalytics {
 	stats := make(map[string]*TopicAnalytics)
 	for topic, log := range m.logs {

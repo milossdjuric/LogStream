@@ -12,15 +12,12 @@ import (
 	"github.com/milossdjuric/logstream/internal/storage"
 )
 
-// IsFrozen returns whether the node is frozen for recovery
 func (n *Node) IsFrozen() bool {
 	return n.viewState.IsFrozen()
 }
 
-// waitForUnfreeze blocks until operations are unfrozen or timeout expires.
-// Returns true if unfrozen, false if timed out.
-// Used by PRODUCE/CONSUME handlers to keep the TCP connection open during freeze
-// instead of queuing (which would cause the defer to close the conn).
+// Keeps the TCP connection open during freeze instead of queuing
+// (queuing would cause the defer to close the conn).
 func (n *Node) waitForUnfreeze(timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for n.IsFrozen() {
@@ -32,22 +29,17 @@ func (n *Node) waitForUnfreeze(timeout time.Duration) bool {
 	return true
 }
 
-// freezeOperations freezes all operations during view change
 func (n *Node) freezeOperations() {
 	fmt.Printf("[Node %s] Freezing operations for view change...\n", n.id[:8])
 	n.viewState.Freeze()
 }
 
-// unfreezeOperations unfreezes operations after view installation
 func (n *Node) unfreezeOperations() {
 	fmt.Printf("[Node %s] Unfreezing operations after view installation...\n", n.id[:8])
 	n.viewState.Unfreeze()
-
-	// Process any queued messages
 	n.processQueuedMessages()
 }
 
-// queueFrozenMessage adds a message to the frozen queue for later processing
 func (n *Node) queueFrozenMessage(msgType string, msg protocol.Message, conn net.Conn) {
 	n.frozenQueueMu.Lock()
 	defer n.frozenQueueMu.Unlock()
@@ -61,10 +53,8 @@ func (n *Node) queueFrozenMessage(msgType string, msg protocol.Message, conn net
 		n.id[:8], msgType, len(n.frozenQueue))
 }
 
-// processQueuedMessages processes all messages that were queued during freeze.
-// Only DATA messages are queued now - PRODUCE/CONSUME handlers wait for unfreeze
-// instead of queuing, to avoid the conn-close bug (defer would close the conn
-// while the frozen queue still held a reference to it).
+// Only DATA messages are queued - PRODUCE/CONSUME wait for unfreeze instead,
+// to avoid the conn-close bug (defer closes conn while frozen queue still references it).
 func (n *Node) processQueuedMessages() {
 	n.frozenQueueMu.Lock()
 	queue := n.frozenQueue
@@ -92,9 +82,6 @@ func (n *Node) processQueuedMessages() {
 	fmt.Printf("[Node %s] Finished dispatching %d queued messages\n", n.id[:8], len(queue))
 }
 
-// initiateStateExchange is called by the new leader after winning election
-// It collects last applied sequence numbers and full log entries from all followers
-// Uses view-synchronous log merge (UNION) to preserve all acknowledged data
 func (n *Node) initiateStateExchange(electionID int64) error {
 	if !n.IsLeader() {
 		return fmt.Errorf("only leader can initiate state exchange")
@@ -106,9 +93,6 @@ func (n *Node) initiateStateExchange(electionID int64) error {
 	fmt.Printf("[Leader %s] Using UNION-based log merge\n", n.id[:8])
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
-	// Determine followers for state exchange from the registry.
-	// During parallel startup, ring participants may not be in the registry yet.
-	// That's acceptable: the node will rejoin via broadcast discovery and converge.
 	var followers []string
 	var followerAddresses []string
 
@@ -124,30 +108,23 @@ func (n *Node) initiateStateExchange(electionID int64) error {
 		}
 	}
 
-	// View-synchronous: Collect our own full log entries for merge
 	myLogEntries := n.collectLogEntries()
 	myLogOffsets := n.collectLogOffsets() // Keep for backward compatibility
 	fmt.Printf("[Leader %s] Own log entries: %d topics\n", n.id[:8], len(myLogEntries))
 
 	if len(followers) == 0 {
 		fmt.Printf("[Leader %s] No followers to exchange state with, skipping state exchange\n", n.id[:8])
-		// No merge needed - just use our own logs
 		return n.installNewView(electionID, n.lastAppliedSeqNum, myLogOffsets, myLogEntries)
 	}
 
 	fmt.Printf("[Leader %s] Requesting state from %d followers\n", n.id[:8], len(followers))
 
-	// Prepare new view
 	proposedView := n.viewState.GetViewNumber() + 1
+	n.recoveryManager.StartRecovery(electionID, proposedView, len(followers)+1)
 
-	// Start recovery manager
-	n.recoveryManager.StartRecovery(electionID, proposedView, len(followers)+1) // +1 for leader
-
-	// Add our own state to the responses
 	snapshot, _ := n.clusterState.Serialize()
 	n.recoveryManager.AddResponse(n.id, n.lastAppliedSeqNum, snapshot, true)
 
-	// Track all responses for view-synchronous log merge
 	allResponses := []stateExchangeResponse{
 		{
 			brokerID:       n.id,
@@ -159,7 +136,6 @@ func (n *Node) initiateStateExchange(electionID int64) error {
 		},
 	}
 
-	// Send STATE_EXCHANGE requests to all followers in parallel
 	var wg sync.WaitGroup
 	responseChan := make(chan *stateExchangeResponse, len(followers))
 
@@ -174,13 +150,11 @@ func (n *Node) initiateStateExchange(electionID int64) error {
 		}(followerID, followerAddresses[i])
 	}
 
-	// Wait for responses with timeout
 	go func() {
 		wg.Wait()
 		close(responseChan)
 	}()
 
-	// Collect responses with timeout
 	timeout := time.After(10 * time.Second)
 
 collectResponses:
@@ -193,7 +167,6 @@ collectResponses:
 			n.recoveryManager.AddResponse(resp.brokerID, resp.lastAppliedSeq, resp.stateSnapshot, resp.hasState)
 			allResponses = append(allResponses, *resp)
 
-			// Check if we have majority
 			if n.recoveryManager.HasMajority() {
 				fmt.Printf("[Leader %s] Received majority (%d responses), proceeding with view installation\n",
 					n.id[:8], n.recoveryManager.GetResponseCount())
@@ -207,23 +180,17 @@ collectResponses:
 		}
 	}
 
-	// Determine majority-agreed sequence
 	agreedSeq := n.recoveryManager.GetAgreedSequence()
 	fmt.Printf("[Leader %s] Majority agreed on sequence: %d\n", n.id[:8], agreedSeq)
 
-	// View-synchronous: Merge logs using UNION (any entry in ANY log is preserved)
-	// UNION ensures no acknowledged data is lost during view change
 	mergedLogs := mergeAllTopicLogs(allResponses)
 	fmt.Printf("[Leader %s] Merged logs from %d responses: %d topics\n", n.id[:8], len(allResponses), len(mergedLogs))
 
-	// Apply merged logs to our own storage (we may have been missing some entries)
 	n.applyMergedLogs(mergedLogs)
 
-	// Compute log offsets from merged logs for backward compatibility
 	agreedLogOffsets := computeOffsetsFromMergedLogs(mergedLogs)
 	fmt.Printf("[Leader %s] Agreed log offsets (from merge): %v\n", n.id[:8], agreedLogOffsets)
 
-	// Install the new view with merged logs
 	return n.installNewView(electionID, agreedSeq, agreedLogOffsets, mergedLogs)
 }
 
@@ -236,11 +203,9 @@ type stateExchangeResponse struct {
 	topicLogs      []*protocol.TopicLogEntries  // View-synchronous: full log entries for merge
 }
 
-// sendStateExchangeRequest sends a state exchange request to a follower
 func (n *Node) sendStateExchangeRequest(followerID, followerAddr string, electionID, viewNumber int64) *stateExchangeResponse {
 	fmt.Printf("[Leader %s] Sending STATE_EXCHANGE to %s at %s\n", n.id[:8], followerID[:8], followerAddr)
 
-	// Connect to follower
 	conn, err := net.DialTimeout("tcp", followerAddr, 5*time.Second)
 	if err != nil {
 		fmt.Printf("[Leader %s] Failed to connect to %s: %v\n", n.id[:8], followerID[:8], err)
@@ -248,24 +213,20 @@ func (n *Node) sendStateExchangeRequest(followerID, followerAddr string, electio
 	}
 	defer conn.Close()
 
-	// Set read/write deadlines
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	// Send STATE_EXCHANGE message
 	msg := protocol.NewStateExchangeMsg(n.id, electionID, viewNumber)
 	if err := protocol.WriteTCPMessage(conn, msg); err != nil {
 		fmt.Printf("[Leader %s] Failed to send STATE_EXCHANGE to %s: %v\n", n.id[:8], followerID[:8], err)
 		return nil
 	}
 
-	// Wait for response
 	respMsg, err := protocol.ReadTCPMessage(conn)
 	if err != nil {
 		fmt.Printf("[Leader %s] Failed to read STATE_EXCHANGE_RESPONSE from %s: %v\n", n.id[:8], followerID[:8], err)
 		return nil
 	}
 
-	// Verify response type
 	stateResp, ok := respMsg.(*protocol.StateExchangeResponseMsg)
 	if !ok {
 		fmt.Printf("[Leader %s] Unexpected response type from %s: %T\n", n.id[:8], followerID[:8], respMsg)
@@ -282,7 +243,6 @@ func (n *Node) sendStateExchangeRequest(followerID, followerAddr string, electio
 	}
 }
 
-// handleStateExchange handles STATE_EXCHANGE requests from the new leader
 func (n *Node) handleStateExchange(msg *protocol.StateExchangeMsg, conn net.Conn) {
 	senderID := protocol.GetSenderID(msg)
 	electionID := msg.ElectionId
@@ -291,28 +251,20 @@ func (n *Node) handleStateExchange(msg *protocol.StateExchangeMsg, conn net.Conn
 	fmt.Printf("[Node %s] <- STATE_EXCHANGE from %s (election: %d, view: %d)\n",
 		n.id[:8], senderID[:8], electionID, viewNumber)
 
-	// Freeze our operations
 	n.freezeOperations()
 
-	// Prepare response with our last applied sequence
 	var snapshot []byte
 	hasState := false
 
-	// Serialize our current state
 	if s, err := n.clusterState.Serialize(); err == nil {
 		snapshot = s
 		hasState = true
 	}
 
-	// Collect log offsets for backward compatibility
 	logOffsets := n.collectLogOffsets()
-
-	// View-synchronous: Collect full log entries for proper merge
-	// This ensures no acknowledged data is lost during view change
 	topicLogs := n.collectLogEntries()
 	fmt.Printf("[Node %s] Collected %d topic logs with full entries for view-sync merge\n", n.id[:8], len(topicLogs))
 
-	// Send response with full log entries
 	response := protocol.NewStateExchangeResponseMsg(
 		n.id,
 		electionID,
@@ -331,12 +283,9 @@ func (n *Node) handleStateExchange(msg *protocol.StateExchangeMsg, conn net.Conn
 	}
 }
 
-// installNewView installs a new view after state exchange or node join.
-// This is the SINGLE code path for all view installations (post-election recovery and node joins).
-// mergedLogs contains the UNION of all log entries for view-synchronous consistency (nil for node joins).
-// Uses defer to guarantee unfreeze regardless of error path.
+// Single code path for all view installations (post-election and node joins).
+// Defers unfreeze to guarantee it runs on all exit paths.
 func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[string]uint64, mergedLogs []*protocol.TopicLogEntries) error {
-	// Guarantee unfreeze on ALL exit paths (success or error)
 	defer n.unfreezeOperations()
 
 	if !n.IsLeader() {
@@ -351,7 +300,6 @@ func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[
 	fmt.Printf("[Leader %s] Merged Logs: %d topics\n", n.id[:8], len(mergedLogs))
 	fmt.Printf("[Leader %s] ========================================\n\n", n.id[:8])
 
-	// Get current membership from registry
 	brokers := n.clusterState.ListBrokers()
 	var memberIDs []string
 	var memberAddresses []string
@@ -364,13 +312,11 @@ func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[
 		}
 	}
 
-	// Serialize agreed state
 	stateSnapshot, err := n.clusterState.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize state for view install: %w", err)
 	}
 
-	// Update our sequence number to agreed sequence
 	if agreedSeq > n.lastAppliedSeqNum {
 		fmt.Printf("[Leader %s] Updating lastAppliedSeqNum from %d to %d\n",
 			n.id[:8], n.lastAppliedSeqNum, agreedSeq)
@@ -393,7 +339,6 @@ func (n *Node) installNewView(electionID, agreedSeq int64, agreedLogOffsets map[
 		}
 	}
 
-	// Re-serialize state after fixing IsLeader flags
 	stateSnapshot, err = n.clusterState.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to re-serialize state after IsLeader fix: %w", err)
@@ -683,12 +628,10 @@ func (n *Node) handleViewInstall(msg *protocol.ViewInstallMsg, conn net.Conn) {
 	}
 }
 
-// GetViewState returns the current view state
 func (n *Node) GetViewState() *state.ViewState {
 	return n.viewState
 }
 
-// GetRecoveryManager returns the recovery manager
 func (n *Node) GetRecoveryManager() *state.ViewRecoveryManager {
 	return n.recoveryManager
 }
@@ -808,7 +751,6 @@ func (n *Node) rebalanceLeaderStreams() []streamReassignment {
 	return reassignments
 }
 
-// notifyStreamReassignments sends REASSIGN_BROKER to affected clients.
 // Must be called AFTER installNewView so the follower has the updated stream assignments.
 func (n *Node) notifyStreamReassignments(reassignments []streamReassignment) {
 	for _, r := range reassignments {
@@ -821,7 +763,6 @@ func (n *Node) notifyStreamReassignments(reassignments []streamReassignment) {
 	}
 }
 
-// collectLogOffsets returns a map of topic -> highest offset for all local logs
 // DEPRECATED: Used in old offset-based sync during state exchange
 // Kept for backward compatibility
 func (n *Node) collectLogOffsets() map[string]uint64 {
@@ -838,7 +779,6 @@ func (n *Node) collectLogOffsets() map[string]uint64 {
 	return offsets
 }
 
-// collectLogEntries returns full log entries for all topics
 // Used in view-synchronous state exchange to collect complete log state
 // This enables union-based merge that preserves all acknowledged data
 func (n *Node) collectLogEntries() []*protocol.TopicLogEntries {

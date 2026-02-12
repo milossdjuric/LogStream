@@ -9,7 +9,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BroadcastConfig holds broadcast configuration with circuit breaker settings
 type BroadcastConfig struct {
 	Port       int           // Port to broadcast on
 	Timeout    time.Duration // How long to wait for responses per attempt
@@ -48,13 +47,10 @@ type BroadcastConnection struct {
 }
 
 func CreateBroadcastSender() (*BroadcastConnection, error) {
-	// Use ListenConfig to set socket options BEFORE binding to force IPv4
 	lc := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
-				// Force IPv4-only by disabling IPv6 (IPV6_V6ONLY = 0 means IPv4 can use IPv6 socket, but we want IPv4-only)
-				// Actually, for IPv4 sockets, we don't need IPV6_V6ONLY, but we can set SO_BROADCAST
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
 			})
 			if err != nil {
@@ -64,7 +60,6 @@ func CreateBroadcastSender() (*BroadcastConnection, error) {
 		},
 	}
 
-	// Create unconnected UDP socket - force IPv4 to avoid IPv6 issues in network namespaces
 	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: 0,
@@ -81,8 +76,6 @@ func CreateBroadcastSender() (*BroadcastConnection, error) {
 		return nil, fmt.Errorf("failed to convert to UDPConn")
 	}
 
-	// Broadcast is already enabled via SO_BROADCAST socket option above
-	// Setup write buffer
 	if err := conn.SetWriteBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set write buffer: %w", err)
@@ -94,12 +87,10 @@ func CreateBroadcastSender() (*BroadcastConnection, error) {
 }
 
 func CreateBroadcastListener(port int) (*BroadcastConnection, error) {
-	// Use ListenConfig to set socket options BEFORE binding to force IPv4
 	lc := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
-				// Enable SO_REUSEADDR for immediate port reuse
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 			})
 			if err != nil {
@@ -109,13 +100,11 @@ func CreateBroadcastListener(port int) (*BroadcastConnection, error) {
 		},
 	}
 
-	// Listen on all interfaces for broadcast messages - force IPv4 to avoid IPv6 issues in network namespaces
 	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: port,
 	}
 
-	// Create UDP socket - force IPv4 with socket options
 	packetConn, err := lc.ListenPacket(nil, "udp4", listenAddr.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on broadcast port %d: %w", port, err)
@@ -127,13 +116,11 @@ func CreateBroadcastListener(port int) (*BroadcastConnection, error) {
 		return nil, fmt.Errorf("failed to convert to UDPConn")
 	}
 
-	// Set read buffer
 	if err := conn.SetReadBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set read buffer: %w", err)
 	}
 
-	// Return wrapped connection
 	return &BroadcastConnection{
 		conn: conn,
 	}, nil
@@ -284,18 +271,14 @@ func calculateBroadcastAddress(nodeAddress string, port int) (string, error) {
 // DiscoverClusterWithRetry broadcasts JOIN and waits for JOIN_RESPONSE
 // Implements circuit breaker pattern with exponential backoff and split-brain detection
 func DiscoverClusterWithRetry(senderID string, senderType NodeType, address string, config *BroadcastConfig) (*JoinResponseMsg, error) {
-
-	// Use default config if none provided
 	if config == nil {
 		config = DefaultBroadcastConfig()
 	}
 
-	// Create broadcast sender
 	sender, err := CreateBroadcastSender()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create broadcast sender: %w", err)
 	}
-	// Once done, close the sender
 	defer sender.Close()
 
 	// Calculate subnet-specific broadcast address (required for network namespaces)
@@ -305,29 +288,23 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 		broadcastAddr = fmt.Sprintf("255.255.255.255:%d", config.Port)
 	}
 
-	// Circuit breaker: track current delay for exponential backoff
 	currentDelay := config.RetryDelay
 	consecutiveFailures := 0
 
-	// Try multiple times to discover the cluster with circuit breaker pattern
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
 		fmt.Printf("[Discovery] Attempt %d/%d (delay: %v)\n", attempt+1, config.MaxRetries, currentDelay)
 
-		// Send JOIN broadcast
 		if err := sender.BroadcastJoin(senderID, senderType, address, broadcastAddr); err != nil {
 			return nil, fmt.Errorf("broadcast failed: %w", err)
 		}
 
-		// Collect ALL responses within a collection window (for split-brain detection)
 		responses := collectJoinResponses(sender, config.Timeout, config.ResponseCollectTime)
 
 		if len(responses) == 0 {
-			// No responses - increment failure counter and apply backoff
 			consecutiveFailures++
 			fmt.Printf("[Discovery] No response received (failure #%d)\n", consecutiveFailures)
 
 			if attempt < config.MaxRetries-1 {
-				// Exponential backoff with cap
 				time.Sleep(currentDelay)
 				currentDelay = time.Duration(float64(currentDelay) * config.BackoffMultiplier)
 				if currentDelay > config.MaxRetryDelay {
@@ -338,10 +315,8 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 			return nil, fmt.Errorf("no response after %d attempts", config.MaxRetries)
 		}
 
-		// Reset failure counter on successful response
 		consecutiveFailures = 0
 
-		// Check for split-brain: multiple different leaders responded
 		uniqueLeaders := getUniqueLeaders(responses)
 		if len(uniqueLeaders) > 1 {
 			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
@@ -349,7 +324,6 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 				fmt.Printf("[Discovery]   - Leader at: %s\n", leaderAddr)
 			}
 
-			// Sleep to allow cluster to resolve split-brain via election
 			fmt.Printf("[Discovery] Sleeping %v to allow election to resolve split-brain...\n", config.SplitBrainDelay)
 			time.Sleep(config.SplitBrainDelay)
 
@@ -359,8 +333,6 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 				currentDelay = config.MaxRetryDelay
 			}
 
-			// Retry discovery - do NOT make a deterministic choice
-			// Let the cluster resolve split-brain via election
 			if attempt < config.MaxRetries-1 {
 				continue
 			}
@@ -371,7 +343,6 @@ func DiscoverClusterWithRetry(senderID string, senderType NodeType, address stri
 				config.MaxRetries, len(uniqueLeaders))
 		}
 
-		// Single leader - cluster is healthy, join it
 		fmt.Printf("[Discovery] Found cluster with leader at %s\n", responses[0].LeaderAddress)
 		return responses[0], nil
 	}
@@ -426,7 +397,6 @@ func collectJoinResponses(sender *BroadcastConnection, timeout, collectTime time
 	return responses
 }
 
-// getUniqueLeaders extracts unique leader addresses from responses
 func getUniqueLeaders(responses []*JoinResponseMsg) map[string]bool {
 	leaders := make(map[string]bool)
 	for _, r := range responses {
@@ -448,10 +418,8 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		config = DefaultBroadcastConfig()
 	}
 
-	// Generate a temporary client ID for discovery
 	tempID := fmt.Sprintf("discovery-%d", time.Now().UnixNano())
 
-	// Get ALL private IPs across all interfaces
 	allIPs := getAllPrivateIPs()
 	if len(allIPs) == 0 {
 		return "", fmt.Errorf("no suitable private network interface found")
@@ -459,7 +427,6 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 
 	fmt.Printf("[Discovery] Found %d private interface(s)\n", len(allIPs))
 
-	// Create a sender socket per interface (for both sending AND receiving)
 	type ifaceSocket struct {
 		ip        string
 		bcastAddr string
@@ -488,21 +455,18 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 		return "", fmt.Errorf("failed to create broadcast sockets on any interface")
 	}
 
-	// Cleanup all sockets on exit
 	defer func() {
 		for _, s := range sockets {
 			s.sender.Close()
 		}
 	}()
 
-	// Circuit breaker: exponential backoff
 	currentDelay := config.RetryDelay
 	consecutiveFailures := 0
 
 	for attempt := 0; attempt < config.MaxRetries; attempt++ {
 		fmt.Printf("[Discovery] Attempt %d/%d\n", attempt+1, config.MaxRetries)
 
-		// Broadcast on ALL interfaces simultaneously
 		for _, s := range sockets {
 			sourceAddr := s.sender.GetLocalAddr().String()
 			if err := s.sender.BroadcastJoin(tempID, NodeType_PRODUCER, sourceAddr, s.bcastAddr); err != nil {
@@ -510,8 +474,7 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			}
 		}
 
-		// Collect responses from ALL sockets concurrently
-		// Each socket is read in its own goroutine so we don't block on the wrong interface
+		// Read each socket in its own goroutine so we don't block on the wrong interface
 		type ifaceResponses struct {
 			responses []*JoinResponseMsg
 		}
@@ -545,7 +508,6 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 
 		consecutiveFailures = 0
 
-		// Check for split-brain
 		uniqueLeaders := getUniqueLeaders(allResponses)
 		if len(uniqueLeaders) > 1 {
 			fmt.Printf("[Discovery] SPLIT-BRAIN DETECTED: %d different leaders responded\n", len(uniqueLeaders))
@@ -560,7 +522,6 @@ func DiscoverLeader(config *BroadcastConfig) (string, error) {
 			return "", fmt.Errorf("split-brain detected after %d attempts", config.MaxRetries)
 		}
 
-		// Success
 		fmt.Printf("[Discovery] Found cluster with leader at %s\n", allResponses[0].LeaderAddress)
 		return allResponses[0].LeaderAddress, nil
 	}
@@ -593,7 +554,6 @@ func createBoundBroadcastSender(interfaceIP string, port int) (*BroadcastConnect
 		},
 	}
 
-	// Bind to the specific interface IP with the requested port
 	listenAddr := &net.UDPAddr{
 		IP:   net.ParseIP(interfaceIP),
 		Port: port,
@@ -610,7 +570,6 @@ func createBoundBroadcastSender(interfaceIP string, port int) (*BroadcastConnect
 		return nil, fmt.Errorf("failed to convert to UDPConn for interface %s", interfaceIP)
 	}
 
-	// Setup buffers
 	if err := conn.SetWriteBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set write buffer: %w", err)
@@ -632,7 +591,6 @@ func createResponseListener(port int) (*BroadcastConnection, error) {
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
-				// Enable SO_REUSEADDR for immediate port reuse
 				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 			})
 			if err != nil {
@@ -642,7 +600,6 @@ func createResponseListener(port int) (*BroadcastConnection, error) {
 		},
 	}
 
-	// Listen on all interfaces on the specified port
 	listenAddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: port,
@@ -659,7 +616,6 @@ func createResponseListener(port int) (*BroadcastConnection, error) {
 		return nil, fmt.Errorf("failed to convert to UDPConn")
 	}
 
-	// Setup read buffer for receiving responses
 	if err := conn.SetReadBuffer(2048 * 1024); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("failed to set read buffer: %w", err)
@@ -714,7 +670,6 @@ func getAllPrivateIPs() []string {
 	return ips
 }
 
-// isPrivateIP checks if an IP is in a private range (RFC 1918)
 func isPrivateIP(ip net.IP) bool {
 	privateRanges := []string{
 		"10.0.0.0/8",

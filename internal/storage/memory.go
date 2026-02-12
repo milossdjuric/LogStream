@@ -14,7 +14,6 @@ type MemoryLog struct {
 	mu         sync.RWMutex
 }
 
-// NewMemoryLog creates a new in-memory log.
 func NewMemoryLog() *MemoryLog {
 	return &MemoryLog{
 		records: make([][]byte, 0),
@@ -80,14 +79,11 @@ func (m *MemoryLog) TruncateTo(maxOffset uint64) error {
 		return nil
 	}
 
-	// Calculate how many records to keep
-	// If maxOffset is below baseOffset, we need to clear everything
 	if maxOffset < m.baseOffset {
 		m.records = make([][]byte, 0)
 		return nil
 	}
 
-	// Calculate the number of records to keep
 	keepCount := int(maxOffset - m.baseOffset + 1)
 	if keepCount > len(m.records) {
 		// Nothing to truncate
@@ -111,7 +107,6 @@ type LogEntry struct {
 	Timestamp int64
 }
 
-// GetAllEntries returns all entries in the log with their offsets
 // Used for view-synchronous state exchange to collect full log state
 func (m *MemoryLog) GetAllEntries() []LogEntry {
 	m.mu.RLock()
@@ -120,12 +115,10 @@ func (m *MemoryLog) GetAllEntries() []LogEntry {
 	entries := make([]LogEntry, len(m.records))
 	for i, record := range m.records {
 		offset := m.baseOffset + uint64(i)
-		// Decode timestamp from record if possible
 		ts, _, err := DecodeRecord(record)
 		if err != nil {
 			ts = 0
 		}
-		// Make a copy of the data
 		dataCopy := make([]byte, len(record))
 		copy(dataCopy, record)
 		entries[i] = LogEntry{
@@ -137,7 +130,6 @@ func (m *MemoryLog) GetAllEntries() []LogEntry {
 	return entries
 }
 
-// AppendAtOffset appends a record at a specific offset
 // Used during view-synchronous log merge to apply entries from other members
 // If the offset already exists and data matches, it's a no-op
 // If offset is beyond current log, fills gaps with nil
@@ -145,7 +137,6 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// If log is empty, set base offset
 	if len(m.records) == 0 {
 		m.baseOffset = offset
 		recCopy := make([]byte, len(data))
@@ -154,7 +145,6 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 		return nil
 	}
 
-	// Calculate position in slice
 	if offset < m.baseOffset {
 		// Offset is before our base, need to prepend
 		// This is rare but can happen during merge
@@ -162,12 +152,10 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 		gap := int(m.baseOffset - offset)
 		newRecords := make([][]byte, gap+len(m.records))
 
-		// First entry is our new data
 		recCopy := make([]byte, len(data))
 		copy(recCopy, data)
 		newRecords[0] = recCopy
 
-		// Copy existing records at their new positions
 		copy(newRecords[gap:], m.records)
 
 		m.records = newRecords
@@ -177,7 +165,6 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 
 	pos := int(offset - m.baseOffset)
 
-	// If position is within existing range
 	if pos < len(m.records) {
 		// Entry already exists - overwrite with merged data
 		// (In VS protocol, all entries at same offset should be identical)
@@ -193,7 +180,6 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 		m.records = append(m.records, nil)
 	}
 
-	// Append the new record
 	recCopy := make([]byte, len(data))
 	copy(recCopy, data)
 	m.records = append(m.records, recCopy)
@@ -201,7 +187,6 @@ func (m *MemoryLog) AppendAtOffset(offset uint64, data []byte) error {
 	return nil
 }
 
-// Compact removes the oldest records if the log exceeds maxRecords.
 // Returns the number of records removed.
 func (m *MemoryLog) Compact(maxRecords int) int {
 	if maxRecords <= 0 {
@@ -221,7 +206,6 @@ func (m *MemoryLog) Compact(maxRecords int) int {
 	return removeCount
 }
 
-// CleanupOldLogs removes records older than the retention duration.
 func (m *MemoryLog) CleanupOldLogs(retention time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -236,9 +220,7 @@ func (m *MemoryLog) CleanupOldLogs(retention time.Duration) error {
 	for _, record := range m.records {
 		ts, _, err := DecodeRecord(record)
 		if err != nil {
-			// If we can't decode, we probably shouldn't blindly delete, but
-			// in a strict system we might. Let's assume errors mean we stop checking or skip.
-			// Ideally corruption is handled elsewhere.
+			// Stop at corrupted records rather than blindly deleting
 			break
 		}
 		t := time.Unix(0, ts)

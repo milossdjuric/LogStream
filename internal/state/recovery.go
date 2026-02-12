@@ -24,7 +24,6 @@ type ViewRecoveryManager struct {
 	agreedSequence  int64
 }
 
-// NewViewRecoveryManager creates a new recovery manager
 func NewViewRecoveryManager() *ViewRecoveryManager {
 	return &ViewRecoveryManager{
 		responses: make(map[string]*RecoveryResponse),
@@ -70,7 +69,6 @@ func (m *ViewRecoveryManager) AddResponse(brokerID string, lastAppliedSeq int64,
 		shortID, lastAppliedSeq, hasState)
 }
 
-// HasMajority checks if we have responses from majority of brokers
 func (m *ViewRecoveryManager) HasMajority() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -79,7 +77,6 @@ func (m *ViewRecoveryManager) HasMajority() bool {
 	return len(m.responses) >= required
 }
 
-// GetResponseCount returns the number of responses received
 func (m *ViewRecoveryManager) GetResponseCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -87,7 +84,6 @@ func (m *ViewRecoveryManager) GetResponseCount() int {
 	return len(m.responses)
 }
 
-// GetAgreedSequence returns the agreed-upon sequence number
 // Uses majority agreement: the median of all reported sequences
 func (m *ViewRecoveryManager) GetAgreedSequence() int64 {
 	m.mu.Lock()
@@ -97,7 +93,6 @@ func (m *ViewRecoveryManager) GetAgreedSequence() int64 {
 		return 0
 	}
 
-	// Collect all sequence numbers
 	sequences := make([]int64, 0, len(m.responses))
 	for _, resp := range m.responses {
 		if resp.HasState {
@@ -125,7 +120,6 @@ func (m *ViewRecoveryManager) GetAgreedSequence() int64 {
 	return maxSeq
 }
 
-// EndRecovery marks recovery as complete
 func (m *ViewRecoveryManager) EndRecovery() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -134,7 +128,6 @@ func (m *ViewRecoveryManager) EndRecovery() {
 	fmt.Printf("[RecoveryManager] Recovery complete for view %d\n", m.proposedView)
 }
 
-// IsInRecovery returns whether recovery is in progress
 func (m *ViewRecoveryManager) IsInRecovery() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

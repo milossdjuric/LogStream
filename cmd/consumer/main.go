@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -13,7 +14,6 @@ import (
 )
 
 func main() {
-	// CLI flags with env var fallback
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to consume from")
 	port := flag.Int("port", 8003, "Client TCP listener port (default: 8003)")
@@ -76,7 +76,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Create consumer
 	consumer := client.NewConsumerWithFullOptions(*topic, *leader, client.ConsumerOptions{
 		EnableProcessing:       *analytics,
 		AnalyticsWindowSeconds: int32(*windowSeconds),
@@ -88,7 +87,6 @@ func main() {
 		ReconnectDelay:         time.Duration(*reconnectDelay) * time.Second,
 	})
 
-	// Consumer ID prefix for all logs
 	cid := consumer.ID()[:8]
 
 	fmt.Println("===========================================")
@@ -112,7 +110,6 @@ func main() {
 	}
 	fmt.Println()
 
-	// Connect to cluster
 	fmt.Printf("[Consumer %s] Connecting to cluster...\n", cid)
 	if err := consumer.Connect(); err != nil {
 		log.Fatalf("[Consumer %s] Failed to connect: %v\n", cid, err)
@@ -126,19 +123,43 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// Display received messages (receiveResults() already started in Connect())
+	type analyticsResult struct {
+		Topic         string  `json:"topic"`
+		TotalCount    int64   `json:"total_count"`
+		WindowSeconds int     `json:"window_seconds"`
+		WindowCount   int64   `json:"window_count"`
+		WindowRate    float64 `json:"window_rate"`
+		RawData       []byte  `json:"raw_data,omitempty"`
+	}
+
 	received := 0
 	for {
 		select {
 		case result := <-consumer.Results():
-			received++
-			fmt.Printf("-----------------------------------------\n")
-			fmt.Printf("[Consumer %s] Message #%d\n", cid, received)
-			fmt.Printf("  Topic:  %s\n", result.Topic)
-			fmt.Printf("  Offset: %d\n", result.Offset)
+			ts := time.Now().Format("15:04:05")
 
-			if len(result.Data) > 0 {
-				fmt.Printf("  Data:   %s\n", string(result.Data))
+			var ar analyticsResult
+			if json.Unmarshal(result.Data, &ar) == nil && ar.Topic != "" {
+				if len(ar.RawData) > 0 {
+					received++
+					fmt.Println()
+					fmt.Printf("  [%s] Message #%d\n", ts, received)
+					fmt.Printf("  Topic:   %s\n", ar.Topic)
+					fmt.Printf("  Offset:  %d\n", result.Offset)
+					fmt.Printf("  Data:    %s\n", string(ar.RawData))
+					fmt.Printf("  Stats:   %d total | %d in %ds | %.2f msg/s\n",
+						ar.TotalCount, ar.WindowCount, ar.WindowSeconds, ar.WindowRate)
+				} else {
+					fmt.Printf("  [%s] Stats: %d total | %d in %ds | %.2f msg/s\n",
+						ts, ar.TotalCount, ar.WindowCount, ar.WindowSeconds, ar.WindowRate)
+				}
+			} else if len(result.Data) > 0 {
+				received++
+				fmt.Println()
+				fmt.Printf("  [%s] Message #%d\n", ts, received)
+				fmt.Printf("  Topic:   %s\n", result.Topic)
+				fmt.Printf("  Offset:  %d\n", result.Offset)
+				fmt.Printf("  Data:    %s\n", string(result.Data))
 			}
 
 		case <-sigChan:
@@ -157,7 +178,6 @@ func main() {
 	}
 }
 
-// getEnvOrDefault returns environment variable value or default
 func getEnvOrDefault(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val

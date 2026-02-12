@@ -27,7 +27,6 @@ type DataHoldbackQueue struct {
 	callback  func(*DataHoldbackMessage) error
 }
 
-// NewDataHoldbackQueue creates a new holdback queue
 func NewDataHoldbackQueue(callback func(*DataHoldbackMessage) error) *DataHoldbackQueue {
 	return &DataHoldbackQueue{
 		producers: make(map[string]*ProducerHoldback),
@@ -113,7 +112,6 @@ func (q *DataHoldbackQueue) Enqueue(msg *DataHoldbackMessage) error {
 	return nil
 }
 
-// RemoveProducer removes a producer's state from the holdback queue
 func (q *DataHoldbackQueue) RemoveProducer(producerID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -121,7 +119,6 @@ func (q *DataHoldbackQueue) RemoveProducer(producerID string) {
 	delete(q.producers, producerID)
 }
 
-// Reset resets the expected sequence for a producer
 func (q *DataHoldbackQueue) Reset(producerID string, newExpected int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

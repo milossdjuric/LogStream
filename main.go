@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-	// Add panic recovery at the top level
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
@@ -33,12 +32,10 @@ func main() {
 	fmt.Printf("[System] PROCESS STARTING\n")
 	fmt.Printf("[System] ========================================\n\n")
 
-	// Show warning if NODE_ADDRESS not set
 	if os.Getenv("NODE_ADDRESS") == "" {
 		fmt.Printf("[System] NODE_ADDRESS not set, will auto-detect\n")
 	}
 
-	// Load configuration
 	fmt.Printf("[System] Loading configuration...\n")
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -46,35 +43,29 @@ func main() {
 	}
 	fmt.Printf("[System] Configuration loaded successfully\n")
 
-	// Validate configuration
 	fmt.Printf("[System] Validating configuration...\n")
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("[System] Invalid configuration: %v\n", err)
 	}
 	fmt.Printf("[System] Configuration validated successfully\n")
 
-	// Print configuration
 	fmt.Printf("[System] Configuration:\n")
 	cfg.Print()
 
-	// Create node
 	fmt.Printf("[System] Creating node instance...\n")
 	clusterNode := node.NewNode(cfg)
 	fmt.Printf("[System] Node instance created successfully\n")
 
-	// Start node with detailed error handling
 	fmt.Printf("[System] Starting node...\n")
 	if err := clusterNode.Start(); err != nil {
 		log.Fatalf("[System] Failed to start node: %v\n", err)
 	}
 	fmt.Printf("[System] Node started successfully\n")
 
-	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGUSR1)
 
-	// Manual command input via stdin (non-blocking goroutine)
-	// Only start if stdin is a terminal (not /dev/null or pipe)
+	// Only start command input handler if stdin is a terminal (not /dev/null or pipe)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -84,7 +75,6 @@ func main() {
 			}
 		}()
 
-		// Check if stdin is a terminal - if not, skip command input handler
 		stat, err := os.Stdin.Stat()
 		if err != nil || (stat.Mode()&os.ModeCharDevice) == 0 {
 			fmt.Printf("[System] Stdin is not a terminal, skipping command input handler\n")
@@ -113,7 +103,6 @@ func main() {
 				clusterNode.PrintStatus()
 
 			case "":
-				// Ignore empty lines
 
 			default:
 				fmt.Printf("[System] Unknown command: %s\n", cmd)
@@ -148,7 +137,6 @@ func main() {
 			// Continue running - DON'T block waiting for another signal
 
 		case os.Interrupt, syscall.SIGTERM:
-			// Shutdown gracefully
 			fmt.Println("\n[System] Received shutdown signal...")
 			clusterNode.Shutdown()
 			fmt.Println("[System] Shutdown complete")

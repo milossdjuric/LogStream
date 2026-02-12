@@ -14,14 +14,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Network setup and multicast listener functions for broker node
-
-// setupMulticast initializes multicast connections for the node
 func (n *Node) setupMulticast() error {
 	fmt.Printf("[Node %s] [Multicast-Setup] Joining multicast group: %s\n", n.id[:8], n.config.MulticastGroup)
 	fmt.Printf("[Node %s] [Multicast-Setup] Network interface: %s\n", n.id[:8], n.config.NetworkInterface)
 
-	// protocol.JoinMulticastGroup provided by protocol package
 	receiver, err := protocol.JoinMulticastGroup(
 		n.config.MulticastGroup,
 		n.config.NetworkInterface,
@@ -34,7 +30,6 @@ func (n *Node) setupMulticast() error {
 	fmt.Printf("[Node %s] [Multicast-Setup] Successfully joined multicast group\n", n.id[:8])
 	fmt.Printf("[Node %s] [Multicast-Setup] Receiver local address: %s\n", n.id[:8], receiver.GetLocalAddr())
 
-	// protocol.CreateMulticastSender provided by protocol package
 	senderAddr := fmt.Sprintf("%s:0", n.config.NetworkInterface)
 	fmt.Printf("[Node %s] [Multicast-Setup] Creating multicast sender on: %s\n", n.id[:8], senderAddr)
 	sender, err := protocol.CreateMulticastSender(senderAddr)
@@ -50,15 +45,12 @@ func (n *Node) setupMulticast() error {
 	return nil
 }
 
-// startTCPListener starts the TCP listener for producer/consumer connections AND election messages
 func (n *Node) startTCPListener() error {
-	// Extract port from node address
 	host, port, err := net.SplitHostPort(n.address)
 	if err != nil {
 		return fmt.Errorf("invalid address: %w", err)
 	}
 
-	// Use same port for TCP
 	tcpAddr := fmt.Sprintf("%s:%s", host, port)
 
 	// Use ListenConfig to set SO_REUSEADDR for immediate port reuse after cleanup
@@ -77,7 +69,6 @@ func (n *Node) startTCPListener() error {
 		},
 	}
 
-	// Listen for TCP connections with reuse option
 	listener, err := lc.Listen(context.Background(), "tcp", tcpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to start TCP listener: %w", err)
@@ -86,7 +77,6 @@ func (n *Node) startTCPListener() error {
 	n.tcpListener = listener
 	fmt.Printf("[Node %s] TCP listener started on %s (SO_REUSEADDR enabled)\n", n.id[:8], listener.Addr())
 
-	// Accept connections in background
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -102,25 +92,18 @@ func (n *Node) startTCPListener() error {
 	return nil
 }
 
-// startUDPDataListener starts the UDP listener for DATA messages from producers
-// Producers send DATA via UDP unicast to the broker's address
 func (n *Node) startUDPDataListener() error {
-	// Extract host and port from node address
 	host, port, err := net.SplitHostPort(n.address)
 	if err != nil {
 		return fmt.Errorf("invalid address: %w", err)
 	}
 
-	// Create UDP address for same port as TCP
 	udpAddr := fmt.Sprintf("%s:%s", host, port)
-	
-	// Resolve UDP address
 	addr, err := net.ResolveUDPAddr("udp", udpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 
-	// Create UDP listener with SO_REUSEADDR
 	lc := &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			var opErr error
@@ -134,7 +117,6 @@ func (n *Node) startUDPDataListener() error {
 		},
 	}
 
-	// Listen for UDP packets
 	packetConn, err := lc.ListenPacket(context.Background(), "udp", udpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to start UDP listener: %w", err)
@@ -144,7 +126,6 @@ func (n *Node) startUDPDataListener() error {
 	fmt.Printf("[Node %s] UDP DATA listener started on %s (for producer DATA messages)\n", 
 		n.id[:8], addr)
 
-	// Start UDP receive loop in background
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -162,13 +143,11 @@ func (n *Node) startUDPDataListener() error {
 	return nil
 }
 
-// receiveUDPData is the main receive loop for UDP DATA messages
 func (n *Node) receiveUDPData() {
 	fmt.Printf("[Node %s] [UDP-DATA-Listener] Starting receive loop on %s\n", 
 		n.id[:8], n.udpDataListener.LocalAddr())
 
 	for {
-		// Check for shutdown before reading
 		select {
 		case <-n.shutdownCtx.Done():
 			fmt.Printf("[Node %s] [UDP-DATA-Listener] Shutdown requested, exiting receive loop cleanly\n", 
@@ -178,10 +157,8 @@ func (n *Node) receiveUDPData() {
 			// Continue with read
 		}
 
-		// Set read deadline to allow periodic shutdown checks
 		n.udpDataListener.SetReadDeadline(time.Now().Add(1 * time.Second))
 
-		// Read UDP message using protocol package function
 		msg, remoteAddr, err := protocol.ReadUDPMessage(n.udpDataListener)
 		if err != nil {
 			// Check if it's a timeout (normal when checking for shutdown)
@@ -215,7 +192,6 @@ func (n *Node) receiveUDPData() {
 			}
 		}
 
-		// Handle DATA and HeartbeatMsg messages
 		switch m := msg.(type) {
 		case *protocol.DataMsg:
 			fmt.Printf("[Node %s] [UDP-DATA-Listener] Received DATA from %s\n",
@@ -230,7 +206,6 @@ func (n *Node) receiveUDPData() {
 	}
 }
 
-// handleUDPClientHeartbeat processes a heartbeat received via UDP from a client (producer/consumer)
 func (n *Node) handleUDPClientHeartbeat(msg *protocol.HeartbeatMsg) {
 	senderID := protocol.GetSenderID(msg)
 	senderType := protocol.GetSenderType(msg)
@@ -247,7 +222,6 @@ func (n *Node) handleUDPClientHeartbeat(msg *protocol.HeartbeatMsg) {
 	}
 }
 
-// acceptTCPConnections is the main accept loop for TCP connections
 func (n *Node) acceptTCPConnections() {
 	fmt.Printf("[Node %s] [TCP-Listener] Starting accept loop on %s\n", n.id[:8], n.tcpListener.Addr())
 
@@ -301,12 +275,10 @@ func (n *Node) acceptTCPConnections() {
 		remoteAddr := conn.RemoteAddr()
 		fmt.Printf("[Node %s] [TCP-Listener] New connection accepted from %s\n", n.id[:8], remoteAddr)
 
-		// Handle connection in goroutine
-		go n.handleTCPConnection(conn)
+			go n.handleTCPConnection(conn)
 	}
 }
 
-// listenMulticast listens for multicast messages
 func (n *Node) listenMulticast() {
 	fmt.Printf("[Node %s] [Multicast-Listener] ========================================\n", n.id[:8])
 	fmt.Printf("[Node %s] [Multicast-Listener] Starting multicast message listener...\n", n.id[:8])
@@ -392,7 +364,6 @@ func (n *Node) listenMulticast() {
 		fmt.Printf("[Node %s] [Multicast-Listener] Received %s from %s (sender: %s, addr: %s)\n",
 			n.id[:8], msgType, senderID[:8], senderID[:8], sender)
 
-		// Route message based on type (protocol provides message types)
 		switch m := msg.(type) {
 		case *protocol.HeartbeatMsg:
 			fmt.Printf("[Node %s] [Multicast-Listener] Routing HEARTBEAT to handler\n", n.id[:8])
@@ -423,12 +394,10 @@ func (n *Node) listenMulticast() {
 // If LEADER_ADDRESS is configured, joins directly via TCP (bypasses broadcast)
 // Otherwise, uses broadcast discovery
 func (n *Node) discoverCluster() error {
-	// Check if explicit leader address is configured (for environments where broadcast doesn't work)
 	if n.config.HasExplicitLeader() {
 		return n.joinClusterDirectly(n.config.LeaderAddress)
 	}
 
-	// Use broadcast discovery
 	fmt.Printf("[Node %s] Discovering cluster via broadcast...\n", n.id[:8])
 
 	config := protocol.DefaultBroadcastConfig()
@@ -463,20 +432,17 @@ func (n *Node) joinClusterDirectly(leaderAddress string) error {
 	fmt.Printf("[Node %s] Joining cluster directly via TCP to leader at %s\n", n.id[:8], leaderAddress)
 	fmt.Printf("[Node %s] (Broadcast discovery bypassed - LEADER_ADDRESS configured)\n", n.id[:8])
 
-	// Connect to leader via TCP
 	conn, err := net.DialTimeout("tcp", leaderAddress, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to connect to leader at %s: %w", leaderAddress, err)
 	}
 	defer conn.Close()
 
-	// Send JOIN message via TCP
 	joinMsg := protocol.NewJoinMsg(n.id, protocol.NodeType_BROKER, n.address)
 	if err := protocol.WriteTCPMessage(conn, joinMsg); err != nil {
 		return fmt.Errorf("failed to send JOIN to leader: %w", err)
 	}
 
-	// Wait for JOIN_RESPONSE
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	response, err := protocol.ReadTCPMessage(conn)
 	if err != nil {
@@ -491,7 +457,6 @@ func (n *Node) joinClusterDirectly(leaderAddress string) error {
 	fmt.Printf("[Node %s] Joined cluster! Leader: %s, Multicast: %s\n",
 		n.id[:8], joinResponse.LeaderAddress, joinResponse.MulticastGroup)
 
-	// Store cluster configuration
 	n.leaderAddress = joinResponse.LeaderAddress
 	n.config.MulticastGroup = joinResponse.MulticastGroup
 

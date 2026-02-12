@@ -17,7 +17,6 @@ type LeaderFailureDetector struct {
 	suspicionTime    time.Time
 }
 
-// NewLeaderFailureDetector creates a new failure detector
 func NewLeaderFailureDetector(suspicionTimeout, failureTimeout time.Duration) *LeaderFailureDetector {
 	return &LeaderFailureDetector{
 		leaderID:         "",
@@ -50,7 +49,6 @@ func (fd *LeaderFailureDetector) UpdateHeartbeat(leaderID string) {
 	}
 }
 
-// CheckStatus checks if the leader is suspected or failed
 // Returns: (suspected, failed, timeSinceLastHB)
 func (fd *LeaderFailureDetector) CheckStatus() (bool, bool, time.Duration) {
 	fd.mu.Lock()
@@ -63,7 +61,6 @@ func (fd *LeaderFailureDetector) CheckStatus() (bool, bool, time.Duration) {
 
 	timeSinceLastHB := time.Since(fd.lastHeartbeat)
 
-	// Check for failure first (more severe)
 	if timeSinceLastHB > fd.failureTimeout {
 		fmt.Printf("[FailureDetector] LEADER FAILURE DETECTED!\n")
 		fmt.Printf("[FailureDetector]   Leader: %s\n", fd.leaderID[:8])
@@ -72,7 +69,6 @@ func (fd *LeaderFailureDetector) CheckStatus() (bool, bool, time.Duration) {
 		return true, true, timeSinceLastHB
 	}
 
-	// Check for suspicion
 	if timeSinceLastHB > fd.suspicionTimeout {
 		if !fd.suspicionRaised {
 			fd.suspicionRaised = true
@@ -87,14 +83,12 @@ func (fd *LeaderFailureDetector) CheckStatus() (bool, bool, time.Duration) {
 	return false, false, timeSinceLastHB
 }
 
-// GetLeaderID returns the current leader ID being monitored
 func (fd *LeaderFailureDetector) GetLeaderID() string {
 	fd.mu.RLock()
 	defer fd.mu.RUnlock()
 	return fd.leaderID
 }
 
-// GetLastHeartbeat returns the time of the last heartbeat
 func (fd *LeaderFailureDetector) GetLastHeartbeat() time.Time {
 	fd.mu.RLock()
 	defer fd.mu.RUnlock()

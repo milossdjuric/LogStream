@@ -24,7 +24,6 @@ const (
 	version      = "1.0.0"
 )
 
-// ProcessInfo stores metadata about a managed process
 type ProcessInfo struct {
 	Name      string    `json:"name"`
 	Type      string    `json:"type"` // broker, producer, consumer
@@ -36,7 +35,6 @@ type ProcessInfo struct {
 	Args      []string  `json:"args"` // Original arguments
 }
 
-// State holds all managed processes
 type State struct {
 	Processes map[string]*ProcessInfo `json:"processes"`
 }
@@ -151,10 +149,6 @@ func printUsage() {
 	fmt.Println("  # View logs")
 	fmt.Println("  logstreamctl logs node1 --follow")
 }
-
-// =============================================================================
-// START COMMAND
-// =============================================================================
 
 func handleStart(processType string, args []string) {
 	switch processType {
@@ -842,8 +836,7 @@ func startConsumer(args []string) {
 		os.Exit(1)
 	}
 
-	// Auto-assign port if not specified
-	// Auto-assign port if not specified (clients start from 9001 to avoid broker port range 8001+)
+	// Clients start from 9001 to avoid broker port range 8001+
 	if port == 0 {
 		port = findAvailableClientPort(9001)
 		fmt.Printf("Auto-assigned port: %d\n", port)
@@ -991,10 +984,6 @@ func startConsumer(args []string) {
 	}
 }
 
-// =============================================================================
-// STOP COMMAND
-// =============================================================================
-
 func handleStop(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: logstreamctl stop <name> | --all")
@@ -1025,7 +1014,6 @@ func stopProcess(name string) {
 		return
 	}
 
-	// Send SIGTERM
 	process, err := os.FindProcess(info.PID)
 	if err != nil {
 		fmt.Printf("Error finding process: %v\n", err)
@@ -1036,13 +1024,11 @@ func stopProcess(name string) {
 
 	if err := process.Signal(syscall.SIGTERM); err != nil {
 		fmt.Printf("Error sending SIGTERM: %v\n", err)
-		// Try SIGKILL
 		if err := process.Signal(syscall.SIGKILL); err != nil {
 			fmt.Printf("Error sending SIGKILL: %v\n", err)
 		}
 	}
 
-	// Wait for process to exit (with timeout)
 	done := make(chan bool, 1)
 	go func() {
 		for i := 0; i < 50; i++ { // 5 seconds
@@ -1085,10 +1071,6 @@ func stopAll() {
 	fmt.Println("All processes stopped")
 }
 
-// =============================================================================
-// LIST COMMAND
-// =============================================================================
-
 func handleList() {
 	state := loadState()
 
@@ -1124,10 +1106,6 @@ func handleList() {
 
 	w.Flush()
 }
-
-// =============================================================================
-// LOGS COMMAND
-// =============================================================================
 
 func handleLogs(args []string) {
 	if len(args) == 0 {
@@ -1184,10 +1162,6 @@ func handleLogs(args []string) {
 		cmd.Run()
 	}
 }
-
-// =============================================================================
-// STATUS COMMAND
-// =============================================================================
 
 func handleStatus(args []string) {
 	showCluster := false
@@ -1259,10 +1233,6 @@ func handleStatus(args []string) {
 	}
 }
 
-// =============================================================================
-// ELECTION COMMAND
-// =============================================================================
-
 func handleElection(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: logstreamctl election <broker-name>")
@@ -1305,10 +1275,6 @@ func handleElection(args []string) {
 	fmt.Println("Election signal sent")
 	fmt.Printf("Check logs with: logstreamctl logs %s --follow\n", name)
 }
-
-// =============================================================================
-// CONFIG COMMAND
-// =============================================================================
 
 func handleConfig(subCmd string) {
 	switch subCmd {
@@ -1356,10 +1322,6 @@ func initStateDir() {
 	fmt.Printf("  |-- %s/    (log files)\n", logsDir)
 	fmt.Printf("  +-- %s (process metadata)\n", stateFile)
 }
-
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
 
 func getStateDir() string {
 	home, err := os.UserHomeDir()
@@ -1481,7 +1443,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd%dh", days, hours)
 }
 
-// autoDetectIP finds the first private IPv4 address on a non-loopback interface
 func autoDetectIP() (string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -1524,7 +1485,6 @@ func autoDetectIP() (string, error) {
 	return "", fmt.Errorf("no suitable network interface found")
 }
 
-// isPrivateIP checks if an IP is in a private range
 func isPrivateIP(ip net.IP) bool {
 	privateRanges := []string{
 		"10.0.0.0/8",
@@ -1541,12 +1501,10 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// copyOutput copies from reader to writer until EOF
 func copyOutput(dst io.Writer, src io.Reader) {
 	io.Copy(dst, src)
 }
 
-// isPortAvailable checks if a TCP port is available on the given IP
 func isPortAvailable(ip string, port int) bool {
 	addr := fmt.Sprintf("%s:%d", ip, port)
 	listener, err := net.Listen("tcp", addr)
@@ -1581,7 +1539,6 @@ func isPortAvailableForClient(port int) bool {
 	return true
 }
 
-// findAvailablePort finds the first available port starting from startPort
 func findAvailablePort(ip string, startPort int) int {
 	for port := startPort; port < startPort+100; port++ {
 		if isPortAvailable(ip, port) {
@@ -1592,7 +1549,6 @@ func findAvailablePort(ip string, startPort int) int {
 	return startPort
 }
 
-// findAvailableClientPort finds the first port available for a client (checks both TCP and UDP on 0.0.0.0)
 func findAvailableClientPort(startPort int) int {
 	for port := startPort; port < startPort+100; port++ {
 		if isPortAvailableForClient(port) {

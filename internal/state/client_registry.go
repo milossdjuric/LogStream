@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// ProducerInfo represents a producer client
 type ProducerInfo struct {
 	ID            string
 	Address       string
@@ -14,20 +13,17 @@ type ProducerInfo struct {
 	LastHeartbeat int64
 }
 
-// ProducerRegistry maintains registry of active producers
 type ProducerRegistry struct {
 	mu        sync.RWMutex
 	producers map[string]*ProducerInfo // key: producer ID
 }
 
-// NewProducerRegistry creates a new producer registry
 func NewProducerRegistry() *ProducerRegistry {
 	return &ProducerRegistry{
 		producers: make(map[string]*ProducerInfo),
 	}
 }
 
-// Register adds or updates a producer
 func (pr *ProducerRegistry) Register(id, address, topic string) error {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
@@ -43,7 +39,6 @@ func (pr *ProducerRegistry) Register(id, address, topic string) error {
 	return nil
 }
 
-// Remove removes a producer
 func (pr *ProducerRegistry) Remove(id string) error {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
@@ -57,7 +52,6 @@ func (pr *ProducerRegistry) Remove(id string) error {
 	return nil
 }
 
-// UpdateHeartbeat updates last heartbeat timestamp
 func (pr *ProducerRegistry) UpdateHeartbeat(id string) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
@@ -67,7 +61,6 @@ func (pr *ProducerRegistry) UpdateHeartbeat(id string) {
 	}
 }
 
-// CheckTimeouts removes producers that haven't sent heartbeat
 func (pr *ProducerRegistry) CheckTimeouts(timeout time.Duration) []string {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
@@ -90,7 +83,6 @@ func (pr *ProducerRegistry) CheckTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// Get retrieves producer info
 func (pr *ProducerRegistry) Get(id string) (*ProducerInfo, bool) {
 	pr.mu.RLock()
 	defer pr.mu.RUnlock()
@@ -99,7 +91,6 @@ func (pr *ProducerRegistry) Get(id string) (*ProducerInfo, bool) {
 	return producer, ok
 }
 
-// List returns all producer IDs
 func (pr *ProducerRegistry) List() []string {
 	pr.mu.RLock()
 	defer pr.mu.RUnlock()
@@ -111,14 +102,12 @@ func (pr *ProducerRegistry) List() []string {
 	return ids
 }
 
-// Count returns number of producers
 func (pr *ProducerRegistry) Count() int {
 	pr.mu.RLock()
 	defer pr.mu.RUnlock()
 	return len(pr.producers)
 }
 
-// Represents a consumer client
 type ConsumerInfo struct {
 	ID            string
 	Address       string
@@ -126,14 +115,12 @@ type ConsumerInfo struct {
 	LastHeartbeat int64
 }
 
-// Maintains a registry of active consumers
 type ConsumerRegistry struct {
 	mu        sync.RWMutex
 	consumers map[string]*ConsumerInfo   // key: consumer ID
 	topicSubs map[string]map[string]bool // key: topic, set of consumer IDs
 }
 
-// Create a new consumer registry
 func NewConsumerRegistry() *ConsumerRegistry {
 	return &ConsumerRegistry{
 		consumers: make(map[string]*ConsumerInfo),
@@ -141,7 +128,6 @@ func NewConsumerRegistry() *ConsumerRegistry {
 	}
 }
 
-// Register adds or updates a consumer
 func (cr *ConsumerRegistry) Register(id, address string) error {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -161,7 +147,6 @@ func (cr *ConsumerRegistry) Register(id, address string) error {
 	return nil
 }
 
-// Subscribe adds a topic subscription for a consumer
 func (cr *ConsumerRegistry) Subscribe(consumerID, topic string) error {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -171,7 +156,6 @@ func (cr *ConsumerRegistry) Subscribe(consumerID, topic string) error {
 		return fmt.Errorf("consumer %s not found", consumerID)
 	}
 
-	// Add topic to consumer's subscription list
 	found := false
 	for _, t := range consumer.Topics {
 		if t == topic {
@@ -183,7 +167,6 @@ func (cr *ConsumerRegistry) Subscribe(consumerID, topic string) error {
 		consumer.Topics = append(consumer.Topics, topic)
 	}
 
-	// Add consumer to topic's subscriber set
 	if cr.topicSubs[topic] == nil {
 		cr.topicSubs[topic] = make(map[string]bool)
 	}
@@ -193,7 +176,6 @@ func (cr *ConsumerRegistry) Subscribe(consumerID, topic string) error {
 	return nil
 }
 
-// Unsubscribe removes a topic subscription for a consumer
 func (cr *ConsumerRegistry) Unsubscribe(consumerID, topic string) error {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -203,7 +185,6 @@ func (cr *ConsumerRegistry) Unsubscribe(consumerID, topic string) error {
 		return fmt.Errorf("consumer %s not found", consumerID)
 	}
 
-	// Remove topic from consumer's subscription list
 	newTopics := []string{}
 	for _, t := range consumer.Topics {
 		if t != topic {
@@ -212,7 +193,6 @@ func (cr *ConsumerRegistry) Unsubscribe(consumerID, topic string) error {
 	}
 	consumer.Topics = newTopics
 
-	// Remove consumer from topic's subscriber set
 	if subs, ok := cr.topicSubs[topic]; ok {
 		delete(subs, consumerID)
 		if len(subs) == 0 {
@@ -224,7 +204,6 @@ func (cr *ConsumerRegistry) Unsubscribe(consumerID, topic string) error {
 	return nil
 }
 
-// Remove removes a consumer
 func (cr *ConsumerRegistry) Remove(id string) error {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -234,7 +213,6 @@ func (cr *ConsumerRegistry) Remove(id string) error {
 		return fmt.Errorf("consumer %s not found", id)
 	}
 
-	// Remove from all topic subscriptions
 	for _, topic := range consumer.Topics {
 		if subs, ok := cr.topicSubs[topic]; ok {
 			delete(subs, id)
@@ -249,7 +227,6 @@ func (cr *ConsumerRegistry) Remove(id string) error {
 	return nil
 }
 
-// Update last heartbeat timestamp
 func (cr *ConsumerRegistry) UpdateHeartbeat(id string) {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -259,7 +236,6 @@ func (cr *ConsumerRegistry) UpdateHeartbeat(id string) {
 	}
 }
 
-// Remove consumers that have timed out
 func (cr *ConsumerRegistry) CheckTimeouts(timeout time.Duration) []string {
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
@@ -271,7 +247,6 @@ func (cr *ConsumerRegistry) CheckTimeouts(timeout time.Duration) []string {
 		lastSeen := time.Duration(now - consumer.LastHeartbeat)
 
 		if lastSeen > timeout {
-			// Remove from all topic subscriptions
 			for _, topic := range consumer.Topics {
 				if subs, ok := cr.topicSubs[topic]; ok {
 					delete(subs, id)
@@ -292,7 +267,6 @@ func (cr *ConsumerRegistry) CheckTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// Get retrieves consumer info
 func (cr *ConsumerRegistry) Get(id string) (*ConsumerInfo, bool) {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
@@ -315,7 +289,6 @@ func (cr *ConsumerRegistry) GetSubscribers(topic string) []string {
 	return []string{}
 }
 
-// List returns all consumer IDs
 func (cr *ConsumerRegistry) List() []string {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
@@ -327,14 +300,12 @@ func (cr *ConsumerRegistry) List() []string {
 	return ids
 }
 
-// Count returns number of consumers
 func (cr *ConsumerRegistry) Count() int {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()
 	return len(cr.consumers)
 }
 
-// Print current consumer registry status
 func (cr *ConsumerRegistry) PrintStatus() {
 	cr.mu.RLock()
 	defer cr.mu.RUnlock()

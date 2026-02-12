@@ -38,7 +38,6 @@ func (r *ConsistentHashRing) RemoveNode(nodeID string) {
 	hash := crc32.ChecksumIEEE([]byte(nodeID))
 	delete(r.nodes, hash)
 
-	// Rebuild sorted slice
 	newSorted := make([]uint32, 0, len(r.nodes))
 	for h := range r.nodes {
 		newSorted = append(newSorted, h)
@@ -82,7 +81,6 @@ func (r *ConsistentHashRing) GetNodeExcluding(key string, excludeID string) stri
 		return ""
 	}
 
-	// If only one node, return it regardless
 	if len(r.sortedNodes) == 1 {
 		return r.nodes[r.sortedNodes[0]]
 	}
@@ -97,7 +95,6 @@ func (r *ConsistentHashRing) GetNodeExcluding(key string, excludeID string) stri
 		idx = 0
 	}
 
-	// Walk the ring until we find a node that isn't excluded
 	for i := 0; i < len(r.sortedNodes); i++ {
 		nodeID := r.nodes[r.sortedNodes[(idx+i)%len(r.sortedNodes)]]
 		if nodeID != excludeID {
@@ -109,7 +106,6 @@ func (r *ConsistentHashRing) GetNodeExcluding(key string, excludeID string) stri
 	return r.nodes[r.sortedNodes[idx]]
 }
 
-// NodeCount returns the number of nodes in the ring.
 func (r *ConsistentHashRing) NodeCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

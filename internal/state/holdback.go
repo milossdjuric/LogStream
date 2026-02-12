@@ -21,7 +21,6 @@ type RegistryHoldbackQueue struct {
 	initialized  bool                         // Has queue been initialized with first message?
 }
 
-// NewRegistryHoldbackQueue creates a new holdback queue
 // deliverFunc is called when a message is ready to be delivered in FIFO order
 func NewRegistryHoldbackQueue(deliverFunc func(*HoldbackMessage) error) *RegistryHoldbackQueue {
 	return &RegistryHoldbackQueue{
@@ -41,17 +40,14 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 
 	seqNum := msg.SequenceNum
 
-	// If this is the first message ever, initialize to this sequence
 	if !hq.initialized {
 		fmt.Printf("[Holdback] First message seq=%d, initializing queue\n", seqNum)
 		hq.nextExpected = seqNum
 		hq.initialized = true
 	}
 
-	// This is the next expected message - deliver immediately
 	if seqNum == hq.nextExpected {
 		fmt.Printf("[Holdback] Delivering registry update seq=%d (in order)\n", seqNum)
-		// Deliver this message
 		if err := hq.deliverFunc(msg); err != nil {
 			return fmt.Errorf("failed to deliver message seq=%d: %w", seqNum, err)
 		}
@@ -59,10 +55,8 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 
 		hq.nextExpected++
 
-		// Check if we can now deliver any buffered messages
 		for {
 			if buffered, ok := hq.buffer[hq.nextExpected]; ok {
-				// We have the next expected message in buffer - deliver it
 				fmt.Printf("[Holdback] Delivering buffered registry update seq=%d\n", hq.nextExpected)
 				if err := hq.deliverFunc(buffered); err != nil {
 					return fmt.Errorf("failed to deliver buffered message seq=%d: %w",
@@ -70,11 +64,9 @@ func (hq *RegistryHoldbackQueue) Enqueue(msg *HoldbackMessage) error {
 				}
 				fmt.Printf("[Holdback] Successfully delivered buffered registry update seq=%d\n", hq.nextExpected)
 
-				// Remove from buffer and advance
 				delete(hq.buffer, hq.nextExpected)
 				hq.nextExpected++
 			} else {
-				// No more consecutive messages available
 				break
 			}
 		}

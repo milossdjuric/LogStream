@@ -217,7 +217,6 @@ func (c *Config) Print() {
 	fmt.Println("================================")
 }
 
-// HasExplicitLeader returns true if an explicit leader address was configured
 func (c *Config) HasExplicitLeader() bool {
 	return c.LeaderAddress != ""
 }

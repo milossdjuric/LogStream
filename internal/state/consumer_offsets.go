@@ -11,14 +11,12 @@ type ConsumerOffsetTracker struct {
 	offsets map[string]map[string]uint64 // consumerID -> topic -> offset
 }
 
-// NewConsumerOffsetTracker creates a new offset tracker
 func NewConsumerOffsetTracker() *ConsumerOffsetTracker {
 	return &ConsumerOffsetTracker{
 		offsets: make(map[string]map[string]uint64),
 	}
 }
 
-// GetOffset returns the current offset for a consumer on a topic
 func (t *ConsumerOffsetTracker) GetOffset(consumerID, topic string) uint64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -29,7 +27,6 @@ func (t *ConsumerOffsetTracker) GetOffset(consumerID, topic string) uint64 {
 	return 0
 }
 
-// SetOffset updates the offset for a consumer on a topic
 func (t *ConsumerOffsetTracker) SetOffset(consumerID, topic string, offset uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -40,7 +37,6 @@ func (t *ConsumerOffsetTracker) SetOffset(consumerID, topic string, offset uint6
 	t.offsets[consumerID][topic] = offset
 }
 
-// RemoveConsumer removes all offsets for a consumer
 func (t *ConsumerOffsetTracker) RemoveConsumer(consumerID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

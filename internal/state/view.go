@@ -16,7 +16,6 @@ type ViewState struct {
 	frozen          bool
 }
 
-// NewViewState creates a new view state
 func NewViewState() *ViewState {
 	return &ViewState{
 		viewNumber:      0,
@@ -25,28 +24,24 @@ func NewViewState() *ViewState {
 	}
 }
 
-// GetViewNumber returns the current view number
 func (v *ViewState) GetViewNumber() int64 {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.viewNumber
 }
 
-// GetLeaderID returns the current leader ID
 func (v *ViewState) GetLeaderID() string {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.leaderID
 }
 
-// IsFrozen returns whether operations are frozen
 func (v *ViewState) IsFrozen() bool {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.frozen
 }
 
-// Freeze freezes operations for view change
 func (v *ViewState) Freeze() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -57,7 +52,6 @@ func (v *ViewState) Freeze() {
 	}
 }
 
-// Unfreeze unfreezes operations after view installation
 func (v *ViewState) Unfreeze() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -77,7 +71,6 @@ func (v *ViewState) InstallView(viewNumber int64, leaderID string, memberIDs []s
 		return fmt.Errorf("cannot install older view %d (current: %d)", viewNumber, v.viewNumber)
 	}
 
-	// Validate that memberIDs and memberAddresses have the same length
 	if len(memberIDs) != len(memberAddresses) {
 		return fmt.Errorf("memberIDs and memberAddresses length mismatch: %d vs %d", 
 			len(memberIDs), len(memberAddresses))
@@ -88,7 +81,6 @@ func (v *ViewState) InstallView(viewNumber int64, leaderID string, memberIDs []s
 	v.memberIDs = make([]string, len(memberIDs))
 	copy(v.memberIDs, memberIDs)
 	
-	// Build memberAddresses map from parallel slices
 	v.memberAddresses = make(map[string]string)
 	for i, id := range memberIDs {
 		v.memberAddresses[id] = memberAddresses[i]

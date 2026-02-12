@@ -20,13 +20,6 @@ type Segment struct {
 	mu         sync.Mutex
 }
 
-// Segment represents a contiguous range of log entries stored in a pair of
-// files: a data file (.seg) containing length-prefixed records and an index
-// file (.idx) that stores positions of each record within the data file.
-
-// newSegment opens or creates the segment data and index files for the given
-// baseOffset. It computes the starting nextOffset from the index file size
-// (each index entry is 8 bytes) and returns an initialized Segment.
 func newSegment(dir string, baseOffset uint64) (*Segment, error) {
 	dataPath := filepath.Join(dir, fmt.Sprintf("%020d.seg", baseOffset))
 	idxPath := filepath.Join(dir, fmt.Sprintf("%020d.idx", baseOffset))
@@ -72,20 +65,15 @@ func newSegment(dir string, baseOffset uint64) (*Segment, error) {
 	}, nil
 }
 
-// Append writes a length-prefixed record to the segment data file, records
-// the position of the written record in the index file, syncs both files to
-// ensure durability, and returns the logical offset assigned to the record.
 func (s *Segment) Append(record []byte) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// get current end position
 	pos, err := s.data.Seek(0, io.SeekEnd)
 	if err != nil {
 		return 0, err
 	}
 
-	// write length prefix
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(record)))
 	if _, err := s.data.Write(lenBuf[:]); err != nil {
@@ -95,14 +83,12 @@ func (s *Segment) Append(record []byte) (uint64, error) {
 		return 0, err
 	}
 
-	// write index entry (position)
 	var posBuf [8]byte
 	binary.BigEndian.PutUint64(posBuf[:], uint64(pos))
 	if _, err := s.idx.Write(posBuf[:]); err != nil {
 		return 0, err
 	}
 
-	// ensure durability of writes
 	if err := s.data.Sync(); err != nil {
 		return 0, err
 	}
@@ -116,10 +102,6 @@ func (s *Segment) Append(record []byte) (uint64, error) {
 	return off, nil
 }
 
-// Read reads the record at the given global offset. It looks up the record's
-// position from the index file (relative to the segment's baseOffset), seeks
-// to that position in the data file, reads the 4-byte length prefix and then
-// the record bytes, and returns them.
 func (s *Segment) Read(offset uint64) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -129,7 +111,6 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 	}
 
 	rel := offset - s.baseOffset
-	// read position from index
 	if _, err := s.idx.Seek(int64(rel*8), io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -154,8 +135,6 @@ func (s *Segment) Read(offset uint64) ([]byte, error) {
 	return buf, nil
 }
 
-// Close closes the segment's data and index files. It returns the first
-// non-nil error encountered when closing the files, if any.
 func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,9 +153,6 @@ func (s *Segment) Close() error {
 	return err2
 }
 
-// RemoveFiles closes any open file handles and removes the segment's data and
-// index files from disk. It ignores errors for missing files but returns any
-// other remove errors.
 func (s *Segment) RemoveFiles() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

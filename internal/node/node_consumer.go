@@ -350,7 +350,6 @@ func (n *Node) streamResultsToConsumer(consumerID, topic string, conn net.Conn) 
 	}
 }
 
-// sendCatchUpData sends all existing data from the topic to a newly subscribed consumer
 func (n *Node) sendCatchUpData(consumerID, topic string, conn net.Conn) {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
@@ -406,7 +405,6 @@ func (n *Node) sendCatchUpData(consumerID, topic string, conn net.Conn) {
 		n.id[:8], consumerID[:8], topic)
 }
 
-// sendNewDataToConsumer checks for new data and sends it to the consumer
 func (n *Node) sendNewDataToConsumer(consumerID, topic string, conn net.Conn) error {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
@@ -550,7 +548,6 @@ func (n *Node) streamResultsToConsumerWithProcessing(consumerID, topic string, c
 	}
 }
 
-// sendCatchUpDataProcessed sends processed catch-up data to consumer
 func (n *Node) sendCatchUpDataProcessed(consumerID, topic string, conn net.Conn) {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
@@ -623,7 +620,6 @@ func (n *Node) sendCatchUpDataProcessed(consumerID, topic string, conn net.Conn)
 		n.id[:8], consumerID[:8], topic)
 }
 
-// sendNewDataToConsumerProcessed sends new data with processing to consumer
 func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net.Conn, windowDuration time.Duration) error {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {
@@ -691,7 +687,6 @@ func (n *Node) sendNewDataToConsumerProcessed(consumerID, topic string, conn net
 	return nil
 }
 
-// sendAnalyticsUpdate sends periodic analytics update to consumer
 func (n *Node) sendAnalyticsUpdate(consumerID, topic string, conn net.Conn, windowDuration time.Duration) error {
 	topicLog, exists := n.GetTopicLog(topic)
 	if !exists {

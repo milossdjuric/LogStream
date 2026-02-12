@@ -119,20 +119,16 @@ func (d *AccrualFailureDetector) calculatePhi(timeSinceLast, mean, stdDev float6
 	return -math.Log10(pLater)
 }
 
-// IsAvailable returns true if the node's suspicion level is below the threshold
 func (d *AccrualFailureDetector) IsAvailable(nodeID string, threshold float64) bool {
 	return d.Status(nodeID) < threshold
 }
 
-// GetSuspects returns a list of nodes that exceed the given phi threshold.
 func (d *AccrualFailureDetector) GetSuspects(threshold float64) []string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
 	var suspects []string
 	for nodeID := range d.nodes {
-		// Only check status if we have enough history to be meaningful
-		// (Status checks history length inside, but we can rely on Status result)
 		phi := d.Status(nodeID)
 		if phi >= threshold {
 			suspects = append(suspects, nodeID)

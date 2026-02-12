@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-	// Simple CLI flags with env var fallback
 	leader := flag.String("leader", os.Getenv("LEADER_ADDRESS"), "Leader address (IP:PORT, e.g. 192.168.1.10:8001)")
 	topic := flag.String("topic", getEnvOrDefault("TOPIC", "logs"), "Topic to produce to")
 	port := flag.Int("port", 8002, "Client TCP listener port (default: 8002)")
@@ -103,7 +102,6 @@ func main() {
 	fmt.Printf("Port:    %d\n", *port)
 	fmt.Println()
 
-	// Create producer
 	producer := client.NewProducerWithOptions(*topic, *leader, client.ProducerOptions{
 		ClientPort:        *port,
 		AdvertiseAddr:     *address,
@@ -113,7 +111,6 @@ func main() {
 		ReconnectDelay:    time.Duration(*reconnectDelay) * time.Second,
 	})
 
-	// Connect to cluster
 	fmt.Println("Connecting to cluster...")
 	if err := producer.Connect(); err != nil {
 		log.Fatalf("Failed to connect: %v\n", err)
@@ -130,11 +127,9 @@ func main() {
 		// Auto mode - send messages at specified rate/interval
 		var tickInterval time.Duration
 		if *interval > 0 {
-			// Use explicit interval (milliseconds)
 			tickInterval = time.Duration(*interval) * time.Millisecond
 			fmt.Printf("Sending messages every %dms (%.2f msg/sec)", *interval, 1000.0/float64(*interval))
 		} else {
-			// Use rate (messages per second)
 			tickInterval = time.Second / time.Duration(*rate)
 			fmt.Printf("Sending messages at %d msg/sec", *rate)
 		}
@@ -150,26 +145,36 @@ func main() {
 			ticker := time.NewTicker(tickInterval)
 			defer ticker.Stop()
 
+			startTime := time.Now()
 			sent := 0
 			for {
 				select {
 				case <-ticker.C:
-				msg := fmt.Sprintf("%s #%d at %s", *message, sent+1, time.Now().Format("15:04:05"))
-				if err := producer.SendData([]byte(msg)); err != nil {
-					log.Printf("Send error: %v\n", err)
-				} else {
+					msg := fmt.Sprintf("%s #%d at %s", *message, sent+1, time.Now().Format("15:04:05"))
+					if err := producer.SendData([]byte(msg)); err != nil {
+						log.Printf("Send error: %v\n", err)
+					} else {
 						sent++
+						seq := producer.GetSequenceNum() - 1
+						fmt.Printf("  [%s] seq=%-4d %s  (%d bytes)\n",
+							time.Now().Format("15:04:05"), seq, msg, len(msg))
 						if sent%10 == 0 || (*count > 0 && sent >= *count) {
-							fmt.Printf("[OK] Sent %d messages\n", sent)
+							elapsed := time.Since(startTime).Seconds()
+							actualRate := float64(sent) / elapsed
+							fmt.Printf("  --- %d sent (%.1f msg/s) ---\n", sent, actualRate)
 						}
 					}
 
 					if *count > 0 && sent >= *count {
-						fmt.Printf("\n[OK] Sent all %d messages\n", sent)
+						elapsed := time.Since(startTime).Seconds()
+						actualRate := float64(sent) / elapsed
+						fmt.Printf("\n  Done: %d sent  (avg %.1f msg/s)\n", sent, actualRate)
 						return
 					}
 				case <-sigChan:
-					fmt.Printf("\n[OK] Sent %d messages total\n", sent)
+					elapsed := time.Since(startTime).Seconds()
+					actualRate := float64(sent) / elapsed
+					fmt.Printf("\n  %d sent total  (avg %.1f msg/s)\n", sent, actualRate)
 					return
 				}
 			}
@@ -197,7 +202,9 @@ func main() {
 					log.Printf("Send error: %v\n", err)
 				} else {
 					sent++
-					fmt.Printf("[OK] Sent message #%d\n", sent)
+					seq := producer.GetSequenceNum() - 1
+					fmt.Printf("  [%s] seq=%-4d Sent #%d  (%d bytes)\n",
+						time.Now().Format("15:04:05"), seq, sent, len(line))
 				}
 			}
 
@@ -223,7 +230,6 @@ func main() {
 	fmt.Println("[OK] Disconnected")
 }
 
-// getEnvOrDefault returns environment variable value or default
 func getEnvOrDefault(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val

@@ -49,7 +49,6 @@ type Consumer struct {
 	stopHeartbeat         chan struct{}
 }
 
-// NewConsumer creates a new consumer
 // If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewConsumer(topic, leaderAddr string) *Consumer {
 	// Generate ID based on topic if no leader address (will discover later)
@@ -85,16 +84,14 @@ type ConsumerOptions struct {
 	ReconnectDelay         time.Duration // Delay between reconnection attempts (default: 5s)
 }
 
-// NewConsumerWithOptions creates a new consumer with options
-// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
+// NewConsumerWithOptions creates a new consumer with options.
 func NewConsumerWithOptions(topic, leaderAddr string, enableProcessing bool) *Consumer {
 	return NewConsumerWithFullOptions(topic, leaderAddr, ConsumerOptions{
 		EnableProcessing: enableProcessing,
 	})
 }
 
-// NewConsumerWithFullOptions creates a new consumer with full options
-// If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
+// NewConsumerWithFullOptions creates a new consumer with full options.
 func NewConsumerWithFullOptions(topic, leaderAddr string, opts ConsumerOptions) *Consumer {
 	c := NewConsumer(topic, leaderAddr)
 	c.enableProcessing = opts.EnableProcessing
@@ -139,7 +136,6 @@ func (c *Consumer) Connect() error {
 
 	time.Sleep(initialDelay)
 
-	// Phase 1: Registration with circuit breaker retry.
 	// Handles transient failures like leader frozen during view change.
 	regDelay := retryDelay
 	var lastErr error
@@ -167,7 +163,6 @@ func (c *Consumer) Connect() error {
 
 	fmt.Printf("[Consumer %s] <- CONSUME_ACK (assigned broker: %s)\n", c.id[:8], c.brokerAddr)
 
-	// Phase 2: Broker subscription with circuit breaker retry.
 	// Handles transient failures like broker not yet having stream assignment.
 	subDelay := retryDelay
 

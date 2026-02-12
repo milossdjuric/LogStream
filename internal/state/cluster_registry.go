@@ -17,7 +17,6 @@ type Registry struct {
 	seqNum  int64                           // monotonic sequence for FIFO ordering
 }
 
-// NewRegistry creates a new registry
 func NewRegistry() *Registry {
 	return &Registry{
 		brokers: make(map[string]*protocol.BrokerInfo),
@@ -37,7 +36,6 @@ func (r *Registry) RegisterBroker(id, address string, isLeader bool) error {
 		LastHeartbeat: time.Now().UnixNano(),
 	}
 
-	// Increment sequence number for replication ordering
 	r.seqNum++
 
 	fmt.Printf("[Registry] Registered broker %s at %s (leader=%v, seq=%d)\n",
@@ -46,7 +44,6 @@ func (r *Registry) RegisterBroker(id, address string, isLeader bool) error {
 	return nil
 }
 
-// RemoveBroker removes a broker from the registry
 func (r *Registry) RemoveBroker(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -62,7 +59,6 @@ func (r *Registry) RemoveBroker(id string) error {
 	return nil
 }
 
-// CheckTimeouts removes brokers that haven't sent heartbeat in timeout period
 // Returns list of removed broker IDs
 func (r *Registry) CheckTimeouts(timeout time.Duration) []string {
 	r.mu.Lock()
@@ -87,7 +83,6 @@ func (r *Registry) CheckTimeouts(timeout time.Duration) []string {
 	return removed
 }
 
-// UpdateHeartbeat updates the last heartbeat timestamp for a broker
 func (r *Registry) UpdateHeartbeat(brokerID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -111,21 +106,18 @@ func (r *Registry) GetBroker(id string) (*protocol.BrokerInfo, bool) {
 	return proto.Clone(broker).(*protocol.BrokerInfo), true
 }
 
-// GetBrokerCount returns the number of registered brokers
 func (r *Registry) GetBrokerCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.brokers)
 }
 
-// GetSequenceNum returns the current registry sequence number
 func (r *Registry) GetSequenceNum() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.seqNum
 }
 
-// ListBrokers returns all broker IDs
 func (r *Registry) ListBrokers() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -145,19 +137,16 @@ func (r *Registry) Serialize() ([]byte, error) {
 	fmt.Printf("[Registry-Serialize] Starting serialization (seq=%d, brokers=%d)\n",
 		r.seqNum, len(r.brokers))
 
-	// Log broker details
 	for id, broker := range r.brokers {
 		fmt.Printf("[Registry-Serialize]   Broker: id=%s addr=%s leader=%v\n",
 			id[:8], broker.Address, broker.IsLeader)
 	}
 
-	// Create protobuf snapshot
 	snapshot := &protocol.RegistrySnapshot{
 		Brokers: r.brokers, // Map is directly compatible
 		SeqNum:  r.seqNum,
 	}
 
-	// Marshal to protobuf bytes
 	data, err := proto.Marshal(snapshot)
 	if err != nil {
 		fmt.Printf("[Registry-Serialize] FAILED: %v\n", err)
@@ -178,7 +167,6 @@ func (r *Registry) Deserialize(data []byte) error {
 	fmt.Printf("[Registry-Deserialize] Starting deserialization (%d bytes)\n", len(data))
 	fmt.Printf("[Registry-Deserialize]   First 64 bytes: %x\n", data[:min(64, len(data))])
 
-	// Unmarshal protobuf snapshot
 	snapshot := &protocol.RegistrySnapshot{}
 	if err := proto.Unmarshal(data, snapshot); err != nil {
 		fmt.Printf("[Registry-Deserialize] FAILED: %v\n", err)
@@ -188,17 +176,14 @@ func (r *Registry) Deserialize(data []byte) error {
 	fmt.Printf("[Registry-Deserialize] Parsed snapshot: seq=%d brokers=%d\n",
 		snapshot.SeqNum, len(snapshot.Brokers))
 
-	// Log received broker details
 	for id, broker := range snapshot.Brokers {
 		fmt.Printf("[Registry-Deserialize]   Broker: id=%s addr=%s leader=%v\n",
 			id[:8], broker.Address, broker.IsLeader)
 	}
 
-	// Initialize map if nil, then copy instead of direct assignment
 	if snapshot.Brokers == nil {
 		r.brokers = make(map[string]*protocol.BrokerInfo)
 	} else {
-		// Make a copy to avoid nil assignment
 		r.brokers = make(map[string]*protocol.BrokerInfo, len(snapshot.Brokers))
 		for id, broker := range snapshot.Brokers {
 			r.brokers[id] = broker
@@ -225,7 +210,6 @@ func (r *Registry) PrintStatus() {
 			role = "Leader"
 		}
 
-		// Convert nanoseconds timestamp to time.Time for display
 		lastSeen := time.Unix(0, broker.LastHeartbeat)
 		fmt.Printf("  %s: %s [%s] (last seen: %s)\n",
 			id[:8],

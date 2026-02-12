@@ -26,9 +26,7 @@ type TopicRecord struct {
 	Data      []byte
 }
 
-// getOrCreateTopicLog returns the in-memory log for a topic, creating it if needed
 func (n *Node) getOrCreateTopicLog(topic string) *storage.MemoryLog {
-	// Try read lock first for common case (log exists)
 	n.dataLogsMu.RLock()
 	if topicLog, exists := n.dataLogs[topic]; exists {
 		n.dataLogsMu.RUnlock()
@@ -36,23 +34,19 @@ func (n *Node) getOrCreateTopicLog(topic string) *storage.MemoryLog {
 	}
 	n.dataLogsMu.RUnlock()
 
-	// Need to create - use write lock
 	n.dataLogsMu.Lock()
 	defer n.dataLogsMu.Unlock()
 
-	// Double-check after acquiring write lock
 	if topicLog, exists := n.dataLogs[topic]; exists {
 		return topicLog
 	}
 
-	// Create new log for this topic
 	topicLog := storage.NewMemoryLog()
 	n.dataLogs[topic] = topicLog
 	fmt.Printf("[%s] Created in-memory log for topic: %s\n", n.id[:8], topic)
 	return topicLog
 }
 
-// GetTopicLog returns the log for a topic (read-only access)
 func (n *Node) GetTopicLog(topic string) (*storage.MemoryLog, bool) {
 	n.dataLogsMu.RLock()
 	defer n.dataLogsMu.RUnlock()
@@ -60,7 +54,6 @@ func (n *Node) GetTopicLog(topic string) (*storage.MemoryLog, bool) {
 	return topicLog, exists
 }
 
-// GetStorageStats returns statistics about stored data per topic
 func (n *Node) GetStorageStats() map[string]StorageStats {
 	n.dataLogsMu.RLock()
 	defer n.dataLogsMu.RUnlock()
@@ -89,8 +82,6 @@ func (n *Node) GetStorageStats() map[string]StorageStats {
 	return stats
 }
 
-// ReadFromTopic reads a record at the given offset from a topic's log
-// Returns timestamp, data, and error
 func (n *Node) ReadFromTopic(topic string, offset uint64) (int64, []byte, error) {
 	n.dataLogsMu.RLock()
 	topicLog, exists := n.dataLogs[topic]
@@ -108,7 +99,6 @@ func (n *Node) ReadFromTopic(topic string, offset uint64) (int64, []byte, error)
 	return storage.DecodeRecord(record)
 }
 
-// ReadRangeFromTopic reads records from startOffset to endOffset (inclusive)
 func (n *Node) ReadRangeFromTopic(topic string, startOffset, endOffset uint64) ([]TopicRecord, error) {
 	n.dataLogsMu.RLock()
 	topicLog, exists := n.dataLogs[topic]
@@ -158,10 +148,8 @@ func (n *Node) handleData(msg *protocol.DataMsg, sender *net.UDPAddr) {
 	fmt.Printf("[%s] <- DATA seq=%d from %s (topic: %s, size: %d bytes)\n",
 		n.id[:8], seqNum, producerID[:8], topic, len(msg.Data))
 
-	// Update producer heartbeat
 	n.clusterState.UpdateProducerHeartbeat(producerID)
 
-	// Create holdback message for FIFO ordering
 	holdbackMsg := &state.DataHoldbackMessage{
 		ProducerID:  producerID,
 		Topic:       topic,
@@ -170,8 +158,6 @@ func (n *Node) handleData(msg *protocol.DataMsg, sender *net.UDPAddr) {
 		Timestamp:   time.Now().UnixNano(),
 	}
 
-	// Enqueue in holdback queue for FIFO delivery
-	// The queue will call storeDataFromHoldback when the message is ready
 	if err := n.dataHoldbackQueue.Enqueue(holdbackMsg); err != nil {
 		log.Printf("[%s] Failed to enqueue data in holdback: %v\n", n.id[:8], err)
 		return
@@ -184,7 +170,6 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 	topic := msg.Topic
 	seqNum := msg.SequenceNum
 
-	// Store data in topic's in-memory log
 	topicLog := n.getOrCreateTopicLog(topic)
 	encoded := storage.EncodeRecord(msg.Timestamp, msg.Data)
 	offset, err := topicLog.Append(encoded)
@@ -196,7 +181,6 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 	fmt.Printf("[%s] Stored data seq=%d at offset=%d for topic: %s (FIFO delivered)\n",
 		n.id[:8], seqNum, offset, topic)
 
-	// Compact log if max records configured
 	if n.config.MaxRecordsPerTopic > 0 {
 		if removed := topicLog.Compact(n.config.MaxRecordsPerTopic); removed > 0 {
 			fmt.Printf("[%s] Compacted topic %s: removed %d old records (keeping %d)\n",
@@ -214,7 +198,6 @@ func (n *Node) storeDataFromHoldback(msg *state.DataHoldbackMessage) error {
 	return nil
 }
 
-// closeAllDataLogs closes all topic logs (called during shutdown)
 func (n *Node) closeAllDataLogs() {
 	n.dataLogsMu.Lock()
 	defer n.dataLogsMu.Unlock()

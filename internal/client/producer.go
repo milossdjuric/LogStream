@@ -50,7 +50,6 @@ type Producer struct {
 	lastLeaderHeartbeatMu sync.RWMutex
 }
 
-// NewProducer creates a new producer
 // If leaderAddr is empty, auto-discovery via broadcast will be used during Connect()
 func NewProducer(topic, leaderAddr string) *Producer {
 	// Generate ID based on topic if no leader address (will discover later)
@@ -81,7 +80,6 @@ func NewProducerWithPort(topic, leaderAddr string, port int, advertiseAddr strin
 	return p
 }
 
-// NewProducerWithOptions creates a new producer with full options.
 func NewProducerWithOptions(topic, leaderAddr string, opts ProducerOptions) *Producer {
 	p := NewProducer(topic, leaderAddr)
 	p.clientPort = opts.ClientPort
@@ -291,9 +289,6 @@ func (p *Producer) SendData(data []byte) error {
 	if err := protocol.WriteUDPMessage(conn, dataMsg, remoteAddr); err != nil {
 		return fmt.Errorf("failed to send data: %w", err)
 	}
-
-	fmt.Printf("[Producer %s] -> DATA seq=%d (topic: %s, size: %d bytes)\n",
-		p.id[:8], currentSeq, p.topic, len(data))
 
 	return nil
 }
@@ -568,7 +563,6 @@ func (p *Producer) handleIncomingConnection(conn net.Conn) {
 	}
 }
 
-// UpdateBrokerAddress updates the broker address for sending data
 // Called when receiving REASSIGN_BROKER from leader
 func (p *Producer) UpdateBrokerAddress(newAddr string) error {
 	p.brokerAddrMu.Lock()

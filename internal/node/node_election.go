@@ -10,27 +10,19 @@ import (
 	"github.com/milossdjuric/logstream/internal/protocol"
 )
 
-// Election-related functions for LCR (LeLann-Chang-Roberts) algorithm
-
-// detectReachableNodesInParallel probes all nodes in parallel to determine which are reachable
-// This is done BEFORE computing the ring to ensure all nodes agree on the ring topology
-// Returns a list of reachable node IDs (including self)
 func (n *Node) detectReachableNodesInParallel() []string {
 	brokers := n.clusterState.ListBrokers()
 
 	fmt.Printf("[Node %s] [Failure-Detection] Probing %d nodes in parallel...\n", n.id[:8], len(brokers))
 
-	// Channel to collect reachable node IDs
 	type result struct {
 		id        string
 		reachable bool
 	}
 	results := make(chan result, len(brokers))
 
-	// Probe all nodes in parallel
 	for _, nodeID := range brokers {
 		go func(id string) {
-			// Self is always reachable
 			if id == n.id {
 				results <- result{id: id, reachable: true}
 				return
@@ -43,7 +35,6 @@ func (n *Node) detectReachableNodesInParallel() []string {
 				return
 			}
 
-			// Quick connectivity test (short timeout)
 			conn, err := net.DialTimeout("tcp", broker.Address, 2*time.Second)
 			if err != nil {
 				fmt.Printf("[Node %s] [Failure-Detection] Node %s at %s: UNREACHABLE (%v)\n",
@@ -59,7 +50,6 @@ func (n *Node) detectReachableNodesInParallel() []string {
 		}(nodeID)
 	}
 
-	// Collect results with timeout
 	reachable := []string{}
 	timeout := time.After(3 * time.Second)
 
@@ -81,24 +71,16 @@ func (n *Node) detectReachableNodesInParallel() []string {
 	return reachable
 }
 
-// computeRingFromFiltered computes the logical ring topology from a filtered list of reachable nodes.
-// ringAddrs is an optional fallback address map (ID -> address) from the election message.
-// This ensures all nodes that run this function with the same input will compute the same ring.
-// IMPORTANT: This function does NOT modify ClusterState. It uses ringAddrs as a read-only
-// fallback for address lookups, preserving view-synchronous invariants (membership changes
-// only happen through VIEW_INSTALL).
 func (n *Node) computeRingFromFiltered(reachableIDs []string, ringAddrs map[string]string) error {
 	if len(reachableIDs) == 0 {
 		return fmt.Errorf("no reachable nodes to form ring")
 	}
 
-	// Sort to create consistent ring order across all nodes
 	sort.Strings(reachableIDs)
 
 	fmt.Printf("[Node %s] [Ring-Computation] Creating ring from %d reachable nodes\n",
 		n.id[:8], len(reachableIDs))
 
-	// Find our position in the ring
 	myPos := -1
 	for i, id := range reachableIDs {
 		if id == n.id {
@@ -111,11 +93,9 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string, ringAddrs map[stri
 		return fmt.Errorf("node %s not in reachable set", n.id[:8])
 	}
 
-	// Compute next node in ring (with wraparound)
 	nextPos := (myPos + 1) % len(reachableIDs)
 	nextID := reachableIDs[nextPos]
 
-	// Get next node's address: try registry first, then ringAddrs fallback
 	nextAddr := ""
 	if broker, ok := n.clusterState.GetBroker(nextID); ok {
 		nextAddr = broker.Address
@@ -140,7 +120,6 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string, ringAddrs map[stri
 	fmt.Printf("[Node %s] [Ring-Computation]   Next node: %s at %s\n",
 		n.id[:8], nextID[:8], n.nextNode)
 
-	// Log full ring for debugging
 	fmt.Printf("[Node %s] [Ring-Computation]   Ring order: ", n.id[:8])
 	for i, id := range reachableIDs {
 		if i == myPos {
@@ -154,7 +133,6 @@ func (n *Node) computeRingFromFiltered(reachableIDs []string, ringAddrs map[stri
 	return nil
 }
 
-// computeRing computes the logical ring topology from the registry
 func (n *Node) computeRing() {
 	brokers := n.clusterState.ListBrokers()
 
@@ -163,10 +141,8 @@ func (n *Node) computeRing() {
 		return
 	}
 
-	// Sort broker IDs to form consistent ring
 	sort.Strings(brokers)
 
-	// Find our position
 	myPos := -1
 	for i, id := range brokers {
 		if id == n.id {
@@ -182,11 +158,9 @@ func (n *Node) computeRing() {
 
 	n.ringPosition = myPos
 
-	// Next node is (myPos + 1) % len(brokers) - wrap around
 	nextPos := (myPos + 1) % len(brokers)
 	nextID := brokers[nextPos]
 
-	// Get next node's address
 	broker, ok := n.clusterState.GetBroker(nextID)
 	if !ok {
 		fmt.Printf("[Ring] ERROR: Next node %s not found in registry!\n", nextID[:8])
@@ -214,10 +188,8 @@ func (n *Node) tryNextAvailableNode(candidateID string, electionID int64, phase 
 		return false
 	}
 
-	// Sort to ensure consistent ring order
 	sort.Strings(ringParticipants)
 
-	// Find our position in the ring
 	myPos := -1
 	for i, id := range ringParticipants {
 		if id == n.id {
@@ -233,12 +205,10 @@ func (n *Node) tryNextAvailableNode(candidateID string, electionID int64, phase 
 
 	fmt.Printf("[Node %s] [Election] Ring has %d nodes, my position: %d/%d\n", n.id[:8], len(ringParticipants), myPos+1, len(ringParticipants))
 
-	// Try each node in the ring starting from the immediate next one
 	for offset := 1; offset < len(ringParticipants); offset++ {
 		nextPos := (myPos + offset) % len(ringParticipants)
 		nextID := ringParticipants[nextPos]
 
-		// Get next node's address: try registry first, then ringAddrs fallback
 		nodeAddr := ""
 		if broker, ok := n.clusterState.GetBroker(nextID); ok {
 			nodeAddr = broker.Address
@@ -252,7 +222,6 @@ func (n *Node) tryNextAvailableNode(candidateID string, electionID int64, phase 
 			continue
 		}
 
-		// Try to connect to this node
 		fmt.Printf("[Node %s] [Election] Trying to connect to next node in ring: %s at %s (position %d/%d)...\n",
 			n.id[:8], nextID[:8], nodeAddr, nextPos+1, len(ringParticipants))
 		conn, err := net.DialTimeout("tcp", nodeAddr, 2*time.Second)
@@ -263,11 +232,9 @@ func (n *Node) tryNextAvailableNode(candidateID string, electionID int64, phase 
 		}
 		conn.Close()
 
-		// Found an available node - update nextNode and retry forwarding
 		fmt.Printf("[Node %s] [Election] Found available node %s at %s in ring\n", n.id[:8], nextID[:8], nodeAddr)
 		n.nextNode = nodeAddr
 
-		// Retry sending the election message with the correct candidate and phase
 		if err := n.sendElectionMessage(candidateID, electionID, phase, ringParticipants, ringAddrs); err != nil {
 			fmt.Printf("[Node %s] [Election] Still failed to send to %s: %v, trying next in ring...\n", n.id[:8], nodeAddr, err)
 			continue
@@ -277,7 +244,6 @@ func (n *Node) tryNextAvailableNode(candidateID string, electionID int64, phase 
 		return true
 	}
 
-	// Tried all nodes in the ring - none are reachable
 	fmt.Printf("[Node %s] [Election] No available nodes found in ring (tried all %d nodes)\n", n.id[:8], len(ringParticipants))
 	return false
 }
@@ -290,12 +256,8 @@ func (n *Node) StartElection() error {
 	fmt.Printf("[Node %s] STARTING LEADER ELECTION (LCR + Failure Detection)\n", n.id[:8])
 	fmt.Printf("[Node %s] ======================================\n\n", n.id[:8])
 
-	// PHASE 0: Freeze operations for view-synchronous recovery
-	// Per spec: "First, all brokers detect the failure and freeze operations"
-	fmt.Printf("[Node %s] Phase 0: Freezing operations for view-synchronous recovery...\n", n.id[:8])
 	n.freezeOperations()
 
-	// Check if we have a synchronized registry
 	brokerCount := n.clusterState.GetBrokerCount()
 	fmt.Printf("[Node %s] Registry has %d brokers in frozen state\n", n.id[:8], brokerCount)
 
@@ -308,7 +270,6 @@ func (n *Node) StartElection() error {
 		return fmt.Errorf("registry empty: no brokers registered")
 	}
 
-	// If only 1 broker (this node), become leader immediately - no election needed
 	if brokerCount == 1 {
 		fmt.Printf("[Node %s] Only 1 broker in registry - becoming leader immediately (sole survivor)\n", n.id[:8])
 		electionID := time.Now().UnixNano()
@@ -319,10 +280,6 @@ func (n *Node) StartElection() error {
 		return nil
 	}
 
-	// PHASE 1: Detect which nodes are reachable (failure detection)
-	// This is the KEY difference from standard LCR: we probe nodes BEFORE computing the ring
-	// This ensures all nodes that detect the same set of reachable nodes will compute the same ring
-	fmt.Printf("\n[Node %s] Phase 1: Detecting reachable nodes (parallel probing)...\n", n.id[:8])
 	reachableNodes := n.detectReachableNodesInParallel()
 
 	if len(reachableNodes) == 0 {
@@ -333,7 +290,6 @@ func (n *Node) StartElection() error {
 	}
 
 	if len(reachableNodes) == 1 {
-		// Only this node is reachable - declare victory immediately
 		fmt.Printf("[Node %s] Only 1 reachable node (me) - declaring victory immediately\n", n.id[:8])
 		electionID := time.Now().UnixNano()
 		n.election.StartElection(n.id, electionID)
@@ -343,10 +299,6 @@ func (n *Node) StartElection() error {
 		return nil
 	}
 
-	// PHASE 2: Compute ring topology from ONLY reachable nodes
-	// Since all reachable nodes detect the same set of reachable nodes,
-	// they will all compute the same ring topology (assuming consistent failure detection)
-	fmt.Printf("\n[Node %s] Phase 2: Computing ring topology from reachable nodes only...\n", n.id[:8])
 	if err := n.computeRingFromFiltered(reachableNodes, nil); err != nil {
 		fmt.Printf("[Node %s] ERROR: Failed to compute ring from reachable nodes: %v\n", n.id[:8], err)
 		n.election.Reset()
@@ -354,7 +306,6 @@ func (n *Node) StartElection() error {
 		return fmt.Errorf("ring computation failed: %w", err)
 	}
 
-	// Verify ring computation succeeded
 	if n.nextNode == "" {
 		fmt.Printf("[Node %s] ERROR: Ring computation failed (nextNode is empty)\n", n.id[:8])
 		n.election.Reset()
@@ -362,15 +313,11 @@ func (n *Node) StartElection() error {
 		return fmt.Errorf("ring computation failed: nextNode is empty")
 	}
 
-	// PHASE 3: Run standard LCR algorithm on the filtered ring
-	fmt.Printf("\n[Node %s] Phase 3: Starting LCR algorithm on filtered ring...\n", n.id[:8])
 	electionID := time.Now().UnixNano()
 	n.election.StartElection(n.id, electionID)
 
-	// Store ring participants and addresses for this election
 	n.election.SetRingParticipants(reachableNodes)
 
-	// Build address map for ring participants so receiving nodes can resolve addresses
 	ringAddrs := make(map[string]string)
 	for _, nodeID := range reachableNodes {
 		if broker, ok := n.clusterState.GetBroker(nodeID); ok {
@@ -379,11 +326,9 @@ func (n *Node) StartElection() error {
 	}
 	fmt.Printf("[Node %s] Built ring address map: %d entries\n", n.id[:8], len(ringAddrs))
 
-	// Send ANNOUNCE message to next node in ring with ring participants and addresses
 	fmt.Printf("[Node %s] Sending ELECTION ANNOUNCE to next node: %s\n", n.id[:8], n.nextNode)
 	err := n.sendElectionMessage(n.id, electionID, protocol.ElectionMessage_ANNOUNCE, reachableNodes, ringAddrs)
 
-	// If send fails despite pre-filtering, use fallback (node may have failed between probe and send)
 	if err != nil {
 		fmt.Printf("[Node %s] [Election-Start] UNEXPECTED: Send to %s failed after pre-filtering: %v\n",
 			n.id[:8], n.nextNode, err)
@@ -395,7 +340,6 @@ func (n *Node) StartElection() error {
 			return nil
 		}
 
-		// No other nodes reachable - we must be the only one left
 		fmt.Printf("[Node %s] [Election-Start] No other nodes reachable - declaring victory\n", n.id[:8])
 		n.election.DeclareVictory(n.id)
 		n.becomeLeaderAfterElection(electionID)
@@ -420,9 +364,6 @@ func (n *Node) StartElection() error {
 	return nil
 }
 
-// sendElectionMessage sends an election message to the next node in the ring
-// ringParticipants is passed through to ensure all nodes use the same ring
-// ringAddrs maps participant IDs to addresses so receivers can register unknown participants
 func (n *Node) sendElectionMessage(candidateID string, electionID int64, phase protocol.ElectionMessage_Phase, ringParticipants []string, ringAddrs map[string]string) error {
 	phaseStr := "ANNOUNCE"
 	if phase == protocol.ElectionMessage_VICTORY {
@@ -441,13 +382,8 @@ func (n *Node) sendElectionMessage(candidateID string, electionID int64, phase p
 		return fmt.Errorf("next node not set - call computeRing() first")
 	}
 
-	// Create election message using protocol helper with ring participants and addresses
-	fmt.Printf("[Node %s] [Election-Send] Creating election message...\n", n.id[:8])
 	msg := protocol.NewElectionMsg(n.id, candidateID, electionID, phase, ringParticipants, ringAddrs)
-	fmt.Printf("[Node %s] [Election-Send] Message created successfully\n", n.id[:8])
 
-	// Connect to next node via TCP
-	fmt.Printf("[Node %s] [Election-Send] Connecting to %s via TCP (timeout: 5s)...\n", n.id[:8], n.nextNode)
 	conn, err := net.DialTimeout("tcp", n.nextNode, 5*time.Second)
 	if err != nil {
 		fmt.Printf("[Node %s] [Election-Send] ERROR: Failed to connect: %v\n", n.id[:8], err)
@@ -459,8 +395,6 @@ func (n *Node) sendElectionMessage(candidateID string, electionID int64, phase p
 		fmt.Printf("[Node %s] [Election-Send] TCP connection to %s closed\n", n.id[:8], n.nextNode)
 	}()
 
-	// Send message
-	fmt.Printf("[Node %s] [Election-Send] Sending ELECTION %s message...\n", n.id[:8], phaseStr)
 	if err := protocol.WriteTCPMessage(conn, msg); err != nil {
 		fmt.Printf("[Node %s] [Election-Send] ERROR: Failed to send message: %v\n", n.id[:8], err)
 		return fmt.Errorf("failed to send ELECTION message: %w", err)
@@ -473,7 +407,6 @@ func (n *Node) sendElectionMessage(candidateID string, electionID int64, phase p
 	return nil
 }
 
-// handleElection routes election messages to the appropriate handler
 func (n *Node) handleElection(msg *protocol.ElectionMsg, sender *net.UDPAddr) {
 	candidateID := msg.CandidateId
 	electionID := msg.ElectionId
@@ -508,9 +441,6 @@ func (n *Node) handleElection(msg *protocol.ElectionMsg, sender *net.UDPAddr) {
 	}
 }
 
-// handleElectionAnnounce processes ANNOUNCE phase messages
-// ringParticipants is the list of nodes participating in this election (from the message)
-// ringAddrs maps participant IDs to their addresses for registering unknown nodes
 func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ringParticipants []string, ringAddrs map[string]string) {
 	fmt.Printf("[Node %s] [Election-Announce] ========================================\n", n.id[:8])
 	fmt.Printf("[Node %s] [Election-Announce] Processing ANNOUNCE message\n", n.id[:8])
@@ -519,15 +449,11 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 	fmt.Printf("[Node %s] [Election-Announce] Election ID: %d\n", n.id[:8], electionID)
 	fmt.Printf("[Node %s] [Election-Announce] Ring participants from message: %d nodes\n", n.id[:8], len(ringParticipants))
 
-	// VIEW-SYNCHRONOUS: Freeze operations when participating in election
-	// All nodes must freeze during view change, not just the initiator
 	if !n.IsFrozen() {
 		fmt.Printf("[Node %s] [Election-Announce] Freezing operations for view-synchronous election\n", n.id[:8])
 		n.freezeOperations()
 	}
 
-	// Use ring participants from the message for consistency
-	// This is the key fix: all nodes use the same ring, not their own computation
 	if len(ringParticipants) < 2 {
 		fmt.Printf("[Node %s] [Election-Announce] WARNING: Ring participants too small (%d)\n", n.id[:8], len(ringParticipants))
 		fmt.Printf("[Node %s] [Election-Announce] Ignoring election - invalid ring, unfreezing\n", n.id[:8])
@@ -535,13 +461,10 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 		return
 	}
 
-	// Store ring participants from the message
 	n.election.SetRingParticipants(ringParticipants)
 
-	// Compute ring from the message's ring participants (NOT from registry).
-	// ringAddrs provides addresses for nodes not in our local registry.
-	// This does NOT modify ClusterState — membership only changes through VIEW_INSTALL.
-	if n.nextNode == "" || true { // Always recompute to use message's ring
+	// Always recompute from message's ring, not registry. Does not modify ClusterState.
+	if n.nextNode == "" || true {
 		fmt.Printf("[Node %s] [Election-Announce] Computing ring from message's participants...\n", n.id[:8])
 		if err := n.computeRingFromFiltered(ringParticipants, ringAddrs); err != nil {
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Cannot compute ring: %v, unfreezing\n", n.id[:8], err)
@@ -552,10 +475,6 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 		fmt.Printf("[Node %s] [Election-Announce] Ring computed, next node: %s\n", n.id[:8], n.nextNode)
 	}
 
-	// LCR Algorithm Logic:
-	// - If candidate ID > my ID: Forward the message with the higher candidate
-	// - If candidate ID < my ID: Replace candidate with my ID and forward
-	// - If candidate ID == my ID: I win, declare victory
 	fmt.Printf("[Node %s] [Election-Announce] Comparing IDs: candidate=%s, mine=%s\n", n.id[:8], candidateID[:8], n.id[:8])
 	if candidateID > n.id {
 		fmt.Printf("[Node %s] [Election-Announce] Candidate %s is HIGHER than %s - FORWARDING\n",
@@ -566,12 +485,9 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Failed to forward: %v\n", n.id[:8], err)
 			log.Printf("[Election] Failed to forward: %v\n", err)
 
-			// Try to find next available node in ring
 			if n.tryNextAvailableNode(candidateID, electionID, protocol.ElectionMessage_ANNOUNCE, ringParticipants, ringAddrs) {
 				fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded to next available node\n", n.id[:8])
 			} else {
-				// No other nodes in the ring are reachable - including the higher candidate
-				// The higher candidate is dead (unreachable), so we are the sole survivor
 				fmt.Printf("[Node %s] [Election-Announce] ======================================\n", n.id[:8])
 				fmt.Printf("[Node %s] [Election-Announce] No nodes reachable (including candidate %s) - I WIN as sole survivor!\n", n.id[:8], candidateID[:8])
 				fmt.Printf("[Node %s] [Election-Announce] ======================================\n\n", n.id[:8])
@@ -584,24 +500,18 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 		}
 
 	} else if candidateID < n.id {
-		// LCR: Replace candidate with my ID and forward (don't drop!)
 		fmt.Printf("[Node %s] [Election-Announce] Candidate %s is LOWER than %s - REPLACING with my ID and FORWARDING\n",
 			n.id[:8], candidateID[:8], n.id[:8])
 
-		// Update election state with my ID as the new candidate
 		n.election.UpdateCandidate(n.id)
 
-		// Forward the election message with my ID as the candidate
 		if err := n.sendElectionMessage(n.id, electionID, protocol.ElectionMessage_ANNOUNCE, ringParticipants, ringAddrs); err != nil {
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Failed to forward with my ID: %v\n", n.id[:8], err)
 			log.Printf("[Election] Failed to forward with my ID: %v\n", err)
 
-			// Try to find next available node in ring
 			if n.tryNextAvailableNode(n.id, electionID, protocol.ElectionMessage_ANNOUNCE, ringParticipants, ringAddrs) {
 				fmt.Printf("[Node %s] [Election-Announce] Successfully forwarded to next available node\n", n.id[:8])
 			} else {
-				// No other nodes are reachable - we are the only available node
-				// Since we're forwarding our own ID and no one else is available, we win!
 				fmt.Printf("[Node %s] [Election-Announce] ======================================\n", n.id[:8])
 				fmt.Printf("[Node %s] [Election-Announce] No other nodes in ring are reachable - I WIN!\n", n.id[:8])
 				fmt.Printf("[Node %s] [Election-Announce] Tried all nodes in ring - all unreachable\n", n.id[:8])
@@ -627,7 +537,6 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 		if err := n.sendElectionMessage(n.id, electionID, protocol.ElectionMessage_VICTORY, ringParticipants, ringAddrs); err != nil {
 			fmt.Printf("[Node %s] [Election-Announce] ERROR: Failed to send VICTORY: %v\n", n.id[:8], err)
 			log.Printf("[Election] Failed to send VICTORY: %v\n", err)
-			// If we can't send VICTORY, try next available node
 			if len(ringParticipants) > 1 {
 				fmt.Printf("[Node %s] [Election-Announce] Trying to send VICTORY to next available node...\n", n.id[:8])
 				n.tryNextAvailableNode(n.id, electionID, protocol.ElectionMessage_VICTORY, ringParticipants, ringAddrs)
@@ -642,9 +551,6 @@ func (n *Node) handleElectionAnnounce(candidateID string, electionID int64, ring
 	fmt.Printf("[Node %s] [Election-Announce] ========================================\n", n.id[:8])
 }
 
-// handleElectionVictory processes VICTORY phase messages
-// ringParticipants is the list of nodes participating in this election (from the message)
-// ringAddrs maps participant IDs to their addresses for registering unknown nodes
 func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringParticipants []string, ringAddrs map[string]string) {
 	fmt.Printf("\n[Node %s] [Election-Victory] ========================================\n", n.id[:8])
 	fmt.Printf("[Node %s] [Election-Victory] Processing VICTORY message\n", n.id[:8])
@@ -662,14 +568,11 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 		return
 	}
 
-	// VIEW-SYNCHRONOUS: Ensure we're frozen during election
-	// (should already be frozen from ANNOUNCE, but ensure consistency)
 	if !n.IsFrozen() {
 		fmt.Printf("[Node %s] [Election-Victory] Freezing operations for view-synchronous election\n", n.id[:8])
 		n.freezeOperations()
 	}
 
-	// Use ring participants from the message
 	if len(ringParticipants) < 2 {
 		fmt.Printf("[Node %s] [Election-Victory] WARNING: Ring participants too small (%d)\n", n.id[:8], len(ringParticipants))
 		fmt.Printf("[Node %s] [Election-Victory] Ignoring VICTORY message, unfreezing\n", n.id[:8])
@@ -677,10 +580,8 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 		return
 	}
 
-	// Compute ring from message's participants (NOT from registry).
-	// ringAddrs provides addresses for nodes not in our local registry.
-	// This does NOT modify ClusterState — membership only changes through VIEW_INSTALL.
-	if n.nextNode == "" || true { // Always use message's ring
+	// Always use message's ring. Does not modify ClusterState.
+	if n.nextNode == "" || true {
 		fmt.Printf("[Node %s] [Election-Victory] Computing ring from message's participants...\n", n.id[:8])
 		if err := n.computeRingFromFiltered(ringParticipants, ringAddrs); err != nil {
 			fmt.Printf("[Node %s] [Election-Victory] ERROR: Cannot compute ring: %v, unfreezing\n", n.id[:8], err)
@@ -694,12 +595,7 @@ func (n *Node) handleElectionVictory(leaderID string, electionID int64, ringPart
 	fmt.Printf("[Election] Accepting %s as new leader\n", leaderID[:8])
 	n.election.AcceptLeader(leaderID)
 
-	// Phi accrual detector will automatically track new leader when heartbeats arrive
-	fmt.Printf("[Node %s] Phi accrual detector ready to track new leader: %s\n", n.id[:8], leaderID[:8])
-
-	// Update stored leader address from registry.
-	// Clear stale address first so VIEW_INSTALL will set the correct one
-	// even if the new leader isn't in our registry yet.
+	// Clear stale address so VIEW_INSTALL sets the correct one.
 	if broker, ok := n.clusterState.GetBroker(leaderID); ok {
 		n.leaderAddress = broker.Address
 		fmt.Printf("[Node %s] Updated stored leader address to: %s\n", n.id[:8], n.leaderAddress)

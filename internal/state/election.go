@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// ElectionState tracks the current election process
 type ElectionState struct {
 	mu sync.RWMutex
 
@@ -25,7 +24,6 @@ type ElectionState struct {
 	ringParticipants []string
 }
 
-// NewElectionState creates a new election state tracker
 func NewElectionState() *ElectionState {
 	return &ElectionState{
 		inProgress: false,
@@ -33,7 +31,6 @@ func NewElectionState() *ElectionState {
 	}
 }
 
-// StartElection initiates a new election
 func (es *ElectionState) StartElection(nodeID string, electionID int64) {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -48,7 +45,6 @@ func (es *ElectionState) StartElection(nodeID string, electionID int64) {
 	fmt.Printf("[Election] Started election %d with candidate %s\n", electionID, nodeID[:8])
 }
 
-// UpdateCandidate updates the current candidate if new one is higher
 func (es *ElectionState) UpdateCandidate(candidateID string) bool {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -57,7 +53,6 @@ func (es *ElectionState) UpdateCandidate(candidateID string) bool {
 		return false
 	}
 
-	// Only update if new candidate has higher ID
 	if candidateID > es.candidateID {
 		fmt.Printf("[Election] New candidate: %s (was: %s)\n", candidateID[:8], es.candidateID[:8])
 		es.candidateID = candidateID
@@ -67,7 +62,6 @@ func (es *ElectionState) UpdateCandidate(candidateID string) bool {
 	return false
 }
 
-// DeclareVictory marks this node as the leader
 func (es *ElectionState) DeclareVictory(nodeID string) {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -79,7 +73,6 @@ func (es *ElectionState) DeclareVictory(nodeID string) {
 	fmt.Printf("[Election] VICTORY! Node %s is the new leader\n", nodeID[:8])
 }
 
-// AcceptLeader marks another node as the leader
 func (es *ElectionState) AcceptLeader(leaderID string) {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -91,42 +84,36 @@ func (es *ElectionState) AcceptLeader(leaderID string) {
 	fmt.Printf("[Election] Accepted %s as new leader\n", leaderID[:8])
 }
 
-// IsInProgress returns whether an election is currently running
 func (es *ElectionState) IsInProgress() bool {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.inProgress
 }
 
-// GetCandidate returns the current candidate ID
 func (es *ElectionState) GetCandidate() string {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.candidateID
 }
 
-// GetElectionID returns the current election ID
 func (es *ElectionState) GetElectionID() int64 {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.electionID
 }
 
-// IsLeaderNode returns whether this node is the leader
 func (es *ElectionState) IsLeaderNode() bool {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.isLeader
 }
 
-// GetLeader returns the current leader ID
 func (es *ElectionState) GetLeader() string {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.winnerID
 }
 
-// Reset clears the election state
 func (es *ElectionState) Reset() {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -140,8 +127,6 @@ func (es *ElectionState) Reset() {
 	fmt.Printf("[Election] State reset\n")
 }
 
-// IsStuck checks if the election has been running for too long (60 seconds)
-// Returns true if election is stuck and should be reset
 func (es *ElectionState) IsStuck() bool {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
@@ -150,7 +135,6 @@ func (es *ElectionState) IsStuck() bool {
 		return false
 	}
 
-	// If election has been running for more than 60 seconds, it's stuck
 	if time.Since(es.startTime) > 60*time.Second {
 		return true
 	}
@@ -158,27 +142,22 @@ func (es *ElectionState) IsStuck() bool {
 	return false
 }
 
-// GetStartTime returns when the election started (for debugging)
 func (es *ElectionState) GetStartTime() time.Time {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
 	return es.startTime
 }
 
-// SetRingParticipants stores the list of ring participants for this election
-// This ensures all nodes in the same election use the same ring topology
 func (es *ElectionState) SetRingParticipants(participants []string) {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 
-	// Make a copy to avoid external modifications
 	es.ringParticipants = make([]string, len(participants))
 	copy(es.ringParticipants, participants)
 
 	fmt.Printf("[Election] Set ring participants: %d nodes\n", len(participants))
 }
 
-// GetRingParticipants returns the list of ring participants for this election
 func (es *ElectionState) GetRingParticipants() []string {
 	es.mu.RLock()
 	defer es.mu.RUnlock()
@@ -187,7 +166,6 @@ func (es *ElectionState) GetRingParticipants() []string {
 		return nil
 	}
 
-	// Return a copy to prevent external modifications
 	result := make([]string, len(es.ringParticipants))
 	copy(result, es.ringParticipants)
 	return result

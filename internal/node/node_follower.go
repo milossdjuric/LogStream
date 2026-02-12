@@ -9,9 +9,6 @@ import (
 	"github.com/milossdjuric/logstream/internal/protocol"
 )
 
-// Follower-related functions for broker node
-
-// runFollowerDuties runs the main follower loop
 func (n *Node) runFollowerDuties() {
 	fmt.Printf("[Follower %s] [Follower-Duties] ========================================\n", n.id[:8])
 	fmt.Printf("[Follower %s] [Follower-Duties] Starting follower duties\n", n.id[:8])
@@ -19,12 +16,9 @@ func (n *Node) runFollowerDuties() {
 	fmt.Printf("[Follower %s] [Follower-Duties] Address: %s\n", n.id[:8], n.address)
 	fmt.Printf("[Follower %s] [Follower-Duties] ========================================\n", n.id[:8])
 
-	// Followers send heartbeats so leader knows they're alive
-	// Increased frequency to 2 seconds to prevent timeout issues
 	heartbeatTicker := time.NewTicker(time.Duration(n.config.FollowerHeartbeatInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 
-	// Send immediate heartbeat right after joining (before waiting for first tick)
 	fmt.Printf("[Follower %s] Sending immediate heartbeat to leader after joining...\n", n.id[:8])
 	if err := n.sendFollowerHeartbeat(); err != nil {
 		log.Printf("[Follower %s] Failed to send initial heartbeat: %v\n", n.id[:8], err)
@@ -32,7 +26,6 @@ func (n *Node) runFollowerDuties() {
 		fmt.Printf("[Follower %s] Initial heartbeat sent successfully\n", n.id[:8])
 	}
 
-	// Check for leader failure periodically
 	failureCheckTicker := time.NewTicker(3 * time.Second)
 	defer failureCheckTicker.Stop()
 
@@ -47,7 +40,6 @@ func (n *Node) runFollowerDuties() {
 
 		select {
 		case <-heartbeatTicker.C:
-			// Send periodic heartbeat
 			if err := n.sendFollowerHeartbeat(); err != nil {
 				log.Printf("[Follower %s] Failed to send heartbeat: %v\n", n.id[:8], err)
 			}
@@ -55,40 +47,30 @@ func (n *Node) runFollowerDuties() {
 		case <-failureCheckTicker.C:
 			checkCount++
 			
-			// === SIMPLIFIED TIMEOUT-BASED FAILURE DETECTION ===
-			// Phi accrual detector disabled for debugging - using simple timeout
-			
 			leaderID := n.getLeaderIDFromRegistry()
 			leaderAddr := n.leaderAddress
 			
-			// Check if we have leader information (either from registry or from JOIN_RESPONSE)
 			if leaderID == "" && leaderAddr == "" {
-				// No leader information at all - skip check
 				fmt.Printf("[Follower %s] No leader information available yet, skipping failure check\n", n.id[:8])
 				continue
 			}
 			
-			// If we have leader address but not in registry yet, we can still detect timeouts
 			if leaderID == "" && leaderAddr != "" {
 				fmt.Printf("[Follower %s] Leader not in registry yet, but tracking heartbeats from %s\n",
 					n.id[:8], leaderAddr)
-				// Continue with timeout check below - we'll use leaderAddr as identifier
-				leaderID = "pending-leader" // Temporary identifier for logging
+				leaderID = "pending-leader"
 			}
 
-			// Simple timeout-based detection
 			n.lastLeaderHeartbeatMu.RLock()
 			timeSinceLastHeartbeat := time.Since(n.lastLeaderHeartbeat)
 			n.lastLeaderHeartbeatMu.RUnlock()
 			
-			// Timeout thresholds (configurable via env vars)
 			suspicionTimeout := time.Duration(n.config.SuspicionTimeout) * time.Second
 			failureTimeout := time.Duration(n.config.FailureTimeout) * time.Second
 			
 			suspected := timeSinceLastHeartbeat > suspicionTimeout && timeSinceLastHeartbeat < failureTimeout
 			failed := timeSinceLastHeartbeat > failureTimeout
 
-			// Log periodic status (every 5th check to avoid spam, ~15 seconds)
 			if checkCount%5 == 0 {
 				fmt.Printf("[Follower %s] ========================================\n", n.id[:8])
 				fmt.Printf("[Follower %s] Timeout-based failure check #%d:\n", n.id[:8], checkCount)
@@ -101,8 +83,7 @@ func (n *Node) runFollowerDuties() {
 				fmt.Printf("[Follower %s] ========================================\n", n.id[:8])
 			}
 
-			if failed {
-				// Leader has failed - simple timeout exceeded
+				if failed {
 				fmt.Printf("\n[Follower %s] ========================================\n", n.id[:8])
 				fmt.Printf("[Follower %s] LEADER FAILURE DETECTED (Timeout)!\n", n.id[:8])
 				fmt.Printf("[Follower %s] No heartbeat for: %v (threshold: %v)\n", n.id[:8], 

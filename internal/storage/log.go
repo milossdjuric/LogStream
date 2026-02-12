@@ -25,7 +25,6 @@ type Log struct {
 	maxSegmentBytes int64
 }
 
-// NewLog creates or opens a log stored in the given directory
 func NewLog(dir string, maxSegmentBytes int64) (*Log, error) {
 	if maxSegmentBytes <= 0 {
 		maxSegmentBytes = DefaultMaxSegmentBytes
@@ -34,7 +33,6 @@ func NewLog(dir string, maxSegmentBytes int64) (*Log, error) {
 		return nil, err
 	}
 
-	// scan for existing segments
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -79,8 +77,7 @@ func (l *Log) Append(record []byte) (uint64, error) {
 	defer l.mu.Unlock()
 
 	last := l.segments[len(l.segments)-1]
-	if last.size+int64(4+len(record)) > l.maxSegmentBytes { //If the active segment would exceed the configured maxSegmentBytes after the write, Append rotates to a new segment starting at the next offset and appends there
-		// rotate
+	if last.size+int64(4+len(record)) > l.maxSegmentBytes {
 		s, err := newSegment(l.dir, last.nextOffset)
 		if err != nil {
 			return 0, err
@@ -104,7 +101,6 @@ func (l *Log) Read(offset uint64) ([]byte, error) {
 	return nil, errors.New("offset not found")
 }
 
-// Close closes all underlying segment files and returns the first non-nil error encountered while closing (if any)
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -117,7 +113,6 @@ func (l *Log) Close() error {
 	return firstErr
 }
 
-// LowestOffset returns the base offset of the first segment, or 0 if there are no segments
 func (l *Log) LowestOffset() uint64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -127,7 +122,6 @@ func (l *Log) LowestOffset() uint64 {
 	return l.segments[0].baseOffset
 }
 
-// HighestOffset returns the highest valid record offset in the log
 func (l *Log) HighestOffset() (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -141,7 +135,6 @@ func (l *Log) HighestOffset() (uint64, error) {
 	return last.nextOffset - 1, nil
 }
 
-// TruncateBefore removes whole segments with last offset < offset
 func (l *Log) TruncateBefore(offset uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -151,7 +144,6 @@ func (l *Log) TruncateBefore(offset uint64) error {
 	var keep []*Segment
 	for _, s := range l.segments {
 		if s.nextOffset-1 < offset {
-			// drop
 			if err := s.RemoveFiles(); err != nil {
 				return err
 			}
@@ -160,7 +152,6 @@ func (l *Log) TruncateBefore(offset uint64) error {
 		}
 	}
 	if len(keep) == 0 {
-		// create new empty segment at offset
 		s, err := newSegment(l.dir, offset)
 		if err != nil {
 			return err
@@ -171,7 +162,6 @@ func (l *Log) TruncateBefore(offset uint64) error {
 	return nil
 }
 
-// CleanupOldLogs removes segments that are entirely older than the retention duration.
 func (l *Log) CleanupOldLogs(retention time.Duration) error {
 	l.mu.RLock()
 	if len(l.segments) == 0 {
