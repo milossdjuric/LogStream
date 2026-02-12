@@ -21,47 +21,71 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Message types enum
 type MessageType int32
 
 const (
-	MessageType_PRODUCE       MessageType = 0 // Producer → Leader (establish relationship)
-	MessageType_DATA          MessageType = 1 // Producer → Broker (stream log chunks)
-	MessageType_CONSUME       MessageType = 2 // Consumer → Leader (subscription request)
-	MessageType_RESULT        MessageType = 3 // Broker → Consumer (computation results)
-	MessageType_REPLICATE     MessageType = 4 // Leader → Brokers (state sync)
-	MessageType_HEARTBEAT     MessageType = 5 // Fault tolerance (3 use cases)
-	MessageType_JOIN          MessageType = 6 // Discovery (UDP broadcast)
-	MessageType_JOIN_RESPONSE MessageType = 7 // Leader response
-	MessageType_ELECTION      MessageType = 8 // LCR algorithm (TCP to ring neighbor)
-	MessageType_NACK          MessageType = 9 // FIFO gap detection
+	MessageType_PRODUCE       MessageType = 0
+	MessageType_DATA          MessageType = 1
+	MessageType_CONSUME       MessageType = 2
+	MessageType_RESULT        MessageType = 3
+	MessageType_REPLICATE     MessageType = 4
+	MessageType_HEARTBEAT     MessageType = 5
+	MessageType_JOIN          MessageType = 6
+	MessageType_JOIN_RESPONSE MessageType = 7
+	MessageType_ELECTION      MessageType = 8
+	MessageType_NACK          MessageType = 9
+	// View-synchronous recovery messages
+	MessageType_STATE_EXCHANGE          MessageType = 10 // New leader requests state from followers
+	MessageType_STATE_EXCHANGE_RESPONSE MessageType = 11 // Followers respond with their last applied sequence
+	MessageType_VIEW_INSTALL            MessageType = 12 // Leader installs new view
+	MessageType_VIEW_INSTALL_ACK        MessageType = 13 // Followers acknowledge view installation
+	// Consumer-to-broker subscription
+	MessageType_SUBSCRIBE MessageType = 14 // Consumer subscribes to broker for results
+	// Replication acknowledgement (passive replication - backups send ACK)
+	MessageType_REPLICATE_ACK MessageType = 15 // Follower acknowledges REPLICATE message
+	// Client broker reassignment notification
+	MessageType_REASSIGN_BROKER MessageType = 16 // Leader notifies client of broker reassignment
 )
 
 // Enum value maps for MessageType.
 var (
 	MessageType_name = map[int32]string{
-		0: "PRODUCE",
-		1: "DATA",
-		2: "CONSUME",
-		3: "RESULT",
-		4: "REPLICATE",
-		5: "HEARTBEAT",
-		6: "JOIN",
-		7: "JOIN_RESPONSE",
-		8: "ELECTION",
-		9: "NACK",
+		0:  "PRODUCE",
+		1:  "DATA",
+		2:  "CONSUME",
+		3:  "RESULT",
+		4:  "REPLICATE",
+		5:  "HEARTBEAT",
+		6:  "JOIN",
+		7:  "JOIN_RESPONSE",
+		8:  "ELECTION",
+		9:  "NACK",
+		10: "STATE_EXCHANGE",
+		11: "STATE_EXCHANGE_RESPONSE",
+		12: "VIEW_INSTALL",
+		13: "VIEW_INSTALL_ACK",
+		14: "SUBSCRIBE",
+		15: "REPLICATE_ACK",
+		16: "REASSIGN_BROKER",
 	}
 	MessageType_value = map[string]int32{
-		"PRODUCE":       0,
-		"DATA":          1,
-		"CONSUME":       2,
-		"RESULT":        3,
-		"REPLICATE":     4,
-		"HEARTBEAT":     5,
-		"JOIN":          6,
-		"JOIN_RESPONSE": 7,
-		"ELECTION":      8,
-		"NACK":          9,
+		"PRODUCE":                 0,
+		"DATA":                    1,
+		"CONSUME":                 2,
+		"RESULT":                  3,
+		"REPLICATE":               4,
+		"HEARTBEAT":               5,
+		"JOIN":                    6,
+		"JOIN_RESPONSE":           7,
+		"ELECTION":                8,
+		"NACK":                    9,
+		"STATE_EXCHANGE":          10,
+		"STATE_EXCHANGE_RESPONSE": 11,
+		"VIEW_INSTALL":            12,
+		"VIEW_INSTALL_ACK":        13,
+		"SUBSCRIBE":               14,
+		"REPLICATE_ACK":           15,
+		"REASSIGN_BROKER":         16,
 	}
 )
 
@@ -92,7 +116,6 @@ func (MessageType) EnumDescriptor() ([]byte, []int) {
 	return file_messages_proto_rawDescGZIP(), []int{0}
 }
 
-// Node types for sender identification
 type NodeType int32
 
 const (
@@ -188,16 +211,15 @@ func (x ElectionMessage_Phase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ElectionMessage_Phase.Descriptor instead.
 func (ElectionMessage_Phase) EnumDescriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{8, 0}
+	return file_messages_proto_rawDescGZIP(), []int{9, 0}
 }
 
-// Common header for all messages (supports FIFO ordering)
 type MessageHeader struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Type          MessageType            `protobuf:"varint,1,opt,name=type,proto3,enum=protocol.MessageType" json:"type,omitempty"`
 	Timestamp     int64                  `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	SenderId      string                 `protobuf:"bytes,3,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
-	SequenceNum   int64                  `protobuf:"varint,4,opt,name=sequence_num,json=sequenceNum,proto3" json:"sequence_num,omitempty"` // For FIFO ordering
+	SequenceNum   int64                  `protobuf:"varint,4,opt,name=sequence_num,json=sequenceNum,proto3" json:"sequence_num,omitempty"`
 	SenderType    NodeType               `protobuf:"varint,5,opt,name=sender_type,json=senderType,proto3,enum=protocol.NodeType" json:"sender_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -268,13 +290,12 @@ func (x *MessageHeader) GetSenderType() NodeType {
 	return NodeType_LEADER
 }
 
-// Producer → Leader: Establish relationship and register
-// Transport: TCP unicast
+// TCP unicast from Producer to Leader
 type ProduceMessage struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Header          *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
 	Topic           string                 `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`
-	ProducerAddress string                 `protobuf:"bytes,3,opt,name=producer_address,json=producerAddress,proto3" json:"producer_address,omitempty"` // Where producer can be reached for assignments
+	ProducerAddress string                 `protobuf:"bytes,3,opt,name=producer_address,json=producerAddress,proto3" json:"producer_address,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -330,13 +351,12 @@ func (x *ProduceMessage) GetProducerAddress() string {
 	return ""
 }
 
-// Producer → Broker: Stream actual log chunks for processing
-// Transport: TCP unicast
+// UDP unicast from Producer to Broker
 type DataMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
 	Topic         string                 `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`
-	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"` // Actual log chunk bytes
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -392,14 +412,12 @@ func (x *DataMessage) GetData() []byte {
 	return nil
 }
 
-// Consumer → Leader: Subscribe to topics
-// Transport: TCP unicast
-// Note: No start_offset - everything is in-memory only
+// TCP unicast from Consumer to Leader
 type ConsumeMessage struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Header          *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
 	Topic           string                 `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`
-	ConsumerAddress string                 `protobuf:"bytes,3,opt,name=consumer_address,json=consumerAddress,proto3" json:"consumer_address,omitempty"` // Where consumer can be reached for results
+	ConsumerAddress string                 `protobuf:"bytes,3,opt,name=consumer_address,json=consumerAddress,proto3" json:"consumer_address,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -455,14 +473,13 @@ func (x *ConsumeMessage) GetConsumerAddress() string {
 	return ""
 }
 
-// Broker → Consumer: Send computation results
-// Transport: TCP unicast
+// TCP unicast from Broker to Consumer
 type ResultMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
 	Topic         string                 `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`
-	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`      // Processed result (e.g., aggregated data)
-	Offset        int64                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"` // Position in result stream (for ordering)
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Offset        int64                  `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -525,18 +542,115 @@ func (x *ResultMessage) GetOffset() int64 {
 	return 0
 }
 
-// Heartbeat for fault tolerance (3 use cases from proposal)
-// Transport: TCP unicast OR UDP multicast (depending on use case)
+// TCP unicast from Consumer to assigned Broker (after CONSUME registration with leader)
+// Consumer connects to the broker assigned to handle their topic
+type SubscribeMessage struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	Header                 *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Topic                  string                 `protobuf:"bytes,2,opt,name=topic,proto3" json:"topic,omitempty"`                                                                    // Topic to subscribe to
+	ConsumerId             string                 `protobuf:"bytes,3,opt,name=consumer_id,json=consumerId,proto3" json:"consumer_id,omitempty"`                                        // Consumer ID (registered with leader)
+	ConsumerAddress        string                 `protobuf:"bytes,4,opt,name=consumer_address,json=consumerAddress,proto3" json:"consumer_address,omitempty"`                         // Consumer address for verification
+	EnableProcessing       bool                   `protobuf:"varint,5,opt,name=enable_processing,json=enableProcessing,proto3" json:"enable_processing,omitempty"`                     // Whether to apply data processing (aggregation, etc.)
+	AnalyticsWindowSeconds int32                  `protobuf:"varint,6,opt,name=analytics_window_seconds,json=analyticsWindowSeconds,proto3" json:"analytics_window_seconds,omitempty"` // 0 = use broker default (60s)
+	AnalyticsIntervalMs    int32                  `protobuf:"varint,7,opt,name=analytics_interval_ms,json=analyticsIntervalMs,proto3" json:"analytics_interval_ms,omitempty"`          // 0 = use broker default (1000ms)
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *SubscribeMessage) Reset() {
+	*x = SubscribeMessage{}
+	mi := &file_messages_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubscribeMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubscribeMessage) ProtoMessage() {}
+
+func (x *SubscribeMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubscribeMessage.ProtoReflect.Descriptor instead.
+func (*SubscribeMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *SubscribeMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *SubscribeMessage) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *SubscribeMessage) GetConsumerId() string {
+	if x != nil {
+		return x.ConsumerId
+	}
+	return ""
+}
+
+func (x *SubscribeMessage) GetConsumerAddress() string {
+	if x != nil {
+		return x.ConsumerAddress
+	}
+	return ""
+}
+
+func (x *SubscribeMessage) GetEnableProcessing() bool {
+	if x != nil {
+		return x.EnableProcessing
+	}
+	return false
+}
+
+func (x *SubscribeMessage) GetAnalyticsWindowSeconds() int32 {
+	if x != nil {
+		return x.AnalyticsWindowSeconds
+	}
+	return 0
+}
+
+func (x *SubscribeMessage) GetAnalyticsIntervalMs() int32 {
+	if x != nil {
+		return x.AnalyticsIntervalMs
+	}
+	return 0
+}
+
+// TCP unicast for Leader to Producer/Consumer
+// TCP unicast for Broker to Leader
+// UDP multicast for Leader to Brokers
 type HeartbeatMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ViewNumber    int64                  `protobuf:"varint,2,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"`         // View number to detect zombie leaders
+	SenderAddress string                 `protobuf:"bytes,3,opt,name=sender_address,json=senderAddress,proto3" json:"sender_address,omitempty"` // TCP address for split-brain resolution
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HeartbeatMessage) Reset() {
 	*x = HeartbeatMessage{}
-	mi := &file_messages_proto_msgTypes[5]
+	mi := &file_messages_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -548,7 +662,7 @@ func (x *HeartbeatMessage) String() string {
 func (*HeartbeatMessage) ProtoMessage() {}
 
 func (x *HeartbeatMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[5]
+	mi := &file_messages_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -561,7 +675,7 @@ func (x *HeartbeatMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatMessage.ProtoReflect.Descriptor instead.
 func (*HeartbeatMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{5}
+	return file_messages_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *HeartbeatMessage) GetHeader() *MessageHeader {
@@ -571,20 +685,32 @@ func (x *HeartbeatMessage) GetHeader() *MessageHeader {
 	return nil
 }
 
-// Join request for discovery
-// Transport: UDP broadcast
-// Note: Removed topics list - leader assigns topics via state replication
+func (x *HeartbeatMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *HeartbeatMessage) GetSenderAddress() string {
+	if x != nil {
+		return x.SenderAddress
+	}
+	return ""
+}
+
+// UDP broadcast from new node to discover cluster
 type JoinMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
-	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"` // TCP address for callbacks
+	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JoinMessage) Reset() {
 	*x = JoinMessage{}
-	mi := &file_messages_proto_msgTypes[6]
+	mi := &file_messages_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -596,7 +722,7 @@ func (x *JoinMessage) String() string {
 func (*JoinMessage) ProtoMessage() {}
 
 func (x *JoinMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[6]
+	mi := &file_messages_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -609,7 +735,7 @@ func (x *JoinMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinMessage.ProtoReflect.Descriptor instead.
 func (*JoinMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{6}
+	return file_messages_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *JoinMessage) GetHeader() *MessageHeader {
@@ -626,8 +752,7 @@ func (x *JoinMessage) GetAddress() string {
 	return ""
 }
 
-// Join response from leader
-// Transport: UDP unicast
+// UDP unicast from Leader to new node
 type JoinResponseMessage struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Header          *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
@@ -641,7 +766,7 @@ type JoinResponseMessage struct {
 
 func (x *JoinResponseMessage) Reset() {
 	*x = JoinResponseMessage{}
-	mi := &file_messages_proto_msgTypes[7]
+	mi := &file_messages_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -653,7 +778,7 @@ func (x *JoinResponseMessage) String() string {
 func (*JoinResponseMessage) ProtoMessage() {}
 
 func (x *JoinResponseMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[7]
+	mi := &file_messages_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -666,7 +791,7 @@ func (x *JoinResponseMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JoinResponseMessage.ProtoReflect.Descriptor instead.
 func (*JoinResponseMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{7}
+	return file_messages_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *JoinResponseMessage) GetHeader() *MessageHeader {
@@ -704,21 +829,26 @@ func (x *JoinResponseMessage) GetBrokerAddresses() []string {
 	return nil
 }
 
-// Leader election using LCR algorithm
-// Transport: TCP unicast to ring neighbor
+// TCP unicast from Broker to next Broker in logical ring
 type ElectionMessage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
-	CandidateId   string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
-	ElectionId    int64                  `protobuf:"varint,3,opt,name=election_id,json=electionId,proto3" json:"election_id,omitempty"`
-	Phase         ElectionMessage_Phase  `protobuf:"varint,4,opt,name=phase,proto3,enum=protocol.ElectionMessage_Phase" json:"phase,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Header      *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	CandidateId string                 `protobuf:"bytes,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	ElectionId  int64                  `protobuf:"varint,3,opt,name=election_id,json=electionId,proto3" json:"election_id,omitempty"`
+	Phase       ElectionMessage_Phase  `protobuf:"varint,4,opt,name=phase,proto3,enum=protocol.ElectionMessage_Phase" json:"phase,omitempty"`
+	// Ring participants for consistent ring computation during election
+	// All nodes use the same filtered list to ensure ring consistency
+	RingParticipants []string `protobuf:"bytes,5,rep,name=ring_participants,json=ringParticipants,proto3" json:"ring_participants,omitempty"`
+	// Address mapping for ring participants (ID -> address)
+	// Allows receiving nodes to register unknown participants before computing ring
+	RingParticipantAddrs map[string]string `protobuf:"bytes,6,rep,name=ring_participant_addrs,json=ringParticipantAddrs,proto3" json:"ring_participant_addrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ElectionMessage) Reset() {
 	*x = ElectionMessage{}
-	mi := &file_messages_proto_msgTypes[8]
+	mi := &file_messages_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -730,7 +860,7 @@ func (x *ElectionMessage) String() string {
 func (*ElectionMessage) ProtoMessage() {}
 
 func (x *ElectionMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[8]
+	mi := &file_messages_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -743,7 +873,7 @@ func (x *ElectionMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ElectionMessage.ProtoReflect.Descriptor instead.
 func (*ElectionMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{8}
+	return file_messages_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ElectionMessage) GetHeader() *MessageHeader {
@@ -774,20 +904,36 @@ func (x *ElectionMessage) GetPhase() ElectionMessage_Phase {
 	return ElectionMessage_ANNOUNCE
 }
 
-// State replication from leader to brokers
-// Transport: UDP multicast (with FIFO ordering)
+func (x *ElectionMessage) GetRingParticipants() []string {
+	if x != nil {
+		return x.RingParticipants
+	}
+	return nil
+}
+
+func (x *ElectionMessage) GetRingParticipantAddrs() map[string]string {
+	if x != nil {
+		return x.RingParticipantAddrs
+	}
+	return nil
+}
+
+// UDP multicast from Leader to Brokers, FIFO ordering
+// View-synchronous: includes view_number to ensure consistency
 type ReplicateMessage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
 	StateSnapshot []byte                 `protobuf:"bytes,2,opt,name=state_snapshot,json=stateSnapshot,proto3" json:"state_snapshot,omitempty"`
-	UpdateType    string                 `protobuf:"bytes,3,opt,name=update_type,json=updateType,proto3" json:"update_type,omitempty"` // "REGISTRY", "MEMBERSHIP", "ASSIGNMENT"
+	UpdateType    string                 `protobuf:"bytes,3,opt,name=update_type,json=updateType,proto3" json:"update_type,omitempty"`
+	ViewNumber    int64                  `protobuf:"varint,4,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"` // View number this update belongs to
+	LeaderId      string                 `protobuf:"bytes,5,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`        // Leader ID that sent this update (for validation)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReplicateMessage) Reset() {
 	*x = ReplicateMessage{}
-	mi := &file_messages_proto_msgTypes[9]
+	mi := &file_messages_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -799,7 +945,7 @@ func (x *ReplicateMessage) String() string {
 func (*ReplicateMessage) ProtoMessage() {}
 
 func (x *ReplicateMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[9]
+	mi := &file_messages_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -812,7 +958,7 @@ func (x *ReplicateMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicateMessage.ProtoReflect.Descriptor instead.
 func (*ReplicateMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{9}
+	return file_messages_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ReplicateMessage) GetHeader() *MessageHeader {
@@ -836,8 +982,100 @@ func (x *ReplicateMessage) GetUpdateType() string {
 	return ""
 }
 
-// NACK for FIFO ordering (missing message detection)
-// Transport: TCP unicast OR UDP multicast
+func (x *ReplicateMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *ReplicateMessage) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+// TCP unicast from Follower to Leader acknowledging REPLICATE
+// Passive replication: backups send acknowledgement (per slides)
+type ReplicateAckMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	AckedSeq      int64                  `protobuf:"varint,2,opt,name=acked_seq,json=ackedSeq,proto3" json:"acked_seq,omitempty"`            // Sequence number being acknowledged
+	ViewNumber    int64                  `protobuf:"varint,3,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"`      // View number of the acknowledged message
+	Success       bool                   `protobuf:"varint,4,opt,name=success,proto3" json:"success,omitempty"`                              // Whether application succeeded
+	ErrorMessage  string                 `protobuf:"bytes,5,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // Error message if failed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicateAckMessage) Reset() {
+	*x = ReplicateAckMessage{}
+	mi := &file_messages_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicateAckMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicateAckMessage) ProtoMessage() {}
+
+func (x *ReplicateAckMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicateAckMessage.ProtoReflect.Descriptor instead.
+func (*ReplicateAckMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ReplicateAckMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *ReplicateAckMessage) GetAckedSeq() int64 {
+	if x != nil {
+		return x.AckedSeq
+	}
+	return 0
+}
+
+func (x *ReplicateAckMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *ReplicateAckMessage) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ReplicateAckMessage) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+// TCP unicast from Broker to specific sender
+// UDP multicast from Broker to all (if sender unknown)
 type NackMessage struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Header         *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
@@ -850,7 +1088,7 @@ type NackMessage struct {
 
 func (x *NackMessage) Reset() {
 	*x = NackMessage{}
-	mi := &file_messages_proto_msgTypes[10]
+	mi := &file_messages_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +1100,7 @@ func (x *NackMessage) String() string {
 func (*NackMessage) ProtoMessage() {}
 
 func (x *NackMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_messages_proto_msgTypes[10]
+	mi := &file_messages_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +1113,7 @@ func (x *NackMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NackMessage.ProtoReflect.Descriptor instead.
 func (*NackMessage) Descriptor() ([]byte, []int) {
-	return file_messages_proto_rawDescGZIP(), []int{10}
+	return file_messages_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *NackMessage) GetHeader() *MessageHeader {
@@ -906,6 +1144,1029 @@ func (x *NackMessage) GetToSeq() int64 {
 	return 0
 }
 
+// BrokerInfo represents a single broker's node state
+type BrokerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	IsLeader      bool                   `protobuf:"varint,3,opt,name=is_leader,json=isLeader,proto3" json:"is_leader,omitempty"`
+	LastHeartbeat int64                  `protobuf:"varint,4,opt,name=last_heartbeat,json=lastHeartbeat,proto3" json:"last_heartbeat,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BrokerInfo) Reset() {
+	*x = BrokerInfo{}
+	mi := &file_messages_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BrokerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BrokerInfo) ProtoMessage() {}
+
+func (x *BrokerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BrokerInfo.ProtoReflect.Descriptor instead.
+func (*BrokerInfo) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *BrokerInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BrokerInfo) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *BrokerInfo) GetIsLeader() bool {
+	if x != nil {
+		return x.IsLeader
+	}
+	return false
+}
+
+func (x *BrokerInfo) GetLastHeartbeat() int64 {
+	if x != nil {
+		return x.LastHeartbeat
+	}
+	return 0
+}
+
+// ProducerInfo represents a producer client (for replication)
+type ProducerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	Topic         string                 `protobuf:"bytes,3,opt,name=topic,proto3" json:"topic,omitempty"`
+	LastHeartbeat int64                  `protobuf:"varint,4,opt,name=last_heartbeat,json=lastHeartbeat,proto3" json:"last_heartbeat,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProducerInfo) Reset() {
+	*x = ProducerInfo{}
+	mi := &file_messages_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProducerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProducerInfo) ProtoMessage() {}
+
+func (x *ProducerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProducerInfo.ProtoReflect.Descriptor instead.
+func (*ProducerInfo) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ProducerInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ProducerInfo) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *ProducerInfo) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ProducerInfo) GetLastHeartbeat() int64 {
+	if x != nil {
+		return x.LastHeartbeat
+	}
+	return 0
+}
+
+// ConsumerInfo represents a consumer client (for replication)
+type ConsumerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	Topics        []string               `protobuf:"bytes,3,rep,name=topics,proto3" json:"topics,omitempty"` // Subscribed topics
+	LastHeartbeat int64                  `protobuf:"varint,4,opt,name=last_heartbeat,json=lastHeartbeat,proto3" json:"last_heartbeat,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConsumerInfo) Reset() {
+	*x = ConsumerInfo{}
+	mi := &file_messages_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConsumerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConsumerInfo) ProtoMessage() {}
+
+func (x *ConsumerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConsumerInfo.ProtoReflect.Descriptor instead.
+func (*ConsumerInfo) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ConsumerInfo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ConsumerInfo) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *ConsumerInfo) GetTopics() []string {
+	if x != nil {
+		return x.Topics
+	}
+	return nil
+}
+
+func (x *ConsumerInfo) GetLastHeartbeat() int64 {
+	if x != nil {
+		return x.LastHeartbeat
+	}
+	return 0
+}
+
+// StreamAssignment tracks one-to-one producer-consumer mapping per topic
+// Each topic has exactly one producer, one consumer, and one broker handling it
+type StreamAssignment struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Topic            string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`                                                 // Topic name (unique key)
+	ProducerId       string                 `protobuf:"bytes,2,opt,name=producer_id,json=producerId,proto3" json:"producer_id,omitempty"`                     // Producer ID owning this stream
+	ConsumerId       string                 `protobuf:"bytes,3,opt,name=consumer_id,json=consumerId,proto3" json:"consumer_id,omitempty"`                     // Consumer ID subscribed to this stream
+	AssignedBrokerId string                 `protobuf:"bytes,4,opt,name=assigned_broker_id,json=assignedBrokerId,proto3" json:"assigned_broker_id,omitempty"` // Broker ID handling this stream
+	BrokerAddress    string                 `protobuf:"bytes,5,opt,name=broker_address,json=brokerAddress,proto3" json:"broker_address,omitempty"`            // Broker address for data flow
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StreamAssignment) Reset() {
+	*x = StreamAssignment{}
+	mi := &file_messages_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamAssignment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamAssignment) ProtoMessage() {}
+
+func (x *StreamAssignment) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamAssignment.ProtoReflect.Descriptor instead.
+func (*StreamAssignment) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StreamAssignment) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *StreamAssignment) GetProducerId() string {
+	if x != nil {
+		return x.ProducerId
+	}
+	return ""
+}
+
+func (x *StreamAssignment) GetConsumerId() string {
+	if x != nil {
+		return x.ConsumerId
+	}
+	return ""
+}
+
+func (x *StreamAssignment) GetAssignedBrokerId() string {
+	if x != nil {
+		return x.AssignedBrokerId
+	}
+	return ""
+}
+
+func (x *StreamAssignment) GetBrokerAddress() string {
+	if x != nil {
+		return x.BrokerAddress
+	}
+	return ""
+}
+
+// Snapshot of the current registry state (brokers only - legacy)
+type RegistrySnapshot struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Brokers       map[string]*BrokerInfo `protobuf:"bytes,1,rep,name=brokers,proto3" json:"brokers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	SeqNum        int64                  `protobuf:"varint,2,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegistrySnapshot) Reset() {
+	*x = RegistrySnapshot{}
+	mi := &file_messages_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegistrySnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegistrySnapshot) ProtoMessage() {}
+
+func (x *RegistrySnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegistrySnapshot.ProtoReflect.Descriptor instead.
+func (*RegistrySnapshot) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RegistrySnapshot) GetBrokers() map[string]*BrokerInfo {
+	if x != nil {
+		return x.Brokers
+	}
+	return nil
+}
+
+func (x *RegistrySnapshot) GetSeqNum() int64 {
+	if x != nil {
+		return x.SeqNum
+	}
+	return 0
+}
+
+// ClusterStateSnapshot includes all state: brokers + producers + consumers + streams
+type ClusterStateSnapshot struct {
+	state         protoimpl.MessageState       `protogen:"open.v1"`
+	Brokers       map[string]*BrokerInfo       `protobuf:"bytes,1,rep,name=brokers,proto3" json:"brokers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Producers     map[string]*ProducerInfo     `protobuf:"bytes,2,rep,name=producers,proto3" json:"producers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Consumers     map[string]*ConsumerInfo     `protobuf:"bytes,3,rep,name=consumers,proto3" json:"consumers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	SeqNum        int64                        `protobuf:"varint,4,opt,name=seq_num,json=seqNum,proto3" json:"seq_num,omitempty"`                                                              // Monotonic sequence for FIFO ordering
+	Streams       map[string]*StreamAssignment `protobuf:"bytes,5,rep,name=streams,proto3" json:"streams,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // Topic -> StreamAssignment (one-to-one mapping)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClusterStateSnapshot) Reset() {
+	*x = ClusterStateSnapshot{}
+	mi := &file_messages_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClusterStateSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClusterStateSnapshot) ProtoMessage() {}
+
+func (x *ClusterStateSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClusterStateSnapshot.ProtoReflect.Descriptor instead.
+func (*ClusterStateSnapshot) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ClusterStateSnapshot) GetBrokers() map[string]*BrokerInfo {
+	if x != nil {
+		return x.Brokers
+	}
+	return nil
+}
+
+func (x *ClusterStateSnapshot) GetProducers() map[string]*ProducerInfo {
+	if x != nil {
+		return x.Producers
+	}
+	return nil
+}
+
+func (x *ClusterStateSnapshot) GetConsumers() map[string]*ConsumerInfo {
+	if x != nil {
+		return x.Consumers
+	}
+	return nil
+}
+
+func (x *ClusterStateSnapshot) GetSeqNum() int64 {
+	if x != nil {
+		return x.SeqNum
+	}
+	return 0
+}
+
+func (x *ClusterStateSnapshot) GetStreams() map[string]*StreamAssignment {
+	if x != nil {
+		return x.Streams
+	}
+	return nil
+}
+
+// LogEntry represents a single entry in a topic log
+// Used for view-synchronous log merge during state exchange
+type LogEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Offset        uint64                 `protobuf:"varint,1,opt,name=offset,proto3" json:"offset,omitempty"`       // Offset in the log
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`            // Raw data
+	Timestamp     int64                  `protobuf:"varint,3,opt,name=timestamp,proto3" json:"timestamp,omitempty"` // Timestamp when entry was created
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogEntry) Reset() {
+	*x = LogEntry{}
+	mi := &file_messages_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogEntry) ProtoMessage() {}
+
+func (x *LogEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
+func (*LogEntry) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *LogEntry) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *LogEntry) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *LogEntry) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+// TopicLogEntries holds all entries for a single topic
+type TopicLogEntries struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Topic         string                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Entries       []*LogEntry            `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopicLogEntries) Reset() {
+	*x = TopicLogEntries{}
+	mi := &file_messages_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopicLogEntries) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopicLogEntries) ProtoMessage() {}
+
+func (x *TopicLogEntries) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopicLogEntries.ProtoReflect.Descriptor instead.
+func (*TopicLogEntries) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *TopicLogEntries) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *TopicLogEntries) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+// TCP unicast from new leader to followers during recovery
+// Requests each broker's last applied sequence number
+type StateExchangeMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ElectionId    int64                  `protobuf:"varint,2,opt,name=election_id,json=electionId,proto3" json:"election_id,omitempty"` // Election ID to correlate responses
+	ViewNumber    int64                  `protobuf:"varint,3,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"` // Proposed new view number
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateExchangeMessage) Reset() {
+	*x = StateExchangeMessage{}
+	mi := &file_messages_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateExchangeMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateExchangeMessage) ProtoMessage() {}
+
+func (x *StateExchangeMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateExchangeMessage.ProtoReflect.Descriptor instead.
+func (*StateExchangeMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *StateExchangeMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *StateExchangeMessage) GetElectionId() int64 {
+	if x != nil {
+		return x.ElectionId
+	}
+	return 0
+}
+
+func (x *StateExchangeMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+// TCP unicast from followers to new leader during recovery
+// Reports broker's last applied sequence number
+type StateExchangeResponseMessage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Header           *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ElectionId       int64                  `protobuf:"varint,2,opt,name=election_id,json=electionId,proto3" json:"election_id,omitempty"`                                                                           // Election ID being responded to
+	LastAppliedSeq   int64                  `protobuf:"varint,3,opt,name=last_applied_seq,json=lastAppliedSeq,proto3" json:"last_applied_seq,omitempty"`                                                             // Last successfully applied sequence number
+	StateSnapshot    []byte                 `protobuf:"bytes,4,opt,name=state_snapshot,json=stateSnapshot,proto3" json:"state_snapshot,omitempty"`                                                                   // Optional: full state snapshot for recovery
+	HasCompleteState bool                   `protobuf:"varint,5,opt,name=has_complete_state,json=hasCompleteState,proto3" json:"has_complete_state,omitempty"`                                                       // Whether state_snapshot contains valid data
+	LogOffsets       map[string]uint64      `protobuf:"bytes,6,rep,name=log_offsets,json=logOffsets,proto3" json:"log_offsets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // DEPRECATED: kept for backward compatibility
+	// View-synchronous log merge: full log entries instead of just offsets
+	// This ensures no acknowledged data is lost during view change
+	TopicLogs     []*TopicLogEntries `protobuf:"bytes,7,rep,name=topic_logs,json=topicLogs,proto3" json:"topic_logs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateExchangeResponseMessage) Reset() {
+	*x = StateExchangeResponseMessage{}
+	mi := &file_messages_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateExchangeResponseMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateExchangeResponseMessage) ProtoMessage() {}
+
+func (x *StateExchangeResponseMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateExchangeResponseMessage.ProtoReflect.Descriptor instead.
+func (*StateExchangeResponseMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *StateExchangeResponseMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *StateExchangeResponseMessage) GetElectionId() int64 {
+	if x != nil {
+		return x.ElectionId
+	}
+	return 0
+}
+
+func (x *StateExchangeResponseMessage) GetLastAppliedSeq() int64 {
+	if x != nil {
+		return x.LastAppliedSeq
+	}
+	return 0
+}
+
+func (x *StateExchangeResponseMessage) GetStateSnapshot() []byte {
+	if x != nil {
+		return x.StateSnapshot
+	}
+	return nil
+}
+
+func (x *StateExchangeResponseMessage) GetHasCompleteState() bool {
+	if x != nil {
+		return x.HasCompleteState
+	}
+	return false
+}
+
+func (x *StateExchangeResponseMessage) GetLogOffsets() map[string]uint64 {
+	if x != nil {
+		return x.LogOffsets
+	}
+	return nil
+}
+
+func (x *StateExchangeResponseMessage) GetTopicLogs() []*TopicLogEntries {
+	if x != nil {
+		return x.TopicLogs
+	}
+	return nil
+}
+
+// TCP unicast from leader to all brokers to install new view
+type ViewInstallMessage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Header           *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ViewNumber       int64                  `protobuf:"varint,2,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"`                                                                                               // New view number (monotonically increasing)
+	AgreedSeq        int64                  `protobuf:"varint,3,opt,name=agreed_seq,json=agreedSeq,proto3" json:"agreed_seq,omitempty"`                                                                                                  // Majority-agreed sequence number
+	StateSnapshot    []byte                 `protobuf:"bytes,4,opt,name=state_snapshot,json=stateSnapshot,proto3" json:"state_snapshot,omitempty"`                                                                                       // Agreed state to synchronize
+	MemberIds        []string               `protobuf:"bytes,5,rep,name=member_ids,json=memberIds,proto3" json:"member_ids,omitempty"`                                                                                                   // Active members in this view
+	MemberAddresses  []string               `protobuf:"bytes,6,rep,name=member_addresses,json=memberAddresses,proto3" json:"member_addresses,omitempty"`                                                                                 // Addresses of active members
+	AgreedLogOffsets map[string]uint64      `protobuf:"bytes,7,rep,name=agreed_log_offsets,json=agreedLogOffsets,proto3" json:"agreed_log_offsets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"` // DEPRECATED: kept for backward compatibility
+	// View-synchronous log merge: merged log entries (union of all logs)
+	// Ensures no acknowledged data is lost - all entries from any member are preserved
+	MergedLogs    []*TopicLogEntries `protobuf:"bytes,8,rep,name=merged_logs,json=mergedLogs,proto3" json:"merged_logs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ViewInstallMessage) Reset() {
+	*x = ViewInstallMessage{}
+	mi := &file_messages_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ViewInstallMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ViewInstallMessage) ProtoMessage() {}
+
+func (x *ViewInstallMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ViewInstallMessage.ProtoReflect.Descriptor instead.
+func (*ViewInstallMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ViewInstallMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *ViewInstallMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *ViewInstallMessage) GetAgreedSeq() int64 {
+	if x != nil {
+		return x.AgreedSeq
+	}
+	return 0
+}
+
+func (x *ViewInstallMessage) GetStateSnapshot() []byte {
+	if x != nil {
+		return x.StateSnapshot
+	}
+	return nil
+}
+
+func (x *ViewInstallMessage) GetMemberIds() []string {
+	if x != nil {
+		return x.MemberIds
+	}
+	return nil
+}
+
+func (x *ViewInstallMessage) GetMemberAddresses() []string {
+	if x != nil {
+		return x.MemberAddresses
+	}
+	return nil
+}
+
+func (x *ViewInstallMessage) GetAgreedLogOffsets() map[string]uint64 {
+	if x != nil {
+		return x.AgreedLogOffsets
+	}
+	return nil
+}
+
+func (x *ViewInstallMessage) GetMergedLogs() []*TopicLogEntries {
+	if x != nil {
+		return x.MergedLogs
+	}
+	return nil
+}
+
+// TCP unicast from brokers to leader acknowledging view installation
+type ViewInstallAckMessage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Header        *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ViewNumber    int64                  `protobuf:"varint,2,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"`      // View number being acknowledged
+	Success       bool                   `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`                              // Whether installation succeeded
+	ErrorMessage  string                 `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // Error message if failed
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ViewInstallAckMessage) Reset() {
+	*x = ViewInstallAckMessage{}
+	mi := &file_messages_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ViewInstallAckMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ViewInstallAckMessage) ProtoMessage() {}
+
+func (x *ViewInstallAckMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ViewInstallAckMessage.ProtoReflect.Descriptor instead.
+func (*ViewInstallAckMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *ViewInstallAckMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *ViewInstallAckMessage) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *ViewInstallAckMessage) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ViewInstallAckMessage) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+// ViewInfo tracks the current view state (for replication)
+type ViewInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ViewNumber    int64                  `protobuf:"varint,1,opt,name=view_number,json=viewNumber,proto3" json:"view_number,omitempty"` // Monotonically increasing view number
+	LeaderId      string                 `protobuf:"bytes,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`        // Current leader ID
+	MemberIds     []string               `protobuf:"bytes,3,rep,name=member_ids,json=memberIds,proto3" json:"member_ids,omitempty"`     // All active member IDs
+	AgreedSeq     int64                  `protobuf:"varint,4,opt,name=agreed_seq,json=agreedSeq,proto3" json:"agreed_seq,omitempty"`    // Last majority-agreed sequence number
+	CreatedAt     int64                  `protobuf:"varint,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`    // Timestamp when view was created
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ViewInfo) Reset() {
+	*x = ViewInfo{}
+	mi := &file_messages_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ViewInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ViewInfo) ProtoMessage() {}
+
+func (x *ViewInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ViewInfo.ProtoReflect.Descriptor instead.
+func (*ViewInfo) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *ViewInfo) GetViewNumber() int64 {
+	if x != nil {
+		return x.ViewNumber
+	}
+	return 0
+}
+
+func (x *ViewInfo) GetLeaderId() string {
+	if x != nil {
+		return x.LeaderId
+	}
+	return ""
+}
+
+func (x *ViewInfo) GetMemberIds() []string {
+	if x != nil {
+		return x.MemberIds
+	}
+	return nil
+}
+
+func (x *ViewInfo) GetAgreedSeq() int64 {
+	if x != nil {
+		return x.AgreedSeq
+	}
+	return 0
+}
+
+func (x *ViewInfo) GetCreatedAt() int64 {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return 0
+}
+
+// TCP unicast from Leader to Producer/Consumer when broker assignment changes
+// Sent after broker failure or during rebalancing
+type ReassignBrokerMessage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Header           *MessageHeader         `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	ClientId         string                 `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`                               // Producer or Consumer ID
+	ClientType       NodeType               `protobuf:"varint,3,opt,name=client_type,json=clientType,proto3,enum=protocol.NodeType" json:"client_type,omitempty"` // PRODUCER or CONSUMER
+	Topic            string                 `protobuf:"bytes,4,opt,name=topic,proto3" json:"topic,omitempty"`                                                     // Topic being reassigned
+	NewBrokerAddress string                 `protobuf:"bytes,5,opt,name=new_broker_address,json=newBrokerAddress,proto3" json:"new_broker_address,omitempty"`     // New broker IP:PORT
+	NewBrokerId      string                 `protobuf:"bytes,6,opt,name=new_broker_id,json=newBrokerId,proto3" json:"new_broker_id,omitempty"`                    // New broker ID
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ReassignBrokerMessage) Reset() {
+	*x = ReassignBrokerMessage{}
+	mi := &file_messages_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReassignBrokerMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReassignBrokerMessage) ProtoMessage() {}
+
+func (x *ReassignBrokerMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_messages_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReassignBrokerMessage.ProtoReflect.Descriptor instead.
+func (*ReassignBrokerMessage) Descriptor() ([]byte, []int) {
+	return file_messages_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ReassignBrokerMessage) GetHeader() *MessageHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *ReassignBrokerMessage) GetClientId() string {
+	if x != nil {
+		return x.ClientId
+	}
+	return ""
+}
+
+func (x *ReassignBrokerMessage) GetClientType() NodeType {
+	if x != nil {
+		return x.ClientType
+	}
+	return NodeType_LEADER
+}
+
+func (x *ReassignBrokerMessage) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ReassignBrokerMessage) GetNewBrokerAddress() string {
+	if x != nil {
+		return x.NewBrokerAddress
+	}
+	return ""
+}
+
+func (x *ReassignBrokerMessage) GetNewBrokerId() string {
+	if x != nil {
+		return x.NewBrokerId
+	}
+	return ""
+}
+
 var File_messages_proto protoreflect.FileDescriptor
 
 const file_messages_proto_rawDesc = "" +
@@ -934,9 +2195,21 @@ const file_messages_proto_rawDesc = "" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x16\n" +
-	"\x06offset\x18\x04 \x01(\x03R\x06offset\"C\n" +
+	"\x06offset\x18\x04 \x01(\x03R\x06offset\"\xc0\x02\n" +
+	"\x10SubscribeMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x14\n" +
+	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x1f\n" +
+	"\vconsumer_id\x18\x03 \x01(\tR\n" +
+	"consumerId\x12)\n" +
+	"\x10consumer_address\x18\x04 \x01(\tR\x0fconsumerAddress\x12+\n" +
+	"\x11enable_processing\x18\x05 \x01(\bR\x10enableProcessing\x128\n" +
+	"\x18analytics_window_seconds\x18\x06 \x01(\x05R\x16analyticsWindowSeconds\x122\n" +
+	"\x15analytics_interval_ms\x18\a \x01(\x05R\x13analyticsIntervalMs\"\x8b\x01\n" +
 	"\x10HeartbeatMessage\x12/\n" +
-	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\"X\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
+	"\vview_number\x18\x02 \x01(\x03R\n" +
+	"viewNumber\x12%\n" +
+	"\x0esender_address\x18\x03 \x01(\tR\rsenderAddress\"X\n" +
 	"\vJoinMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xdb\x01\n" +
@@ -945,26 +2218,156 @@ const file_messages_proto_rawDesc = "" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12%\n" +
 	"\x0eleader_address\x18\x03 \x01(\tR\rleaderAddress\x12'\n" +
 	"\x0fmulticast_group\x18\x04 \x01(\tR\x0emulticastGroup\x12)\n" +
-	"\x10broker_addresses\x18\x05 \x03(\tR\x0fbrokerAddresses\"\xe1\x01\n" +
+	"\x10broker_addresses\x18\x05 \x03(\tR\x0fbrokerAddresses\"\xc2\x03\n" +
 	"\x0fElectionMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12!\n" +
 	"\fcandidate_id\x18\x02 \x01(\tR\vcandidateId\x12\x1f\n" +
 	"\velection_id\x18\x03 \x01(\x03R\n" +
 	"electionId\x125\n" +
-	"\x05phase\x18\x04 \x01(\x0e2\x1f.protocol.ElectionMessage.PhaseR\x05phase\"\"\n" +
+	"\x05phase\x18\x04 \x01(\x0e2\x1f.protocol.ElectionMessage.PhaseR\x05phase\x12+\n" +
+	"\x11ring_participants\x18\x05 \x03(\tR\x10ringParticipants\x12i\n" +
+	"\x16ring_participant_addrs\x18\x06 \x03(\v23.protocol.ElectionMessage.RingParticipantAddrsEntryR\x14ringParticipantAddrs\x1aG\n" +
+	"\x19RingParticipantAddrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +
 	"\x05Phase\x12\f\n" +
 	"\bANNOUNCE\x10\x00\x12\v\n" +
-	"\aVICTORY\x10\x01\"\x8b\x01\n" +
+	"\aVICTORY\x10\x01\"\xc9\x01\n" +
 	"\x10ReplicateMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12%\n" +
 	"\x0estate_snapshot\x18\x02 \x01(\fR\rstateSnapshot\x12\x1f\n" +
 	"\vupdate_type\x18\x03 \x01(\tR\n" +
-	"updateType\"\x9a\x01\n" +
+	"updateType\x12\x1f\n" +
+	"\vview_number\x18\x04 \x01(\x03R\n" +
+	"viewNumber\x12\x1b\n" +
+	"\tleader_id\x18\x05 \x01(\tR\bleaderId\"\xc3\x01\n" +
+	"\x13ReplicateAckMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1b\n" +
+	"\tacked_seq\x18\x02 \x01(\x03R\backedSeq\x12\x1f\n" +
+	"\vview_number\x18\x03 \x01(\x03R\n" +
+	"viewNumber\x12\x18\n" +
+	"\asuccess\x18\x04 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x05 \x01(\tR\ferrorMessage\"\x9a\x01\n" +
 	"\vNackMessage\x12/\n" +
 	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12(\n" +
 	"\x10target_sender_id\x18\x02 \x01(\tR\x0etargetSenderId\x12\x19\n" +
 	"\bfrom_seq\x18\x03 \x01(\x03R\afromSeq\x12\x15\n" +
-	"\x06to_seq\x18\x04 \x01(\x03R\x05toSeq*\x90\x01\n" +
+	"\x06to_seq\x18\x04 \x01(\x03R\x05toSeq\"z\n" +
+	"\n" +
+	"BrokerInfo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x1b\n" +
+	"\tis_leader\x18\x03 \x01(\bR\bisLeader\x12%\n" +
+	"\x0elast_heartbeat\x18\x04 \x01(\x03R\rlastHeartbeat\"u\n" +
+	"\fProducerInfo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x14\n" +
+	"\x05topic\x18\x03 \x01(\tR\x05topic\x12%\n" +
+	"\x0elast_heartbeat\x18\x04 \x01(\x03R\rlastHeartbeat\"w\n" +
+	"\fConsumerInfo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x16\n" +
+	"\x06topics\x18\x03 \x03(\tR\x06topics\x12%\n" +
+	"\x0elast_heartbeat\x18\x04 \x01(\x03R\rlastHeartbeat\"\xbf\x01\n" +
+	"\x10StreamAssignment\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12\x1f\n" +
+	"\vproducer_id\x18\x02 \x01(\tR\n" +
+	"producerId\x12\x1f\n" +
+	"\vconsumer_id\x18\x03 \x01(\tR\n" +
+	"consumerId\x12,\n" +
+	"\x12assigned_broker_id\x18\x04 \x01(\tR\x10assignedBrokerId\x12%\n" +
+	"\x0ebroker_address\x18\x05 \x01(\tR\rbrokerAddress\"\xc0\x01\n" +
+	"\x10RegistrySnapshot\x12A\n" +
+	"\abrokers\x18\x01 \x03(\v2'.protocol.RegistrySnapshot.BrokersEntryR\abrokers\x12\x17\n" +
+	"\aseq_num\x18\x02 \x01(\x03R\x06seqNum\x1aP\n" +
+	"\fBrokersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.protocol.BrokerInfoR\x05value:\x028\x01\"\xad\x05\n" +
+	"\x14ClusterStateSnapshot\x12E\n" +
+	"\abrokers\x18\x01 \x03(\v2+.protocol.ClusterStateSnapshot.BrokersEntryR\abrokers\x12K\n" +
+	"\tproducers\x18\x02 \x03(\v2-.protocol.ClusterStateSnapshot.ProducersEntryR\tproducers\x12K\n" +
+	"\tconsumers\x18\x03 \x03(\v2-.protocol.ClusterStateSnapshot.ConsumersEntryR\tconsumers\x12\x17\n" +
+	"\aseq_num\x18\x04 \x01(\x03R\x06seqNum\x12E\n" +
+	"\astreams\x18\x05 \x03(\v2+.protocol.ClusterStateSnapshot.StreamsEntryR\astreams\x1aP\n" +
+	"\fBrokersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12*\n" +
+	"\x05value\x18\x02 \x01(\v2\x14.protocol.BrokerInfoR\x05value:\x028\x01\x1aT\n" +
+	"\x0eProducersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
+	"\x05value\x18\x02 \x01(\v2\x16.protocol.ProducerInfoR\x05value:\x028\x01\x1aT\n" +
+	"\x0eConsumersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
+	"\x05value\x18\x02 \x01(\v2\x16.protocol.ConsumerInfoR\x05value:\x028\x01\x1aV\n" +
+	"\fStreamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.protocol.StreamAssignmentR\x05value:\x028\x01\"T\n" +
+	"\bLogEntry\x12\x16\n" +
+	"\x06offset\x18\x01 \x01(\x04R\x06offset\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1c\n" +
+	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\"U\n" +
+	"\x0fTopicLogEntries\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12,\n" +
+	"\aentries\x18\x02 \x03(\v2\x12.protocol.LogEntryR\aentries\"\x89\x01\n" +
+	"\x14StateExchangeMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
+	"\velection_id\x18\x02 \x01(\x03R\n" +
+	"electionId\x12\x1f\n" +
+	"\vview_number\x18\x03 \x01(\x03R\n" +
+	"viewNumber\"\xc1\x03\n" +
+	"\x1cStateExchangeResponseMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
+	"\velection_id\x18\x02 \x01(\x03R\n" +
+	"electionId\x12(\n" +
+	"\x10last_applied_seq\x18\x03 \x01(\x03R\x0elastAppliedSeq\x12%\n" +
+	"\x0estate_snapshot\x18\x04 \x01(\fR\rstateSnapshot\x12,\n" +
+	"\x12has_complete_state\x18\x05 \x01(\bR\x10hasCompleteState\x12W\n" +
+	"\vlog_offsets\x18\x06 \x03(\v26.protocol.StateExchangeResponseMessage.LogOffsetsEntryR\n" +
+	"logOffsets\x128\n" +
+	"\n" +
+	"topic_logs\x18\a \x03(\v2\x19.protocol.TopicLogEntriesR\ttopicLogs\x1a=\n" +
+	"\x0fLogOffsetsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xd9\x03\n" +
+	"\x12ViewInstallMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
+	"\vview_number\x18\x02 \x01(\x03R\n" +
+	"viewNumber\x12\x1d\n" +
+	"\n" +
+	"agreed_seq\x18\x03 \x01(\x03R\tagreedSeq\x12%\n" +
+	"\x0estate_snapshot\x18\x04 \x01(\fR\rstateSnapshot\x12\x1d\n" +
+	"\n" +
+	"member_ids\x18\x05 \x03(\tR\tmemberIds\x12)\n" +
+	"\x10member_addresses\x18\x06 \x03(\tR\x0fmemberAddresses\x12`\n" +
+	"\x12agreed_log_offsets\x18\a \x03(\v22.protocol.ViewInstallMessage.AgreedLogOffsetsEntryR\x10agreedLogOffsets\x12:\n" +
+	"\vmerged_logs\x18\b \x03(\v2\x19.protocol.TopicLogEntriesR\n" +
+	"mergedLogs\x1aC\n" +
+	"\x15AgreedLogOffsetsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xa8\x01\n" +
+	"\x15ViewInstallAckMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1f\n" +
+	"\vview_number\x18\x02 \x01(\x03R\n" +
+	"viewNumber\x12\x18\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\xa5\x01\n" +
+	"\bViewInfo\x12\x1f\n" +
+	"\vview_number\x18\x01 \x01(\x03R\n" +
+	"viewNumber\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\tR\bleaderId\x12\x1d\n" +
+	"\n" +
+	"member_ids\x18\x03 \x03(\tR\tmemberIds\x12\x1d\n" +
+	"\n" +
+	"agreed_seq\x18\x04 \x01(\x03R\tagreedSeq\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x05 \x01(\x03R\tcreatedAt\"\x82\x02\n" +
+	"\x15ReassignBrokerMessage\x12/\n" +
+	"\x06header\x18\x01 \x01(\v2\x17.protocol.MessageHeaderR\x06header\x12\x1b\n" +
+	"\tclient_id\x18\x02 \x01(\tR\bclientId\x123\n" +
+	"\vclient_type\x18\x03 \x01(\x0e2\x12.protocol.NodeTypeR\n" +
+	"clientType\x12\x14\n" +
+	"\x05topic\x18\x04 \x01(\tR\x05topic\x12,\n" +
+	"\x12new_broker_address\x18\x05 \x01(\tR\x10newBrokerAddress\x12\"\n" +
+	"\rnew_broker_id\x18\x06 \x01(\tR\vnewBrokerId*\xa0\x02\n" +
 	"\vMessageType\x12\v\n" +
 	"\aPRODUCE\x10\x00\x12\b\n" +
 	"\x04DATA\x10\x01\x12\v\n" +
@@ -976,7 +2379,15 @@ const file_messages_proto_rawDesc = "" +
 	"\x04JOIN\x10\x06\x12\x11\n" +
 	"\rJOIN_RESPONSE\x10\a\x12\f\n" +
 	"\bELECTION\x10\b\x12\b\n" +
-	"\x04NACK\x10\t*>\n" +
+	"\x04NACK\x10\t\x12\x12\n" +
+	"\x0eSTATE_EXCHANGE\x10\n" +
+	"\x12\x1b\n" +
+	"\x17STATE_EXCHANGE_RESPONSE\x10\v\x12\x10\n" +
+	"\fVIEW_INSTALL\x10\f\x12\x14\n" +
+	"\x10VIEW_INSTALL_ACK\x10\r\x12\r\n" +
+	"\tSUBSCRIBE\x10\x0e\x12\x11\n" +
+	"\rREPLICATE_ACK\x10\x0f\x12\x13\n" +
+	"\x0fREASSIGN_BROKER\x10\x10*>\n" +
 	"\bNodeType\x12\n" +
 	"\n" +
 	"\x06LEADER\x10\x00\x12\n" +
@@ -999,22 +2410,46 @@ func file_messages_proto_rawDescGZIP() []byte {
 }
 
 var file_messages_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_messages_proto_goTypes = []any{
-	(MessageType)(0),            // 0: protocol.MessageType
-	(NodeType)(0),               // 1: protocol.NodeType
-	(ElectionMessage_Phase)(0),  // 2: protocol.ElectionMessage.Phase
-	(*MessageHeader)(nil),       // 3: protocol.MessageHeader
-	(*ProduceMessage)(nil),      // 4: protocol.ProduceMessage
-	(*DataMessage)(nil),         // 5: protocol.DataMessage
-	(*ConsumeMessage)(nil),      // 6: protocol.ConsumeMessage
-	(*ResultMessage)(nil),       // 7: protocol.ResultMessage
-	(*HeartbeatMessage)(nil),    // 8: protocol.HeartbeatMessage
-	(*JoinMessage)(nil),         // 9: protocol.JoinMessage
-	(*JoinResponseMessage)(nil), // 10: protocol.JoinResponseMessage
-	(*ElectionMessage)(nil),     // 11: protocol.ElectionMessage
-	(*ReplicateMessage)(nil),    // 12: protocol.ReplicateMessage
-	(*NackMessage)(nil),         // 13: protocol.NackMessage
+	(MessageType)(0),                     // 0: protocol.MessageType
+	(NodeType)(0),                        // 1: protocol.NodeType
+	(ElectionMessage_Phase)(0),           // 2: protocol.ElectionMessage.Phase
+	(*MessageHeader)(nil),                // 3: protocol.MessageHeader
+	(*ProduceMessage)(nil),               // 4: protocol.ProduceMessage
+	(*DataMessage)(nil),                  // 5: protocol.DataMessage
+	(*ConsumeMessage)(nil),               // 6: protocol.ConsumeMessage
+	(*ResultMessage)(nil),                // 7: protocol.ResultMessage
+	(*SubscribeMessage)(nil),             // 8: protocol.SubscribeMessage
+	(*HeartbeatMessage)(nil),             // 9: protocol.HeartbeatMessage
+	(*JoinMessage)(nil),                  // 10: protocol.JoinMessage
+	(*JoinResponseMessage)(nil),          // 11: protocol.JoinResponseMessage
+	(*ElectionMessage)(nil),              // 12: protocol.ElectionMessage
+	(*ReplicateMessage)(nil),             // 13: protocol.ReplicateMessage
+	(*ReplicateAckMessage)(nil),          // 14: protocol.ReplicateAckMessage
+	(*NackMessage)(nil),                  // 15: protocol.NackMessage
+	(*BrokerInfo)(nil),                   // 16: protocol.BrokerInfo
+	(*ProducerInfo)(nil),                 // 17: protocol.ProducerInfo
+	(*ConsumerInfo)(nil),                 // 18: protocol.ConsumerInfo
+	(*StreamAssignment)(nil),             // 19: protocol.StreamAssignment
+	(*RegistrySnapshot)(nil),             // 20: protocol.RegistrySnapshot
+	(*ClusterStateSnapshot)(nil),         // 21: protocol.ClusterStateSnapshot
+	(*LogEntry)(nil),                     // 22: protocol.LogEntry
+	(*TopicLogEntries)(nil),              // 23: protocol.TopicLogEntries
+	(*StateExchangeMessage)(nil),         // 24: protocol.StateExchangeMessage
+	(*StateExchangeResponseMessage)(nil), // 25: protocol.StateExchangeResponseMessage
+	(*ViewInstallMessage)(nil),           // 26: protocol.ViewInstallMessage
+	(*ViewInstallAckMessage)(nil),        // 27: protocol.ViewInstallAckMessage
+	(*ViewInfo)(nil),                     // 28: protocol.ViewInfo
+	(*ReassignBrokerMessage)(nil),        // 29: protocol.ReassignBrokerMessage
+	nil,                                  // 30: protocol.ElectionMessage.RingParticipantAddrsEntry
+	nil,                                  // 31: protocol.RegistrySnapshot.BrokersEntry
+	nil,                                  // 32: protocol.ClusterStateSnapshot.BrokersEntry
+	nil,                                  // 33: protocol.ClusterStateSnapshot.ProducersEntry
+	nil,                                  // 34: protocol.ClusterStateSnapshot.ConsumersEntry
+	nil,                                  // 35: protocol.ClusterStateSnapshot.StreamsEntry
+	nil,                                  // 36: protocol.StateExchangeResponseMessage.LogOffsetsEntry
+	nil,                                  // 37: protocol.ViewInstallMessage.AgreedLogOffsetsEntry
 }
 var file_messages_proto_depIdxs = []int32{
 	0,  // 0: protocol.MessageHeader.type:type_name -> protocol.MessageType
@@ -1023,18 +2458,42 @@ var file_messages_proto_depIdxs = []int32{
 	3,  // 3: protocol.DataMessage.header:type_name -> protocol.MessageHeader
 	3,  // 4: protocol.ConsumeMessage.header:type_name -> protocol.MessageHeader
 	3,  // 5: protocol.ResultMessage.header:type_name -> protocol.MessageHeader
-	3,  // 6: protocol.HeartbeatMessage.header:type_name -> protocol.MessageHeader
-	3,  // 7: protocol.JoinMessage.header:type_name -> protocol.MessageHeader
-	3,  // 8: protocol.JoinResponseMessage.header:type_name -> protocol.MessageHeader
-	3,  // 9: protocol.ElectionMessage.header:type_name -> protocol.MessageHeader
-	2,  // 10: protocol.ElectionMessage.phase:type_name -> protocol.ElectionMessage.Phase
-	3,  // 11: protocol.ReplicateMessage.header:type_name -> protocol.MessageHeader
-	3,  // 12: protocol.NackMessage.header:type_name -> protocol.MessageHeader
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	3,  // 6: protocol.SubscribeMessage.header:type_name -> protocol.MessageHeader
+	3,  // 7: protocol.HeartbeatMessage.header:type_name -> protocol.MessageHeader
+	3,  // 8: protocol.JoinMessage.header:type_name -> protocol.MessageHeader
+	3,  // 9: protocol.JoinResponseMessage.header:type_name -> protocol.MessageHeader
+	3,  // 10: protocol.ElectionMessage.header:type_name -> protocol.MessageHeader
+	2,  // 11: protocol.ElectionMessage.phase:type_name -> protocol.ElectionMessage.Phase
+	30, // 12: protocol.ElectionMessage.ring_participant_addrs:type_name -> protocol.ElectionMessage.RingParticipantAddrsEntry
+	3,  // 13: protocol.ReplicateMessage.header:type_name -> protocol.MessageHeader
+	3,  // 14: protocol.ReplicateAckMessage.header:type_name -> protocol.MessageHeader
+	3,  // 15: protocol.NackMessage.header:type_name -> protocol.MessageHeader
+	31, // 16: protocol.RegistrySnapshot.brokers:type_name -> protocol.RegistrySnapshot.BrokersEntry
+	32, // 17: protocol.ClusterStateSnapshot.brokers:type_name -> protocol.ClusterStateSnapshot.BrokersEntry
+	33, // 18: protocol.ClusterStateSnapshot.producers:type_name -> protocol.ClusterStateSnapshot.ProducersEntry
+	34, // 19: protocol.ClusterStateSnapshot.consumers:type_name -> protocol.ClusterStateSnapshot.ConsumersEntry
+	35, // 20: protocol.ClusterStateSnapshot.streams:type_name -> protocol.ClusterStateSnapshot.StreamsEntry
+	22, // 21: protocol.TopicLogEntries.entries:type_name -> protocol.LogEntry
+	3,  // 22: protocol.StateExchangeMessage.header:type_name -> protocol.MessageHeader
+	3,  // 23: protocol.StateExchangeResponseMessage.header:type_name -> protocol.MessageHeader
+	36, // 24: protocol.StateExchangeResponseMessage.log_offsets:type_name -> protocol.StateExchangeResponseMessage.LogOffsetsEntry
+	23, // 25: protocol.StateExchangeResponseMessage.topic_logs:type_name -> protocol.TopicLogEntries
+	3,  // 26: protocol.ViewInstallMessage.header:type_name -> protocol.MessageHeader
+	37, // 27: protocol.ViewInstallMessage.agreed_log_offsets:type_name -> protocol.ViewInstallMessage.AgreedLogOffsetsEntry
+	23, // 28: protocol.ViewInstallMessage.merged_logs:type_name -> protocol.TopicLogEntries
+	3,  // 29: protocol.ViewInstallAckMessage.header:type_name -> protocol.MessageHeader
+	3,  // 30: protocol.ReassignBrokerMessage.header:type_name -> protocol.MessageHeader
+	1,  // 31: protocol.ReassignBrokerMessage.client_type:type_name -> protocol.NodeType
+	16, // 32: protocol.RegistrySnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
+	16, // 33: protocol.ClusterStateSnapshot.BrokersEntry.value:type_name -> protocol.BrokerInfo
+	17, // 34: protocol.ClusterStateSnapshot.ProducersEntry.value:type_name -> protocol.ProducerInfo
+	18, // 35: protocol.ClusterStateSnapshot.ConsumersEntry.value:type_name -> protocol.ConsumerInfo
+	19, // 36: protocol.ClusterStateSnapshot.StreamsEntry.value:type_name -> protocol.StreamAssignment
+	37, // [37:37] is the sub-list for method output_type
+	37, // [37:37] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_messages_proto_init() }
@@ -1048,7 +2507,7 @@ func file_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_messages_proto_rawDesc), len(file_messages_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   11,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

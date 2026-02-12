@@ -1,0 +1,47 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# SLOT 1 - Parallel Testing Environment
+# Uses unique VM names and IPs to avoid conflicts with other slots
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/ubuntu2204"
+
+  # Increase SSH timeout
+  config.ssh.connect_timeout = 300
+
+  # Shared folder
+  config.vm.synced_folder "../../..", "/vagrant/logstream"
+
+  # VM resources
+  config.vm.provider "libvirt" do |lv|
+    lv.memory = "1024"
+    lv.cpus = 1
+  end
+
+  # Leader VM - Slot 1
+  config.vm.define "leader" do |leader|
+    leader.vm.hostname = "logstream-leader-s1"
+    leader.vm.network "private_network",
+      ip: "192.168.101.10",
+      libvirt__forward_mode: "none"
+    leader.vm.provision "shell", path: "../../vagrant/provision.sh"
+  end
+
+  # Follower 1 VM - Slot 1
+  config.vm.define "broker1" do |broker|
+    broker.vm.hostname = "logstream-broker1-s1"
+    broker.vm.network "private_network",
+      ip: "192.168.101.20",
+      libvirt__forward_mode: "none"
+    broker.vm.provision "shell", path: "../../vagrant/provision.sh"
+  end
+
+  # Follower 2 VM - Slot 1
+  config.vm.define "broker2" do |broker|
+    broker.vm.hostname = "logstream-broker2-s1"
+    broker.vm.network "private_network",
+      ip: "192.168.101.30",
+      libvirt__forward_mode: "none"
+    broker.vm.provision "shell", path: "../../vagrant/provision.sh"
+  end
+end

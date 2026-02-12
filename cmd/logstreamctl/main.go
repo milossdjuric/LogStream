@@ -1,0 +1,1559 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
+)
+
+const (
+	stateDir     = ".logstream"
+	pidsDir      = "pids"
+	logsDir      = "logs"
+	stateFile    = "processes.json"
+	version      = "1.0.0"
+)
+
+type ProcessInfo struct {
+	Name      string    `json:"name"`
+	Type      string    `json:"type"` // broker, producer, consumer
+	PID       int       `json:"pid"`
+	Address   string    `json:"address,omitempty"`   // For brokers
+	Leader    string    `json:"leader,omitempty"`    // For clients
+	Topic     string    `json:"topic,omitempty"`     // For clients
+	StartedAt time.Time `json:"started_at"`
+	Args      []string  `json:"args"` // Original arguments
+}
+
+type State struct {
+	Processes map[string]*ProcessInfo `json:"processes"`
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	cmd := os.Args[1]
+
+	switch cmd {
+	case "start":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: logstreamctl start <broker|producer|consumer> [options]")
+			os.Exit(1)
+		}
+		handleStart(os.Args[2], os.Args[3:])
+
+	case "stop":
+		handleStop(os.Args[2:])
+
+	case "list":
+		handleList()
+
+	case "logs":
+		handleLogs(os.Args[2:])
+
+	case "status":
+		handleStatus(os.Args[2:])
+
+	case "election":
+		handleElection(os.Args[2:])
+
+	case "config":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: logstreamctl config <init|show>")
+			os.Exit(1)
+		}
+		handleConfig(os.Args[2])
+
+	case "help", "--help", "-h":
+		printUsage()
+
+	case "version", "--version", "-v":
+		fmt.Printf("logstreamctl version %s\n", version)
+
+	default:
+		fmt.Printf("Unknown command: %s\n", cmd)
+		printUsage()
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Println("logstreamctl - LogStream Cluster Management Tool")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  logstreamctl <command> [options]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  start broker   Start a broker node")
+	fmt.Println("  start producer Start a producer client")
+	fmt.Println("  start consumer Start a consumer client")
+	fmt.Println("  stop <name>    Stop a process by name")
+	fmt.Println("  stop --all     Stop all managed processes")
+	fmt.Println("  list           List all managed processes")
+	fmt.Println("  logs <name>    View logs for a process")
+	fmt.Println("  status         Show status of local processes")
+	fmt.Println("  election <name> Trigger election on a broker")
+	fmt.Println("  config init    Initialize state directory")
+	fmt.Println("  config show    Show state directory path")
+	fmt.Println("  help           Show this help")
+	fmt.Println("  version        Show version")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  # Initialize (first time)")
+	fmt.Println("  logstreamctl config init")
+	fmt.Println()
+	fmt.Println("  # Start a broker (auto-detect IP, use port 8001)")
+	fmt.Println("  logstreamctl start broker --name node1")
+	fmt.Println()
+	fmt.Println("  # Start a broker on specific port (auto-detect IP)")
+	fmt.Println("  logstreamctl start broker --name node2 --address 8002")
+	fmt.Println()
+	fmt.Println("  # Start a broker with explicit address")
+	fmt.Println("  logstreamctl start broker --name node1 --address 192.168.1.10:8001")
+	fmt.Println()
+	fmt.Println("  # Start a follower broker with explicit leader (bypasses broadcast)")
+	fmt.Println("  # Use this when WiFi AP isolation blocks broadcast discovery")
+	fmt.Println("  logstreamctl start broker --name node2 --address 192.168.1.11:8001 --leader 192.168.1.10:8001")
+	fmt.Println()
+	fmt.Println("  # Start a producer (auto-discover cluster)")
+	fmt.Println("  logstreamctl start producer --name prod1 --topic logs --rate 5")
+	fmt.Println()
+	fmt.Println("  # Start a producer with explicit leader")
+	fmt.Println("  logstreamctl start producer --name prod1 --leader 192.168.1.10:8001 --topic logs")
+	fmt.Println()
+	fmt.Println("  # Start a consumer (auto-discover cluster)")
+	fmt.Println("  logstreamctl start consumer --name cons1 --topic logs")
+	fmt.Println()
+	fmt.Println("  # Start a consumer with explicit leader")
+	fmt.Println("  logstreamctl start consumer --name cons1 --leader 192.168.1.10:8001 --topic logs")
+	fmt.Println()
+	fmt.Println("  # List running processes")
+	fmt.Println("  logstreamctl list")
+	fmt.Println()
+	fmt.Println("  # Stop a process")
+	fmt.Println("  logstreamctl stop node1")
+	fmt.Println()
+	fmt.Println("  # View logs")
+	fmt.Println("  logstreamctl logs node1 --follow")
+}
+
+func handleStart(processType string, args []string) {
+	switch processType {
+	case "broker":
+		startBroker(args)
+	case "producer":
+		startProducer(args)
+	case "consumer":
+		startConsumer(args)
+	default:
+		fmt.Printf("Unknown process type: %s\n", processType)
+		fmt.Println("Valid types: broker, producer, consumer")
+		os.Exit(1)
+	}
+}
+
+func startBroker(args []string) {
+	// Parse flags
+	name := ""
+	address := ""
+	multicast := "239.0.0.1:9999"
+	broadcastPort := "8888"
+	leaderAddress := "" // Optional: bypass broadcast discovery
+	maxRecords := 0
+	brokerHBInterval := 0
+	clientHBInterval := 0
+	brokerTimeout := 0
+	clientTimeout := 0
+	followerHBInterval := 0
+	suspicionTimeout := 0
+	failureTimeout := 0
+	background := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name", "-n":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--address", "-a":
+			if i+1 < len(args) {
+				address = args[i+1]
+				i++
+			}
+		case "--multicast", "-m":
+			if i+1 < len(args) {
+				multicast = args[i+1]
+				i++
+			}
+		case "--broadcast-port", "-b":
+			if i+1 < len(args) {
+				broadcastPort = args[i+1]
+				i++
+			}
+		case "--leader", "-l":
+			if i+1 < len(args) {
+				leaderAddress = args[i+1]
+				i++
+			}
+		case "--max-records":
+			if i+1 < len(args) {
+				maxRecords, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--broker-hb-interval":
+			if i+1 < len(args) {
+				brokerHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--client-hb-interval":
+			if i+1 < len(args) {
+				clientHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--broker-timeout":
+			if i+1 < len(args) {
+				brokerTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--client-timeout":
+			if i+1 < len(args) {
+				clientTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--follower-hb-interval":
+			if i+1 < len(args) {
+				followerHBInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--suspicion-timeout":
+			if i+1 < len(args) {
+				suspicionTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--failure-timeout":
+			if i+1 < len(args) {
+				failureTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--help", "-h":
+			fmt.Println("Start a broker node")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  logstreamctl start broker [options]")
+			fmt.Println()
+			fmt.Println("Options:")
+			fmt.Println("  --name, -n              Process name (required)")
+			fmt.Println("  --address, -a           Node address IP:PORT (default: auto-detect:8001)")
+			fmt.Println("                          Can also specify just port: --address 8002")
+			fmt.Println("  --multicast, -m         Multicast group (default: 239.0.0.1:9999)")
+			fmt.Println("  --broadcast-port, -b    Broadcast port (default: 8888)")
+			fmt.Println("  --leader, -l            Explicit leader address (bypasses broadcast discovery)")
+			fmt.Println("                          Use when broadcast doesn't work (e.g., WiFi AP isolation)")
+			fmt.Println("  --max-records           Max records per topic log (default: 10000, 0 = unlimited)")
+			fmt.Println("  --broker-hb-interval    Leader->follower heartbeat interval in seconds (default: 5)")
+			fmt.Println("  --client-hb-interval    Leader->client heartbeat interval in seconds (default: 10)")
+			fmt.Println("  --broker-timeout        Dead broker removal timeout in seconds (default: 30)")
+			fmt.Println("  --client-timeout        Dead client removal timeout in seconds (default: 30)")
+			fmt.Println("  --follower-hb-interval  Follower->leader heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --suspicion-timeout     Leader suspicion timeout in seconds (default: 10)")
+			fmt.Println("  --failure-timeout       Leader failure timeout in seconds (default: 15)")
+			os.Exit(0)
+		}
+	}
+
+	if name == "" {
+		fmt.Println("Error: --name is required")
+		os.Exit(1)
+	}
+
+	// Auto-detect IP if address not provided
+	if address == "" {
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Error: --address not provided and auto-detection failed: %v\n", err)
+			fmt.Println("Please specify --address explicitly")
+			os.Exit(1)
+		}
+		// Find an available port starting from 8001
+		port := findAvailablePort(detectedIP, 8001)
+		address = fmt.Sprintf("%s:%d", detectedIP, port)
+		fmt.Printf("Auto-detected address: %s\n", address)
+	} else if !strings.Contains(address, ":") {
+		// If only port provided, auto-detect IP
+		detectedIP, err := autoDetectIP()
+		if err != nil {
+			fmt.Printf("Error: auto-detection failed: %v\n", err)
+			os.Exit(1)
+		}
+		// Check if the specified port is available, if not find next available
+		specifiedPort, _ := strconv.Atoi(address)
+		port := findAvailablePort(detectedIP, specifiedPort)
+		if port != specifiedPort {
+			fmt.Printf("Port %d is in use, using port %d instead\n", specifiedPort, port)
+		}
+		address = fmt.Sprintf("%s:%d", detectedIP, port)
+		fmt.Printf("Auto-detected address: %s\n", address)
+	} else {
+		// Full address provided, check if port is available
+		host, portStr, _ := net.SplitHostPort(address)
+		specifiedPort, _ := strconv.Atoi(portStr)
+		if !isPortAvailable(host, specifiedPort) {
+			port := findAvailablePort(host, specifiedPort)
+			fmt.Printf("Port %d is in use, using port %d instead\n", specifiedPort, port)
+			address = fmt.Sprintf("%s:%d", host, port)
+		}
+	}
+
+	// Check if name already exists
+	state := loadState()
+	if _, exists := state.Processes[name]; exists {
+		if isProcessRunning(state.Processes[name].PID) {
+			fmt.Printf("Error: process '%s' is already running (PID %d)\n", name, state.Processes[name].PID)
+			os.Exit(1)
+		}
+		// Process exists but not running, clean it up
+		delete(state.Processes, name)
+	}
+
+	// Find the logstream binary
+	binary := findBinary("logstream")
+	if binary == "" {
+		fmt.Println("Error: 'logstream' binary not found")
+		fmt.Println("Build it with: go build -o logstream main.go")
+		os.Exit(1)
+	}
+
+	// Prepare environment
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("NODE_ADDRESS=%s", address))
+	env = append(env, fmt.Sprintf("MULTICAST_GROUP=%s", multicast))
+	env = append(env, fmt.Sprintf("BROADCAST_PORT=%s", broadcastPort))
+	if leaderAddress != "" {
+		env = append(env, fmt.Sprintf("LEADER_ADDRESS=%s", leaderAddress))
+		fmt.Printf("Using explicit leader: %s (broadcast discovery bypassed)\n", leaderAddress)
+	}
+	if maxRecords > 0 {
+		env = append(env, fmt.Sprintf("MAX_RECORDS_PER_TOPIC=%d", maxRecords))
+	}
+	if brokerHBInterval > 0 {
+		env = append(env, fmt.Sprintf("BROKER_HB_INTERVAL=%d", brokerHBInterval))
+	}
+	if clientHBInterval > 0 {
+		env = append(env, fmt.Sprintf("CLIENT_HB_INTERVAL=%d", clientHBInterval))
+	}
+	if brokerTimeout > 0 {
+		env = append(env, fmt.Sprintf("BROKER_TIMEOUT=%d", brokerTimeout))
+	}
+	if clientTimeout > 0 {
+		env = append(env, fmt.Sprintf("CLIENT_TIMEOUT=%d", clientTimeout))
+	}
+	if followerHBInterval > 0 {
+		env = append(env, fmt.Sprintf("FOLLOWER_HB_INTERVAL=%d", followerHBInterval))
+	}
+	if suspicionTimeout > 0 {
+		env = append(env, fmt.Sprintf("SUSPICION_TIMEOUT=%d", suspicionTimeout))
+	}
+	if failureTimeout > 0 {
+		env = append(env, fmt.Sprintf("FAILURE_TIMEOUT=%d", failureTimeout))
+	}
+
+	if background {
+		// Run in background
+		logFile := getLogPath(name)
+
+		lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Printf("Error creating log file: %v\n", err)
+			os.Exit(1)
+		}
+
+		cmd := exec.Command(binary)
+		cmd.Env = env
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+		cmd.Stdin = nil
+		// Set process group so it survives parent exit
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
+		if err := cmd.Start(); err != nil {
+			lf.Close()
+			fmt.Printf("Error starting broker: %v\n", err)
+			os.Exit(1)
+		}
+
+		lf.Close()
+
+		// Save process info
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "broker",
+			PID:       cmd.Process.Pid,
+			Address:   address,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+		state.Processes[name] = info
+		saveState(state)
+
+		// Write PID file
+		writePidFile(name, cmd.Process.Pid)
+
+		fmt.Printf("Started broker '%s' (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Printf("  Address:   %s\n", address)
+		fmt.Printf("  Multicast: %s\n", multicast)
+		fmt.Printf("  Logs:      %s\n", logFile)
+	} else {
+		// Run in foreground (default)
+		cmd := exec.Command(binary)
+		cmd.Env = env
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+
+		// Still save process info for tracking
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "broker",
+			PID:       0, // Will update after start
+			Address:   address,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+
+		fmt.Printf("Starting broker '%s' at %s\n", name, address)
+		fmt.Printf("  Multicast: %s\n", multicast)
+		fmt.Println("Press Ctrl+C to stop")
+		fmt.Println()
+
+		if err := cmd.Start(); err != nil {
+			fmt.Printf("Error starting broker: %v\n", err)
+			os.Exit(1)
+		}
+
+		info.PID = cmd.Process.Pid
+		state.Processes[name] = info
+		saveState(state)
+		writePidFile(name, cmd.Process.Pid)
+
+		// Wait for process to finish
+		cmd.Wait()
+
+		// Clean up when done
+		delete(state.Processes, name)
+		saveState(state)
+		removePidFile(name)
+	}
+}
+
+func startProducer(args []string) {
+	// Parse flags
+	name := ""
+	leader := ""
+	topic := "logs"
+	port := 0
+	address := ""
+	rate := 0
+	interval := 0
+	count := 0
+	message := "log message"
+	hbInterval := 0
+	hbTimeout := 0
+	reconnectAttempts := 0
+	reconnectDelay := 0
+	background := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name", "-n":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--leader", "-l":
+			if i+1 < len(args) {
+				leader = args[i+1]
+				i++
+			}
+		case "--topic", "-t":
+			if i+1 < len(args) {
+				topic = args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(args) {
+				port, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--address", "-a":
+			if i+1 < len(args) {
+				address = args[i+1]
+				i++
+			}
+		case "--rate", "-r":
+			if i+1 < len(args) {
+				rate, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--interval", "-i":
+			if i+1 < len(args) {
+				interval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--count", "-c":
+			if i+1 < len(args) {
+				count, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--message", "-m":
+			if i+1 < len(args) {
+				message = args[i+1]
+				i++
+			}
+		case "--hb-interval":
+			if i+1 < len(args) {
+				hbInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--hb-timeout":
+			if i+1 < len(args) {
+				hbTimeout, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-attempts":
+			if i+1 < len(args) {
+				reconnectAttempts, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-delay":
+			if i+1 < len(args) {
+				reconnectDelay, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--help", "-h":
+			fmt.Println("Start a producer client")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  logstreamctl start producer [options]")
+			fmt.Println()
+			fmt.Println("Options:")
+			fmt.Println("  --name, -n             Process name (required)")
+			fmt.Println("  --leader, -l           Leader address IP:PORT (optional - auto-discovers via broadcast)")
+			fmt.Println("  --topic, -t            Topic name (default: logs)")
+			fmt.Println("  --port, -p             Client TCP port (default: auto-assign from 9001+)")
+			fmt.Println("  --address, -a          Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
+			fmt.Println("  --rate, -r             Messages per second (default: 0 = interactive)")
+			fmt.Println("  --interval, -i         Interval between messages in ms (overrides --rate)")
+			fmt.Println("                         Example: --interval 2000 = 1 message every 2 seconds")
+			fmt.Println("  --count, -c            Total messages to send (default: 0 = unlimited)")
+			fmt.Println("  --message, -m          Message template (default: log message)")
+			fmt.Println("  --hb-interval          Heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --hb-timeout           Leader timeout in seconds before reconnect (default: 10)")
+			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
+			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
+			os.Exit(0)
+		}
+	}
+
+	if name == "" {
+		fmt.Println("Error: --name is required")
+		os.Exit(1)
+	}
+
+	// Auto-assign port if not specified (clients start from 9001 to avoid broker port range 8001+)
+	if port == 0 {
+		port = findAvailableClientPort(9001)
+		fmt.Printf("Auto-assigned port: %d\n", port)
+	}
+
+	// Check if name already exists
+	state := loadState()
+	if _, exists := state.Processes[name]; exists {
+		if isProcessRunning(state.Processes[name].PID) {
+			fmt.Printf("Error: process '%s' is already running (PID %d)\n", name, state.Processes[name].PID)
+			os.Exit(1)
+		}
+		delete(state.Processes, name)
+	}
+
+	// Find binary
+	binary := findBinary("producer")
+	if binary == "" {
+		fmt.Println("Error: 'producer' binary not found")
+		fmt.Println("Build it with: go build -o producer cmd/producer/main.go")
+		os.Exit(1)
+	}
+
+	// Build command args
+	cmdArgs := []string{
+		"-topic", topic,
+		"-port", strconv.Itoa(port),
+	}
+	if leader != "" {
+		cmdArgs = append(cmdArgs, "-leader", leader)
+	}
+	if address != "" {
+		cmdArgs = append(cmdArgs, "-address", address)
+	}
+	if interval > 0 {
+		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(interval))
+	} else if rate > 0 {
+		cmdArgs = append(cmdArgs, "-rate", strconv.Itoa(rate))
+	}
+	if count > 0 {
+		cmdArgs = append(cmdArgs, "-count", strconv.Itoa(count))
+	}
+	if message != "log message" {
+		cmdArgs = append(cmdArgs, "-message", message)
+	}
+	if hbInterval > 0 {
+		cmdArgs = append(cmdArgs, "-hb-interval", strconv.Itoa(hbInterval))
+	}
+	if hbTimeout > 0 {
+		cmdArgs = append(cmdArgs, "-hb-timeout", strconv.Itoa(hbTimeout))
+	}
+	if reconnectAttempts > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-attempts", strconv.Itoa(reconnectAttempts))
+	}
+	if reconnectDelay > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-delay", strconv.Itoa(reconnectDelay))
+	}
+
+	// Display leader info
+	leaderDisplay := leader
+	if leaderDisplay == "" {
+		leaderDisplay = "(auto-discover via broadcast)"
+	}
+
+	if background {
+		// Background mode - need rate or interval for non-interactive
+		if rate == 0 && interval == 0 {
+			fmt.Println("Warning: producer in background mode requires --rate or --interval")
+			fmt.Println("Setting --rate 1 (1 message/sec)")
+			rate = 1
+			cmdArgs = append(cmdArgs, "-rate", "1")
+		}
+
+		logFile := getLogPath(name)
+
+		lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Printf("Error creating log file: %v\n", err)
+			os.Exit(1)
+		}
+
+		cmd := exec.Command(binary, cmdArgs...)
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+		cmd.Stdin = nil
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
+		if err := cmd.Start(); err != nil {
+			lf.Close()
+			fmt.Printf("Error starting producer: %v\n", err)
+			os.Exit(1)
+		}
+
+		lf.Close()
+
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "producer",
+			PID:       cmd.Process.Pid,
+			Address:   fmt.Sprintf("port:%d", port),
+			Leader:    leader,
+			Topic:     topic,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+		state.Processes[name] = info
+		saveState(state)
+		writePidFile(name, cmd.Process.Pid)
+
+		fmt.Printf("Started producer '%s' (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Printf("  Port:   %d\n", port)
+		fmt.Printf("  Leader: %s\n", leaderDisplay)
+		fmt.Printf("  Topic:  %s\n", topic)
+		fmt.Printf("  Rate:   %d msg/sec\n", rate)
+		fmt.Printf("  Logs:   %s\n", logFile)
+	} else {
+		// Foreground mode (default)
+		cmd := exec.Command(binary, cmdArgs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "producer",
+			PID:       0,
+			Address:   fmt.Sprintf("port:%d", port),
+			Leader:    leader,
+			Topic:     topic,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+
+		fmt.Printf("Starting producer '%s' -> %s\n", name, leaderDisplay)
+		fmt.Printf("  Port:  %d\n", port)
+		fmt.Printf("  Topic: %s\n", topic)
+		fmt.Println("Press Ctrl+C to stop")
+		fmt.Println()
+
+		if err := cmd.Start(); err != nil {
+			fmt.Printf("Error starting producer: %v\n", err)
+			os.Exit(1)
+		}
+
+		info.PID = cmd.Process.Pid
+		state.Processes[name] = info
+		saveState(state)
+		writePidFile(name, cmd.Process.Pid)
+
+		cmd.Wait()
+
+		delete(state.Processes, name)
+		saveState(state)
+		removePidFile(name)
+	}
+}
+
+func startConsumer(args []string) {
+	// Parse flags
+	name := ""
+	leader := ""
+	topic := "logs"
+	port := 0
+	address := ""
+	analytics := true
+	windowSeconds := 0
+	intervalMs := 0
+	hbInterval := 0
+	reconnectAttempts := 0
+	reconnectDelay := 0
+	background := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--name", "-n":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--leader", "-l":
+			if i+1 < len(args) {
+				leader = args[i+1]
+				i++
+			}
+		case "--topic", "-t":
+			if i+1 < len(args) {
+				topic = args[i+1]
+				i++
+			}
+		case "--port", "-p":
+			if i+1 < len(args) {
+				port, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--address", "-a":
+			if i+1 < len(args) {
+				address = args[i+1]
+				i++
+			}
+		case "--analytics":
+			if i+1 < len(args) {
+				analytics = args[i+1] == "true"
+				i++
+			}
+		case "--no-analytics":
+			analytics = false
+		case "--window", "-w":
+			if i+1 < len(args) {
+				windowSeconds, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--interval":
+			if i+1 < len(args) {
+				intervalMs, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--hb-interval":
+			if i+1 < len(args) {
+				hbInterval, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-attempts":
+			if i+1 < len(args) {
+				reconnectAttempts, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--reconnect-delay":
+			if i+1 < len(args) {
+				reconnectDelay, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		case "--help", "-h":
+			fmt.Println("Start a consumer client")
+			fmt.Println()
+			fmt.Println("Usage:")
+			fmt.Println("  logstreamctl start consumer [options]")
+			fmt.Println()
+			fmt.Println("Options:")
+			fmt.Println("  --name, -n             Process name (required)")
+			fmt.Println("  --leader, -l           Leader address IP:PORT (optional - auto-discovers via broadcast)")
+			fmt.Println("  --topic, -t            Topic name (default: logs)")
+			fmt.Println("  --port, -p             Client TCP port (default: auto-assign from 9001+)")
+			fmt.Println("  --address, -a          Advertised IP (for WSL/NAT: set to Windows host LAN IP)")
+			fmt.Println("  --no-analytics         Disable analytics processing")
+			fmt.Println("  --window, -w           Analytics window in seconds (0 = broker default, typically 60)")
+			fmt.Println("  --interval             Analytics update interval in ms (0 = broker default, typically 1000)")
+			fmt.Println("  --hb-interval          Heartbeat interval in seconds (default: 2)")
+			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
+			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
+			os.Exit(0)
+		}
+	}
+
+	if name == "" {
+		fmt.Println("Error: --name is required")
+		os.Exit(1)
+	}
+
+	// Clients start from 9001 to avoid broker port range 8001+
+	if port == 0 {
+		port = findAvailableClientPort(9001)
+		fmt.Printf("Auto-assigned port: %d\n", port)
+	}
+
+	// Check if name already exists
+	state := loadState()
+	if _, exists := state.Processes[name]; exists {
+		if isProcessRunning(state.Processes[name].PID) {
+			fmt.Printf("Error: process '%s' is already running (PID %d)\n", name, state.Processes[name].PID)
+			os.Exit(1)
+		}
+		delete(state.Processes, name)
+	}
+
+	// Find binary
+	binary := findBinary("consumer")
+	if binary == "" {
+		fmt.Println("Error: 'consumer' binary not found")
+		fmt.Println("Build it with: go build -o consumer cmd/consumer/main.go")
+		os.Exit(1)
+	}
+
+	// Build command args
+	cmdArgs := []string{
+		"-topic", topic,
+		"-port", strconv.Itoa(port),
+	}
+	if leader != "" {
+		cmdArgs = append(cmdArgs, "-leader", leader)
+	}
+	if address != "" {
+		cmdArgs = append(cmdArgs, "-address", address)
+	}
+	if !analytics {
+		cmdArgs = append(cmdArgs, "-analytics=false")
+	}
+	if windowSeconds > 0 {
+		cmdArgs = append(cmdArgs, "-window", strconv.Itoa(windowSeconds))
+	}
+	if intervalMs > 0 {
+		cmdArgs = append(cmdArgs, "-interval", strconv.Itoa(intervalMs))
+	}
+	if hbInterval > 0 {
+		cmdArgs = append(cmdArgs, "-hb-interval", strconv.Itoa(hbInterval))
+	}
+	if reconnectAttempts > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-attempts", strconv.Itoa(reconnectAttempts))
+	}
+	if reconnectDelay > 0 {
+		cmdArgs = append(cmdArgs, "-reconnect-delay", strconv.Itoa(reconnectDelay))
+	}
+
+	// Display leader info
+	leaderDisplay := leader
+	if leaderDisplay == "" {
+		leaderDisplay = "(auto-discover via broadcast)"
+	}
+
+	if background {
+		logFile := getLogPath(name)
+
+		lf, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			fmt.Printf("Error creating log file: %v\n", err)
+			os.Exit(1)
+		}
+
+		cmd := exec.Command(binary, cmdArgs...)
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+		cmd.Stdin = nil
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
+		if err := cmd.Start(); err != nil {
+			lf.Close()
+			fmt.Printf("Error starting consumer: %v\n", err)
+			os.Exit(1)
+		}
+
+		lf.Close()
+
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "consumer",
+			PID:       cmd.Process.Pid,
+			Address:   fmt.Sprintf("port:%d", port),
+			Leader:    leader,
+			Topic:     topic,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+		state.Processes[name] = info
+		saveState(state)
+		writePidFile(name, cmd.Process.Pid)
+
+		fmt.Printf("Started consumer '%s' (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Printf("  Port:      %d\n", port)
+		fmt.Printf("  Leader:    %s\n", leaderDisplay)
+		fmt.Printf("  Topic:     %s\n", topic)
+		fmt.Printf("  Analytics: %v\n", analytics)
+		fmt.Printf("  Logs:      %s\n", logFile)
+	} else {
+		// Foreground mode (default)
+		cmd := exec.Command(binary, cmdArgs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+
+		info := &ProcessInfo{
+			Name:      name,
+			Type:      "consumer",
+			PID:       0,
+			Address:   fmt.Sprintf("port:%d", port),
+			Leader:    leader,
+			Topic:     topic,
+			StartedAt: time.Now(),
+			Args:      args,
+		}
+
+		fmt.Printf("Starting consumer '%s' -> %s\n", name, leaderDisplay)
+		fmt.Printf("  Port:      %d\n", port)
+		fmt.Printf("  Topic:     %s\n", topic)
+		fmt.Printf("  Analytics: %v\n", analytics)
+		fmt.Println("Press Ctrl+C to stop")
+		fmt.Println()
+
+		if err := cmd.Start(); err != nil {
+			fmt.Printf("Error starting consumer: %v\n", err)
+			os.Exit(1)
+		}
+
+		info.PID = cmd.Process.Pid
+		state.Processes[name] = info
+		saveState(state)
+		writePidFile(name, cmd.Process.Pid)
+
+		cmd.Wait()
+
+		delete(state.Processes, name)
+		saveState(state)
+		removePidFile(name)
+	}
+}
+
+func handleStop(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: logstreamctl stop <name> | --all")
+		os.Exit(1)
+	}
+
+	if args[0] == "--all" || args[0] == "-a" {
+		stopAll()
+	} else {
+		stopProcess(args[0])
+	}
+}
+
+func stopProcess(name string) {
+	state := loadState()
+
+	info, exists := state.Processes[name]
+	if !exists {
+		fmt.Printf("Process '%s' not found\n", name)
+		os.Exit(1)
+	}
+
+	if !isProcessRunning(info.PID) {
+		fmt.Printf("Process '%s' is not running (stale entry)\n", name)
+		delete(state.Processes, name)
+		saveState(state)
+		removePidFile(name)
+		return
+	}
+
+	process, err := os.FindProcess(info.PID)
+	if err != nil {
+		fmt.Printf("Error finding process: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Stopping '%s' (PID %d)...\n", name, info.PID)
+
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		fmt.Printf("Error sending SIGTERM: %v\n", err)
+		if err := process.Signal(syscall.SIGKILL); err != nil {
+			fmt.Printf("Error sending SIGKILL: %v\n", err)
+		}
+	}
+
+	done := make(chan bool, 1)
+	go func() {
+		for i := 0; i < 50; i++ { // 5 seconds
+			if !isProcessRunning(info.PID) {
+				done <- true
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		done <- false
+	}()
+
+	if <-done {
+		fmt.Printf("Stopped '%s'\n", name)
+	} else {
+		fmt.Printf("Process '%s' did not stop gracefully, sending SIGKILL\n", name)
+		process.Signal(syscall.SIGKILL)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	delete(state.Processes, name)
+	saveState(state)
+	removePidFile(name)
+}
+
+func stopAll() {
+	state := loadState()
+
+	if len(state.Processes) == 0 {
+		fmt.Println("No processes to stop")
+		return
+	}
+
+	fmt.Printf("Stopping %d processes...\n", len(state.Processes))
+
+	for name := range state.Processes {
+		stopProcess(name)
+	}
+
+	fmt.Println("All processes stopped")
+}
+
+func handleList() {
+	state := loadState()
+
+	if len(state.Processes) == 0 {
+		fmt.Println("No managed processes")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tTYPE\tSTATUS\tPID\tADDRESS/LEADER\tTOPIC\tUPTIME")
+
+	for _, info := range state.Processes {
+		status := "stopped"
+		uptime := "-"
+		if isProcessRunning(info.PID) {
+			status = "running"
+			uptime = formatDuration(time.Since(info.StartedAt))
+		}
+
+		addrOrLeader := info.Address
+		if addrOrLeader == "" {
+			addrOrLeader = info.Leader
+		}
+
+		topic := info.Topic
+		if topic == "" {
+			topic = "-"
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			info.Name, info.Type, status, info.PID, addrOrLeader, topic, uptime)
+	}
+
+	w.Flush()
+}
+
+func handleLogs(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: logstreamctl logs <name> [--follow]")
+		os.Exit(1)
+	}
+
+	name := args[0]
+	follow := false
+	lines := 50
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--follow", "-f":
+			follow = true
+		case "--lines", "-n":
+			if i+1 < len(args) {
+				lines, _ = strconv.Atoi(args[i+1])
+				i++
+			}
+		}
+	}
+
+	logFile := getLogPath(name)
+
+	if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		fmt.Printf("No logs found for '%s'\n", name)
+		fmt.Printf("Expected log file: %s\n", logFile)
+		os.Exit(1)
+	}
+
+	if follow {
+		// Use tail -f
+		cmd := exec.Command("tail", "-f", "-n", strconv.Itoa(lines), logFile)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		// Handle Ctrl+C gracefully
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt)
+
+		go func() {
+			<-sigChan
+			cmd.Process.Kill()
+		}()
+
+		fmt.Printf("Following logs for '%s' (Ctrl+C to stop)...\n\n", name)
+		cmd.Run()
+	} else {
+		// Just cat the last N lines
+		cmd := exec.Command("tail", "-n", strconv.Itoa(lines), logFile)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	}
+}
+
+func handleStatus(args []string) {
+	showCluster := false
+	leaderAddr := ""
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--cluster", "-c":
+			showCluster = true
+		case "--leader", "-l":
+			if i+1 < len(args) {
+				leaderAddr = args[i+1]
+				i++
+			}
+		}
+	}
+
+	// Local process status
+	state := loadState()
+
+	fmt.Println("LOCAL PROCESSES")
+	fmt.Println("===============")
+
+	if len(state.Processes) == 0 {
+		fmt.Println("No managed processes")
+	} else {
+		running := 0
+		stopped := 0
+
+		for _, info := range state.Processes {
+			if isProcessRunning(info.PID) {
+				running++
+			} else {
+				stopped++
+			}
+		}
+
+		fmt.Printf("Total:   %d\n", len(state.Processes))
+		fmt.Printf("Running: %d\n", running)
+		fmt.Printf("Stopped: %d\n", stopped)
+		fmt.Println()
+
+		handleList()
+	}
+
+	if showCluster {
+		fmt.Println()
+		fmt.Println("CLUSTER STATUS")
+		fmt.Println("==============")
+
+		if leaderAddr == "" {
+			// Try to find a running broker
+			for _, info := range state.Processes {
+				if info.Type == "broker" && isProcessRunning(info.PID) {
+					leaderAddr = info.Address
+					break
+				}
+			}
+		}
+
+		if leaderAddr == "" {
+			fmt.Println("No leader address specified and no local brokers running")
+			fmt.Println("Use: logstreamctl status --cluster --leader <ip:port>")
+		} else {
+			fmt.Printf("Querying cluster at %s...\n", leaderAddr)
+			fmt.Println("(Cluster status query not implemented yet)")
+			// TODO: Connect to broker and query cluster state
+		}
+	}
+}
+
+func handleElection(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: logstreamctl election <broker-name>")
+		os.Exit(1)
+	}
+
+	name := args[0]
+	state := loadState()
+
+	info, exists := state.Processes[name]
+	if !exists {
+		fmt.Printf("Process '%s' not found\n", name)
+		os.Exit(1)
+	}
+
+	if info.Type != "broker" {
+		fmt.Printf("Process '%s' is a %s, not a broker\n", name, info.Type)
+		os.Exit(1)
+	}
+
+	if !isProcessRunning(info.PID) {
+		fmt.Printf("Broker '%s' is not running\n", name)
+		os.Exit(1)
+	}
+
+	// Send SIGUSR1 to trigger election
+	process, err := os.FindProcess(info.PID)
+	if err != nil {
+		fmt.Printf("Error finding process: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Triggering election on '%s' (PID %d)...\n", name, info.PID)
+
+	if err := process.Signal(syscall.SIGUSR1); err != nil {
+		fmt.Printf("Error sending SIGUSR1: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Election signal sent")
+	fmt.Printf("Check logs with: logstreamctl logs %s --follow\n", name)
+}
+
+func handleConfig(subCmd string) {
+	switch subCmd {
+	case "init":
+		initStateDir()
+	case "show":
+		fmt.Printf("State directory: %s\n", getStateDir())
+		fmt.Printf("PID directory:   %s\n", filepath.Join(getStateDir(), pidsDir))
+		fmt.Printf("Log directory:   %s\n", filepath.Join(getStateDir(), logsDir))
+		fmt.Printf("State file:      %s\n", filepath.Join(getStateDir(), stateFile))
+	default:
+		fmt.Printf("Unknown config subcommand: %s\n", subCmd)
+		fmt.Println("Valid subcommands: init, show")
+	}
+}
+
+func initStateDir() {
+	dir := getStateDir()
+
+	dirs := []string{
+		dir,
+		filepath.Join(dir, pidsDir),
+		filepath.Join(dir, logsDir),
+	}
+
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			fmt.Printf("Error creating directory %s: %v\n", d, err)
+			os.Exit(1)
+		}
+	}
+
+	// Create empty state file if it doesn't exist
+	stateFilePath := filepath.Join(dir, stateFile)
+	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
+		state := &State{Processes: make(map[string]*ProcessInfo)}
+		saveState(state)
+	}
+
+	fmt.Printf("Initialized state directory: %s\n", dir)
+	fmt.Println()
+	fmt.Println("Directory structure:")
+	fmt.Printf("  %s/\n", dir)
+	fmt.Printf("  |-- %s/     (PID files)\n", pidsDir)
+	fmt.Printf("  |-- %s/    (log files)\n", logsDir)
+	fmt.Printf("  +-- %s (process metadata)\n", stateFile)
+}
+
+func getStateDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return stateDir
+	}
+	return filepath.Join(home, stateDir)
+}
+
+func getLogPath(name string) string {
+	return filepath.Join(getStateDir(), logsDir, name+".log")
+}
+
+func getPidPath(name string) string {
+	return filepath.Join(getStateDir(), pidsDir, name+".pid")
+}
+
+func loadState() *State {
+	stateFilePath := filepath.Join(getStateDir(), stateFile)
+
+	data, err := os.ReadFile(stateFilePath)
+	if err != nil {
+		// Return empty state
+		return &State{Processes: make(map[string]*ProcessInfo)}
+	}
+
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return &State{Processes: make(map[string]*ProcessInfo)}
+	}
+
+	if state.Processes == nil {
+		state.Processes = make(map[string]*ProcessInfo)
+	}
+
+	return &state
+}
+
+func saveState(state *State) {
+	stateFilePath := filepath.Join(getStateDir(), stateFile)
+
+	// Ensure directory exists
+	os.MkdirAll(filepath.Dir(stateFilePath), 0755)
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		fmt.Printf("Error marshaling state: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(stateFilePath, data, 0644); err != nil {
+		fmt.Printf("Error writing state file: %v\n", err)
+	}
+}
+
+func writePidFile(name string, pid int) {
+	pidPath := getPidPath(name)
+	os.MkdirAll(filepath.Dir(pidPath), 0755)
+	os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0644)
+}
+
+func removePidFile(name string) {
+	os.Remove(getPidPath(name))
+}
+
+func isProcessRunning(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+
+	// On Unix, FindProcess always succeeds. Use Signal(0) to check if process exists
+	err = process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+func findBinary(name string) string {
+	// First check current directory
+	if _, err := os.Stat(name); err == nil {
+		abs, _ := filepath.Abs(name)
+		return abs
+	}
+
+	// Check in PATH
+	path, err := exec.LookPath(name)
+	if err == nil {
+		return path
+	}
+
+	// Check in common locations
+	locations := []string{
+		filepath.Join(".", name),
+		filepath.Join("..", name),
+		filepath.Join("bin", name),
+	}
+
+	for _, loc := range locations {
+		if _, err := os.Stat(loc); err == nil {
+			abs, _ := filepath.Abs(loc)
+			return abs
+		}
+	}
+
+	return ""
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	return fmt.Sprintf("%dd%dh", days, hours)
+}
+
+func autoDetectIP() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	for _, iface := range interfaces {
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+
+			// Only use IPv4 private addresses
+			if ip4 := ip.To4(); ip4 != nil {
+				if isPrivateIP(ip4) {
+					return ip4.String(), nil
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no suitable network interface found")
+}
+
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, cidr := range privateRanges {
+		_, subnet, _ := net.ParseCIDR(cidr)
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func copyOutput(dst io.Writer, src io.Reader) {
+	io.Copy(dst, src)
+}
+
+func isPortAvailable(ip string, port int) bool {
+	addr := fmt.Sprintf("%s:%d", ip, port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
+}
+
+// isPortAvailableForClient checks both TCP and UDP on 0.0.0.0 (wildcard),
+// since clients bind UDP to 0.0.0.0:port which conflicts with any IP on that port.
+func isPortAvailableForClient(port int) bool {
+	// Check TCP on 0.0.0.0
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	tcpListener.Close()
+
+	// Check UDP on 0.0.0.0 (clients bind UDP here for heartbeats)
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return false
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return false
+	}
+	udpConn.Close()
+	return true
+}
+
+func findAvailablePort(ip string, startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		if isPortAvailable(ip, port) {
+			return port
+		}
+	}
+	// If no port found in range, return startPort and let it fail with a clear error
+	return startPort
+}
+
+func findAvailableClientPort(startPort int) int {
+	for port := startPort; port < startPort+100; port++ {
+		if isPortAvailableForClient(port) {
+			return port
+		}
+	}
+	return startPort
+}

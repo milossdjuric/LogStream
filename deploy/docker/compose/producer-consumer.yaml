@@ -1,0 +1,65 @@
+services:
+  leader:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ADDRESS=172.28.0.10:8001
+      - MULTICAST_GROUP=239.0.0.1:9999
+      - BROADCAST_PORT=8888
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.10
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z 172.28.0.10 8001 || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    labels:
+      - "logstream.test=producer-consumer"
+
+  producer:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile.producer
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.20
+    depends_on:
+      leader:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    command: sh -c "sleep 5 && ./producer"
+    labels:
+      - "logstream.test=producer-consumer"
+
+  consumer:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile.consumer
+    environment:
+      - LEADER_ADDRESS=172.28.0.10:8001
+      - TOPIC=test-logs
+    networks:
+      logstream-net:
+        ipv4_address: 172.28.0.30
+    depends_on:
+      leader:
+        condition: service_healthy
+    command: sh -c "sleep 5 && ./consumer"
+    labels:
+      - "logstream.test=producer-consumer"
+
+networks:
+  logstream-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
