@@ -255,8 +255,6 @@ func startBroker(args []string) {
 				failureTimeout, _ = strconv.Atoi(args[i+1])
 				i++
 			}
-		case "--background", "-bg":
-			background = true
 		case "--help", "-h":
 			fmt.Println("Start a broker node")
 			fmt.Println()
@@ -279,7 +277,6 @@ func startBroker(args []string) {
 			fmt.Println("  --follower-hb-interval  Follower->leader heartbeat interval in seconds (default: 2)")
 			fmt.Println("  --suspicion-timeout     Leader suspicion timeout in seconds (default: 10)")
 			fmt.Println("  --failure-timeout       Leader failure timeout in seconds (default: 15)")
-			fmt.Println("  --background, -bg       Run in background (default: foreground)")
 			os.Exit(0)
 		}
 	}
@@ -554,8 +551,6 @@ func startProducer(args []string) {
 				reconnectDelay, _ = strconv.Atoi(args[i+1])
 				i++
 			}
-		case "--background", "-bg":
-			background = true
 		case "--help", "-h":
 			fmt.Println("Start a producer client")
 			fmt.Println()
@@ -577,7 +572,6 @@ func startProducer(args []string) {
 			fmt.Println("  --hb-timeout           Leader timeout in seconds before reconnect (default: 10)")
 			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
 			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
-			fmt.Println("  --background, -bg      Run in background (requires --rate or --interval)")
 			os.Exit(0)
 		}
 	}
@@ -821,8 +815,6 @@ func startConsumer(args []string) {
 				reconnectDelay, _ = strconv.Atoi(args[i+1])
 				i++
 			}
-		case "--background", "-bg":
-			background = true
 		case "--help", "-h":
 			fmt.Println("Start a consumer client")
 			fmt.Println()
@@ -841,7 +833,6 @@ func startConsumer(args []string) {
 			fmt.Println("  --hb-interval          Heartbeat interval in seconds (default: 2)")
 			fmt.Println("  --reconnect-attempts   Max reconnection attempts (default: 10)")
 			fmt.Println("  --reconnect-delay      Delay between reconnection attempts in seconds (default: 5)")
-			fmt.Println("  --background, -bg      Run in background")
 			os.Exit(0)
 		}
 	}

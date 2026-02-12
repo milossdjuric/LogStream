@@ -173,16 +173,6 @@ The broker `--address` flag supports three formats:
 ./logstreamctl start broker --name node1 --address 172.28.226.255:8001
 ```
 
-**Run in background (daemon mode):**
-```bash
-./logstreamctl start broker --name node1 --background
-```
-
-**Background with explicit address:**
-```bash
-./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --background
-```
-
 **Custom multicast group:**
 ```bash
 ./logstreamctl start broker --name node1 --multicast 239.0.0.5:9999
@@ -205,7 +195,7 @@ The broker `--address` flag supports three formats:
 
 **Full options:**
 ```bash
-./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --multicast 239.0.0.1:9999 --broadcast-port 8888 --max-records 50000 --background
+./logstreamctl start broker --name node1 --address 172.28.226.255:8001 --multicast 239.0.0.1:9999 --broadcast-port 8888 --max-records 50000
 ```
 
 ### Multi-Broker Cluster (Same Machine)
@@ -238,7 +228,6 @@ The broker `--address` flag supports three formats:
 | `--follower-hb-interval` | | 2 | Follower->leader heartbeat interval in seconds |
 | `--suspicion-timeout` | | 10 | Leader suspicion timeout in seconds |
 | `--failure-timeout` | | 15 | Leader failure timeout in seconds |
-| `--background` | `-bg` | false | Run as daemon |
 
 ---
 
@@ -255,7 +244,6 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 | Auto rate | `--rate N` | Send N messages per second automatically |
 | Interval | `--interval N` | Send 1 message every N milliseconds (for slow rates) |
 | Limited count | `--count N` | Stop after sending N messages |
-| Background | `--background` | Run as daemon (requires --rate or --interval) |
 
 ### Producer Examples (Copy-Paste Ready)
 
@@ -304,11 +292,6 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 ./logstreamctl start producer --name prod1 --topic logs --rate 5 --message "sensor-data"
 ```
 
-**Background mode (daemon):**
-```bash
-./logstreamctl start producer --name prod1 --topic logs --rate 5 --background
-```
-
 **Custom heartbeat and reconnection timing:**
 ```bash
 ./logstreamctl start producer --name prod1 --topic logs --rate 5 --hb-interval 5 --hb-timeout 30 --reconnect-attempts 20 --reconnect-delay 2
@@ -323,7 +306,7 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 
 **Full options with explicit leader:**
 ```bash
-./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --port 8002 --rate 10 --count 1000 --message "log-entry" --background
+./logstreamctl start producer --name prod1 --leader 172.28.226.255:8001 --topic logs --port 8002 --rate 10 --count 1000 --message "log-entry"
 ```
 
 ### Producer Options Reference
@@ -343,7 +326,6 @@ Producers discover the cluster leader automatically via **UDP broadcast on port 
 | `--hb-timeout` | | 10 | Leader timeout in seconds before reconnect |
 | `--reconnect-attempts` | | 10 | Max reconnection attempts |
 | `--reconnect-delay` | | 5 | Delay between reconnection attempts in seconds |
-| `--background` | `-bg` | false | Run as daemon |
 
 ### Rate vs Interval
 
@@ -374,7 +356,6 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 | Raw data | `--no-analytics` | Receive raw data only |
 | Custom window | `--window N` | Analytics window in seconds (0 = broker default) |
 | Custom interval | `--interval N` | Analytics update interval in ms (0 = broker default) |
-| Background | `--background` | Run as daemon |
 
 ### Consumer Examples (Copy-Paste Ready)
 
@@ -393,19 +374,9 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 ./logstreamctl start consumer --name cons1 --leader 172.28.226.255:8001 --topic logs
 ```
 
-**Background mode (daemon):**
-```bash
-./logstreamctl start consumer --name cons1 --topic logs --background
-```
-
 **Custom analytics window (30s) and update interval (2s):**
 ```bash
 ./logstreamctl start consumer --name cons1 --topic logs --window 30 --interval 2000
-```
-
-**Background without analytics:**
-```bash
-./logstreamctl start consumer --name cons1 --topic logs --no-analytics --background
 ```
 
 **Custom heartbeat and reconnection timing:**
@@ -435,7 +406,6 @@ Consumers discover the cluster leader automatically via **UDP broadcast on port 
 | `--hb-interval` | | 2 | Heartbeat interval in seconds |
 | `--reconnect-attempts` | | 10 | Max reconnection attempts |
 | `--reconnect-delay` | | 5 | Delay between reconnection attempts in seconds |
-| `--background` | `-bg` | false | Run as daemon |
 
 ---
 
@@ -530,13 +500,19 @@ cons1   consumer  running  12347   172.28.226.255:8001  logs    5m25s
 ./logstreamctl start consumer --name cons1 --topic logs
 ```
 
-### Example 3: Background Daemons (UDP Broadcast Discovery)
+### Example 3: Multiple Producers and Consumers (UDP Broadcast Discovery)
 
 ```bash
-# Start everything in background (all discover via UDP broadcast)
-./logstreamctl start broker --name node1 --background
-./logstreamctl start producer --name prod1 --topic logs --rate 5 --background
-./logstreamctl start consumer --name cons1 --topic logs --background
+# Terminal 1 - Broker
+./logstreamctl start broker --name node1
+
+# Terminal 2 - Multiple Producers
+./logstreamctl start producer --name prod1 --topic logs --rate 5
+./logstreamctl start producer --name prod2 --topic metrics --rate 10
+
+# Terminal 3 - Multiple Consumers
+./logstreamctl start consumer --name cons1 --topic logs
+./logstreamctl start consumer --name cons2 --topic metrics
 
 # Check status
 ./logstreamctl list
